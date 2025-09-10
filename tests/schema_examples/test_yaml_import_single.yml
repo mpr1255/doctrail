@@ -1,0 +1,11 @@
+# Test YAML import functionality with single enrichment
+database: placeholder
+default_model: gpt-4o-mini
+
+sql_queries:
+  all_docs: |
+    SELECT rowid, sha1, * FROM documents
+    ORDER BY rowid
+
+enrichments:
+  - !import single_field/classify_language.yml

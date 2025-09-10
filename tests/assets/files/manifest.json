@@ -1,0 +1,32 @@
+{
+  "test_document.txt": {
+    "source": "internal_test",
+    "author": "Test Author",
+    "category": "testing",
+    "priority": 1
+  },
+  "test_document.md": {
+    "source": "markdown_test",
+    "author": "Documentation Team",
+    "version": "1.0",
+    "tags": "test,markdown"
+  },
+  "hppsubjectsections.docx": {
+    "department": "Research",
+    "project_id": "HPP-001",
+    "confidential": false,
+    "year": 2023
+  },
+  "Advanced Political Text Analysis - Feb 2023.pdf": {
+    "course": "Political Science",
+    "semester": "Spring 2023",
+    "instructor": "Dr. Smith",
+    "topic": "Text Analysis"
+  },
+  "[claude.ai] 2025.05.14—Claude.mht": {
+    "source_url": "https://claude.ai",
+    "conversation_date": "2025-05-14",
+    "ai_model": "Claude",
+    "exported": true
+  }
+}

@@ -1,0 +1,12 @@
+# Test YAML imports with Chinese documents
+database: ../../assets/test.db
+default_model: gpt-4o-mini
+
+sql_queries:
+  chinese_docs: |
+    SELECT rowid, sha1, * FROM documents
+    WHERE raw_content LIKE '%中国%' OR raw_content LIKE '%中國%'
+    LIMIT 5
+
+enrichments:
+  - !import ../multi_field/extract_entities.yml

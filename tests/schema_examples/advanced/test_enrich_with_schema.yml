@@ -1,0 +1,27 @@
+# Test schema validation with enum and language requirements
+database: placeholder  # Will be replaced by test runner
+default_model: gpt-4o-mini
+
+sql_queries:
+  all_docs: |
+    SELECT rowid, sha1, * FROM documents
+    ORDER BY rowid
+
+enrichments:
+  - name: validate_red_cross_fund
+    description: "Validate Red Cross fund records"
+    model: gpt-4o-mini
+    input:
+      query: all_docs
+      input_columns: ["raw_content"]
+    output_table: red_cross_validation
+    schema:
+      valid_record: {enum: ["yes", "no"]}
+      fund_name: {type: "string"}
+      total_amount: {type: "number", minimum: 0}
+      families_helped: {type: "integer", minimum: 0}
+      evidence_zh: {type: "string", lang: "zh"}
+      evidence_en: {type: "string", lang: "en"}
+    prompt: |
+      Determine if this document contains valid Red Cross fund information.
+      Extract fund details if present.

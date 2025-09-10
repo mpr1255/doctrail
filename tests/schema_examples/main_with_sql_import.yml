@@ -1,0 +1,17 @@
+# Main configuration with both enrichment and SQL query imports
+database: placeholder
+default_model: gpt-4o-mini
+
+# Import SQL queries from separate file
+sql_queries:
+  !import sql_queries.yml
+  
+  # Can also define queries inline
+  all_docs: |
+    SELECT rowid, sha1, * FROM documents
+    ORDER BY rowid
+
+# Import enrichments
+enrichments:
+  - !import enrichments/classify_language.yml
+  - !import enrichments/validate_content.yml

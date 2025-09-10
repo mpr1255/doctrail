@@ -1,0 +1,36 @@
+name: multi_table_review
+description: "Review and refine extraction using data from multiple tables"
+model: gpt-4o
+input:
+  query: docs_with_entities
+  input_columns:
+    # From original documents table
+    - "documents.raw_content:1000"
+    - "documents.filename"
+    # From extracted_entities table (created by extract_entities enrichment)
+    - "extracted_entities.organizations"
+    - "extracted_entities.locations"
+    - "extracted_entities.key_terms"
+    - "extracted_entities.entity_count"
+output_table: reviewed_entities  # REQUIRED for multi-field
+schema:
+  organizations: {type: "array", items: {type: "string"}, maxItems: 10}
+  locations: {type: "array", items: {type: "string", lang: "zh"}, maxItems: 5}
+  key_terms: {type: "array", items: {type: "string"}, maxItems: 15}
+  entity_count: {type: "integer", minimum: 0}
+  quality_score: {type: "float", minimum: 0.0, maximum: 1.0}
+  corrections_made: {type: "string", maxLength: 500}
+prompt: |
+  Review this entity extraction from a previous model:
+  
+  Previously extracted:
+  - Organizations: {organizations}
+  - Locations: {locations}
+  - Key terms: {key_terms}
+  - Total entities: {entity_count}
+  
+  Re-analyze the original text and:
+  1. Correct any extraction errors
+  2. Add any missed entities
+  3. Rate extraction quality (0-1)
+  4. Explain corrections made

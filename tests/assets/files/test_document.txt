@@ -1,0 +1,7 @@
+This is a test text document for verifying that .txt files are processed correctly.
+
+It contains multiple lines and should be read directly as plain text.
+
+The extraction method should be "direct_text_read" and the content should be stored in a single row in the database.
+
+Special characters: 测试中文字符 and émojis 🎉 should be handled properly.

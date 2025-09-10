@@ -1,0 +1,3 @@
+# Test basic document ingestion
+_test_type: ingest
+table: documents

@@ -1,0 +1,11 @@
+# SQL queries that can be imported
+sql_queries:
+  compensation_docs: |
+    SELECT rowid, sha1, * FROM documents
+    WHERE raw_content LIKE '%补偿%' OR raw_content LIKE '%救助%'
+    ORDER BY rowid
+  
+  recent_docs: |
+    SELECT rowid, sha1, * FROM documents
+    WHERE date_created > date('now', '-30 days')
+    ORDER BY date_created DESC

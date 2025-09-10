@@ -1,0 +1,14 @@
+# Test YAML import functionality
+database: placeholder
+default_model: gpt-4o-mini
+
+# SQL queries can be defined here
+sql_queries:
+  all_docs: |
+    SELECT rowid, sha1, * FROM documents
+    ORDER BY rowid
+
+# Import enrichments from separate files
+enrichments:
+  - !import single_field/classify_language.yml
+  - !import single_field/validate_content.yml

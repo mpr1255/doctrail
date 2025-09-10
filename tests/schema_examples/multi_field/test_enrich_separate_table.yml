@@ -1,0 +1,32 @@
+# Test enrichment that writes to a separate output table
+database: placeholder  # Will be replaced by test runner
+default_model: gpt-4o-mini
+
+sql_queries:
+  all_docs: |
+    SELECT rowid, sha1, * FROM documents
+    ORDER BY rowid
+
+enrichments:
+  - name: extract_payments
+    description: "Extract payment information to separate table"
+    model: gpt-4o-mini
+    input:
+      query: all_docs
+      input_columns: ["raw_content"]
+    output_table: extracted_payments
+    schema:
+      payment_type: {enum: ["condolence_money", "relief_fund", "subsidy", "other"]}
+      amount: {type: "number", minimum: 0}
+      recipient_type: {enum: ["organ_donor_family", "other"]}
+      evidence_zh: {type: "string"}
+      evidence_en: {type: "string"}
+    prompt: |
+      Extract payment information from this Chinese document.
+      
+      Look for mentions of:
+      - 慰问金 (condolence money)
+      - 救助金 (relief fund)
+      - 补助 (subsidy)
+      
+      Extract the payment type, amount, and recipient.

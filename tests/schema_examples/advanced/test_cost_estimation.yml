@@ -1,0 +1,35 @@
+# Test cost estimation functionality
+database: ":memory:"
+
+sql_queries:
+  all_docs: |
+    SELECT sha1, filename, raw_content 
+    FROM documents
+
+enrichments:
+  - name: extract_with_cost_check
+    input:
+      query: all_docs
+      input_columns:
+        - "raw_content:500"
+    prompt: |
+      Analyze this document for cost estimation testing:
+      {raw_content}
+      
+      Extract key information.
+    output_table: cost_test_results
+    schema:
+      document_summary:
+        type: string
+        description: Brief summary of the document
+      key_topics:
+        type: array
+        items:
+          type: string
+        maxItems: 5
+        description: Main topics discussed
+      sentiment:
+        enum: ["positive", "negative", "neutral"]
+        description: Overall sentiment
+    models:
+      - "gpt-4o-mini"

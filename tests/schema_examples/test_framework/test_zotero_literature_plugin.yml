@@ -1,0 +1,74 @@
+# Test configuration for Zotero literature plugin
+_test_type: plugin
+plugin_name: zotero_literature
+table: literature
+
+# Mock data for the plugin test
+_mock_zotero_responses:
+  collections:
+    - key: "TEST_COLL_1"
+      data:
+        name: "Test Collection"
+  
+  items:
+    - key: "ITEM1"
+      data:
+        itemType: "journalArticle"
+        title: "Test Article 1"
+        abstractNote: "This is a test abstract for article 1"
+        date: "2024"
+        DOI: "10.1234/test1"
+        publicationTitle: "Test Journal"
+        creators:
+          - creatorType: "author"
+            firstName: "John"
+            lastName: "Doe"
+          - creatorType: "author"
+            firstName: "Jane"
+            lastName: "Smith"
+        citationKey: "doe2024test"
+        tags:
+          - tag: "test"
+          - tag: "research"
+    
+    - key: "ITEM2"
+      data:
+        itemType: "book"
+        title: "Test Book"
+        date: "2023"
+        creators:
+          - creatorType: "author"
+            name: "Single Author"
+    
+    - key: "ATTACHMENT1"
+      data:
+        itemType: "attachment"
+        title: "Should be skipped"
+  
+  attachments:
+    ITEM1:
+      - key: "ATT1"
+        data:
+          itemType: "attachment"
+          linkMode: "imported_file"
+          contentType: "application/pdf"
+          filename: "test_article.pdf"
+    
+    ITEM2:
+      - key: "ATT2"
+        data:
+          itemType: "attachment"
+          linkMode: "linked_file"  # Should be skipped
+          contentType: "application/pdf"
+          filename: "linked.pdf"
+
+# Expected behavior
+_expected_results:
+  success_count: 1  # Only ITEM1 has valid attachment
+  error_count: 0
+  skipped_count: 0
+  no_attachment_count: 1  # ITEM2 has no valid attachments
+
+# Mock file content for extraction
+_mock_file_content:
+  ATT1: "This is the full text content of the test article PDF."

@@ -1,0 +1,28 @@
+# Test array language validation features
+# This config tests language validation for both direct fields and array items
+database: placeholder  # Will be replaced by test runner
+default_model: gpt-4o-mini
+
+sql_queries:
+  all_docs: "SELECT rowid, sha1, * FROM documents ORDER BY rowid"
+
+enrichments:
+  - name: extract_multilingual_evidence
+    input:
+      query: all_docs
+      input_columns: ["filename", "raw_content"]
+    prompt: |
+      Extract evidence from this document. Provide:
+      - Chinese summary (in Chinese characters)  
+      - English evidence points (array of English text only)
+      - Chinese keywords (array of Chinese terms only)
+      
+      Document: {filename}
+      Content: {raw_content}
+    model: gpt-4o-mini
+    output_table: multilingual_evidence
+    schema:
+      summary_zh: {type: "string", lang: "zh"}
+      evidence_en: {type: "array", items: {type: "string", lang: "en"}, maxItems: 5}
+      keywords_zh: {type: "array", items: {type: "string", lang: "zh"}, maxItems: 10}
+      confidence: {type: "float", minimum: 0, maximum: 1}

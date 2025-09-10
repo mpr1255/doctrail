@@ -1,0 +1,18 @@
+name: extract_entities
+description: "Extract named entities from Chinese documents"
+model: gpt-4o-mini
+input:
+  query: chinese_docs
+  input_columns: ["raw_content:500"]  # Limit to first 500 chars
+output_table: extracted_entities  # REQUIRED for multi-field enrichments
+schema:
+  organizations: {type: "array", items: {type: "string"}, maxItems: 10}
+  locations: {type: "array", items: {type: "string", lang: "zh"}, maxItems: 5}
+  key_terms: {type: "array", items: {type: "string"}, maxItems: 15}
+  entity_count: {type: "integer", minimum: 0}
+prompt: |
+  Extract named entities from this Chinese text:
+  1. Organizations (up to 10)
+  2. Locations in Chinese (up to 5) 
+  3. Key terms (up to 15)
+  4. Total count of all entities found

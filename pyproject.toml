@@ -1,0 +1,54 @@
+[project]
+name = "doctrail"
+version = "0.1.0"
+description = "SQLite database enrichment tool using LLMs"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "typer",
+    "loguru",
+    "rich",
+    "pyzotero",
+    "sqlite-utils",
+    "sqlite-fts4",
+    "tiktoken",
+    "aiohttp",
+    "beautifulsoup4",
+    "chardet",
+    "PyYAML",
+    "openai",
+    "jinja2",
+    "mhtml-to-html-py",
+    "google-genai>=1.0.0",
+    "pypinyin>=0.54.0",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest",
+    "pytest-asyncio",
+    "pytest-mock",
+    "respx", # For mocking HTTP requests if needed later
+]
+
+# Optional: If you want to define scripts
+# [project.scripts]
+# zotero-ingest = "src.zotero_ingester:app" # Assuming you have a Typer app instance named 'app'
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/doctrail"]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3.5",
+    "pytest-asyncio>=0.26.0",
+    "pytest-mock>=3.14.0",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"

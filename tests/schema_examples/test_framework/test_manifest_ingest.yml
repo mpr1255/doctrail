@@ -1,0 +1,4 @@
+# Test manifest-based ingestion
+_test_type: ingest
+description: Test ingesting files with metadata from manifest.json
+table: documents

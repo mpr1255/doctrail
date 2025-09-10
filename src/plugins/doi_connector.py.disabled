@@ -1,0 +1,496 @@
+#!/usr/bin/env -S uv run
+# /// script
+# requires-python = ">=3.11,<3.12"
+# dependencies = [
+#     "sqlite-utils",
+#     "loguru",
+#     "rich",
+#     "tqdm",
+#     "aiofiles",
+# ]
+# ///
+
+"""DOI Connector Plugin - Ingests academic literature from DOI cache database"""
+
+import asyncio
+import hashlib
+import json
+import sqlite3
+import sys
+from datetime import datetime
+from pathlib import Path
+from typing import Dict, Optional, List, Tuple
+import os
+
+from loguru import logger
+from rich.console import Console
+from rich.panel import Panel
+from rich.table import Table
+from tqdm import tqdm
+import sqlite_utils
+
+# DOI Connector plugin disabled - needs refactoring for new extraction system
+print("❌ DOI Connector plugin temporarily disabled")
+print("   The plugin needs to be updated for the new extraction system")
+print("   without Tika dependencies.")
+sys.exit(1)
+
+console = Console()
+
+
+class Plugin:
+    """DOI Cache connector for ingesting academic literature"""
+    
+    @property
+    def name(self) -> str:
+        return "doi_connector"
+    
+    @property
+    def description(self) -> str:
+        return "Ingest academic literature from DOI resolver cache database"
+    
+    @property
+    def target_table(self) -> str:
+        return getattr(self, '_table_name', 'lit')  # Dynamic table name with default
+    
+    async def ingest(
+        self,
+        db_path: str,
+        config: Dict,
+        verbose: bool = False,
+        overwrite: bool = False,
+        limit: Optional[int] = None,
+        cache_db: Optional[str] = None,
+        project: Optional[str] = None,
+        table: Optional[str] = None,
+        **kwargs
+    ) -> Dict[str, int]:
+        """
+        Ingest documents from DOI cache database.
+        
+        Args:
+            db_path: Target database path (REQUIRED)
+            config: Configuration dictionary
+            cache_db: Path to cache.sqlite (REQUIRED)
+            project: Project name to filter by (REQUIRED)
+            table: Target table name (default: 'lit')
+            
+        Returns:
+            Stats dictionary
+        """
+        # Validate required parameters
+        if not cache_db:
+            raise ValueError(
+                "ERROR: --cache-db is required for the DOI connector.\n\n"
+                "Please specify the path to your DOI cache database.\n\n"
+                "Example:\n"
+                "  ./doctrail.py ingest --plugin doi_connector --cache-db ~/.config/doi_resolver/cache.sqlite "
+                "--project paying_for_organs --db-path ./lit.db\n"
+            )
+            
+        if not project:
+            raise ValueError(
+                "ERROR: --project is required for the DOI connector.\n\n"
+                "Please specify a project name to import documents for that project.\n\n"
+                "Example:\n"
+                "  ./doctrail.py ingest --plugin doi_connector --cache-db ~/.config/doi_resolver/cache.sqlite "
+                "--project paying_for_organs --db-path ./lit.db\n"
+            )
+        
+        # Set default table name
+        if not table:
+            table = "lit"
+        
+        # Override target_table property with CLI parameter
+        self._table_name = table
+        
+        # Set up logging
+        log_level = "DEBUG" if verbose else "INFO"
+        logger.remove()
+        logger.add(sys.stderr, level=log_level)
+            
+        logger.info(f"DOI Connector starting with cache DB: {cache_db}")
+        logger.info(f"Target table: {table}")
+        
+        # Check cache DB exists
+        if not Path(cache_db).exists():
+            raise FileNotFoundError(f"Cache database not found: {cache_db}")
+        
+        # Connect to cache database
+        cache_conn = sqlite3.connect(cache_db)
+        cache_cursor = cache_conn.cursor()
+        
+        # First, look up the project to get its ID
+        logger.info(f"Looking up project: {project}")
+        cache_cursor.execute("SELECT id FROM projects WHERE name = ?", (project,))
+        project_result = cache_cursor.fetchone()
+        
+        if not project_result:
+            # Get list of available projects for helpful error message
+            cache_cursor.execute("SELECT name FROM projects ORDER BY name")
+            available_projects = [row[0] for row in cache_cursor.fetchall()]
+            
+            error_msg = f"Project '{project}' not found in cache database.\n\n"
+            if available_projects:
+                error_msg += f"Available projects: {', '.join(available_projects)}"
+            else:
+                error_msg += "No projects found in the database."
+            
+            raise ValueError(error_msg)
+        
+        project_id = project_result[0]
+        logger.info(f"Found project ID: {project_id}")
+        
+        # Query to get high-quality validated files for this project
+        query = """
+            WITH ranked_files AS (
+                -- Get the best validated file per DOI (only high-quality files)
+                SELECT 
+                    dc.doi,
+                    dc.file_path,
+                    dc.file_type,
+                    dc.file_size,
+                    dc.bibtex_key,
+                    dc.bibtex_entry,
+                    dc.enriched_bibtex,
+                    dc.created_at,
+                    pd.bibtex_key as project_bibtex_key,
+                    dv.validation_score,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY dc.doi 
+                        ORDER BY
+                            CASE dc.file_type WHEN 'pdf' THEN 1 WHEN 'mhtml' THEN 2 ELSE 3 END,
+                            dv.validation_score DESC
+                    ) as rank_num
+                FROM doi_cache dc
+                JOIN projects_dois pd ON dc.doi = pd.doi
+                LEFT JOIN doi_validation dv ON (dc.doi || '#' || dc.file_type) = dv.doi
+                WHERE pd.project_id = ?
+                  AND (dv.validation_score >= 3 OR dv.validation_score IS NULL)  -- Allow NULL for backward compatibility
+                  AND dc.file_path NOT LIKE '%--FAILED%'  -- Exclude failed files
+            )
+            SELECT 
+                doi,
+                file_path,
+                file_type,
+                file_size,
+                COALESCE(project_bibtex_key, bibtex_key) as bibtex_key,
+                bibtex_entry,
+                enriched_bibtex,
+                created_at
+            FROM ranked_files 
+            WHERE rank_num = 1
+            ORDER BY created_at DESC
+        """
+        
+        if limit:
+            query += f" LIMIT {limit}"
+            
+        cache_cursor.execute(query, (project_id,))
+        rows = cache_cursor.fetchall()
+        
+        total_count = len(rows)
+        logger.info(f"Found {total_count} documents to process")
+        
+        # If no documents found, it might mean no DOIs for this project
+        if total_count == 0:
+            logger.warning(f"No documents found for project '{project}'.")
+            console.print(f"\n[yellow]⚠️  No documents found for project '{project}'[/yellow]")
+            console.print("[yellow]This could mean:[/yellow]")
+            console.print("[yellow]  - No DOIs have been added to this project[/yellow]")
+            console.print("[yellow]  - DOIs exist but have no cached files[/yellow]")
+            console.print("[yellow]  - DOIs exist but best_format doesn't match any cached files[/yellow]\n")
+        
+        # Show summary with validation info
+        console.print(Panel.fit(
+            f"[bold]DOI Connector - Academic Literature Ingestion[/bold]\n\n"
+            f"Source: [cyan]{cache_db}[/cyan]\n"
+            f"Target: [cyan]{db_path}[/cyan]\n"
+            f"Table: [cyan]{table}[/cyan]\n"
+            f"Documents: [cyan]{total_count}[/cyan] [dim](validated, score ≥3)[/dim]\n"
+            f"Project: [cyan]{project}[/cyan]\n"
+            f"Overwrite: [cyan]{'Yes' if overwrite else 'No'}[/cyan]",
+            title="📚 Literature Ingestion",
+            border_style="blue"
+        ))
+        
+        # Ensure target database schema
+        logger.info(f"Checking target database schema for table '{self.target_table}'")
+        if not self._ensure_lit_schema(db_path):
+            raise RuntimeError("Failed to ensure literature table schema")
+            
+        # Connect to target database
+        target_db = sqlite_utils.Database(db_path)
+        
+        # Process statistics with detailed tracking
+        success_count = 0
+        error_count = 0
+        skipped_count = 0
+        
+        # Track details for reporting
+        error_details = []
+        skipped_details = []
+        
+        # Process each document
+        with tqdm(total=total_count, desc="Processing documents") as pbar:
+            for row in rows:
+                # Unpack all fields from query
+                doi, file_path, file_type, file_size, bibtex_key, bibtex_entry, enriched_bibtex, created_at = row
+                pbar.set_description(f"Processing: {Path(file_path).name}")
+                
+                try:
+                    # File paths are absolute, use them directly
+                    full_path = file_path
+                    
+                    # Check if file exists
+                    if not Path(full_path).exists():
+                        logger.warning(f"File not found: {full_path}")
+                        error_details.append({
+                            'doi': doi,
+                            'bibtex_key': bibtex_key,
+                            'filename': Path(file_path).name,
+                            'reason': 'File not found',
+                            'path': full_path
+                        })
+                        error_count += 1
+                        pbar.update(1)
+                        continue
+                    
+                    # Calculate SHA1 from DOI (consistent identifier)
+                    sha1 = hashlib.sha1(doi.encode()).hexdigest()
+                    
+                    # Check if already exists
+                    existing = target_db[self.target_table].rows_where("sha1 = ?", [sha1])
+                    if list(existing) and not overwrite:
+                        logger.debug(f"Skipping existing DOI: {doi}")
+                        skipped_details.append({
+                            'doi': doi,
+                            'bibtex_key': bibtex_key,
+                            'filename': Path(file_path).name,
+                            'reason': 'Already exists (use --overwrite to replace)'
+                        })
+                        skipped_count += 1
+                        pbar.update(1)
+                        continue
+                    
+                    # Extract text content using Tika
+                    logger.debug(f"Extracting content from: {full_path}")
+                    _, content, metadata = await process_with_tika(full_path, sha1)
+                    
+                    # Extract bibliographic metadata - prefer enriched_bibtex, fallback to bibtex_entry
+                    title, authors, year, publication = self._extract_bibtex_metadata(
+                        enriched_bibtex or bibtex_entry
+                    )
+                    
+                    # Fallback to Tika metadata if bibtex didn't work
+                    if not title:
+                        title = metadata.get('dc:title', metadata.get('title', ''))
+                    if not authors:
+                        authors = metadata.get('dc:creator', metadata.get('Author', ''))
+                    
+                    # Prepare record for literature table
+                    record = {
+                        "sha1": sha1,
+                        "doi": doi,
+                        "file_path": full_path,
+                        "filename": Path(full_path).name,
+                        "file_extension": file_type,
+                        "file_size": file_size,
+                        "raw_content": content,
+                        "tika_metadata": json.dumps(metadata, ensure_ascii=False),
+                        "cache_created_at": created_at,
+                        "ingested_at": datetime.now().isoformat(),
+                        "project": project,
+                        # Bibliographic data from cache
+                        "bibtex_key": bibtex_key,
+                        "bibtex_entry": bibtex_entry,
+                        "enriched_bibtex": enriched_bibtex,
+                        # Metadata extracted from bibtex or document
+                        "title": title,
+                        "authors": authors,
+                        "year": year,
+                        "publication": publication,
+                        "abstract": self._extract_abstract(content, metadata)
+                    }
+                    
+                    # Insert or replace
+                    target_db[self.target_table].insert(record, replace=True)
+                    success_count += 1
+                    
+                except Exception as e:
+                    logger.error(f"Error processing DOI {doi}: {str(e)}")
+                    error_details.append({
+                        'doi': doi,
+                        'bibtex_key': bibtex_key,
+                        'filename': Path(file_path).name,
+                        'reason': f'Processing error: {str(e)}'
+                    })
+                    error_count += 1
+                
+                pbar.update(1)
+        
+        # Close connections
+        cache_conn.close()
+        
+        # Build detailed summary
+        summary_text = (
+            f"[bold]Ingestion Complete[/bold]\n\n"
+            f"Total Processed: [cyan]{total_count}[/cyan]\n"
+            f"Successful: [green]{success_count}[/green]\n"
+            f"Errors: [red]{error_count}[/red]\n"
+            f"Skipped: [yellow]{skipped_count}[/yellow]"
+        )
+        
+        # Add error details if any
+        if error_details:
+            summary_text += f"\n\n[red]Error Details:[/red]"
+            for error in error_details[:5]:  # Show first 5 errors
+                summary_text += f"\n• [red]{error['filename']}[/red] ({error['doi']})"
+                summary_text += f"\n  [dim]{error['reason']}[/dim]"
+            if len(error_details) > 5:
+                summary_text += f"\n[dim]... and {len(error_details) - 5} more errors[/dim]"
+        
+        # Add skipped details if any
+        if skipped_details:
+            summary_text += f"\n\n[yellow]Skipped Details:[/yellow]"
+            for skip in skipped_details[:5]:  # Show first 5 skipped
+                summary_text += f"\n• [yellow]{skip['filename']}[/yellow] ({skip['doi']})"
+                summary_text += f"\n  [dim]{skip['reason']}[/dim]"
+            if len(skipped_details) > 5:
+                summary_text += f"\n[dim]... and {len(skipped_details) - 5} more skipped[/dim]"
+        
+        # Final summary
+        console.print(Panel.fit(
+            summary_text,
+            title="✅ Complete",
+            border_style="green"
+        ))
+        
+        return {
+            "total": total_count,
+            "success_count": success_count,
+            "error_count": error_count,
+            "skipped_count": skipped_count,
+            "error_details": error_details,
+            "skipped_details": skipped_details
+        }
+    
+    def _ensure_lit_schema(self, db_path: str) -> bool:
+        """Ensure the literature table has the correct schema"""
+        try:
+            conn = sqlite3.connect(db_path)
+            cursor = conn.cursor()
+            
+            # Create table if not exists
+            cursor.execute(f"""
+                CREATE TABLE IF NOT EXISTS {self.target_table} (
+                    sha1 TEXT PRIMARY KEY,
+                    doi TEXT UNIQUE NOT NULL,
+                    bibtex_key TEXT,
+                    bibtex_entry TEXT,
+                    enriched_bibtex TEXT,
+                    file_path TEXT,
+                    filename TEXT,
+                    file_extension TEXT,
+                    file_size INTEGER,
+                    raw_content TEXT,
+                    tika_metadata JSON,
+                    project TEXT,
+                    cache_created_at TEXT,
+                    ingested_at TEXT,
+                    -- Additional literature-specific fields
+                    title TEXT,
+                    authors TEXT,
+                    year INTEGER,
+                    publication TEXT,
+                    abstract TEXT,
+                    keywords TEXT,
+                    -- Enrichment placeholders
+                    summary TEXT,
+                    relevance_score REAL
+                )
+            """)
+            
+            # Create indices
+            cursor.execute(f"CREATE INDEX IF NOT EXISTS idx_{self.target_table}_doi ON {self.target_table}(doi)")
+            cursor.execute(f"CREATE INDEX IF NOT EXISTS idx_{self.target_table}_project ON {self.target_table}(project)")
+            cursor.execute(f"CREATE INDEX IF NOT EXISTS idx_{self.target_table}_year ON {self.target_table}(year)")
+            cursor.execute(f"CREATE INDEX IF NOT EXISTS idx_{self.target_table}_bibtex_key ON {self.target_table}(bibtex_key)")
+            
+            conn.commit()
+            conn.close()
+            
+            logger.info(f"Literature table '{self.target_table}' schema ensured")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Failed to ensure schema: {str(e)}")
+            return False
+    
+    def _extract_abstract(self, content: str, metadata: Dict) -> Optional[str]:
+        """Extract abstract from document content or metadata"""
+        # First try metadata
+        abstract = metadata.get('abstract', metadata.get('description', ''))
+        if abstract:
+            return abstract
+        
+        # Try to find abstract in content
+        import re
+        
+        # Look for common abstract patterns
+        patterns = [
+            r'\bAbstract\b[\s\n]*([^\n]+(?:\n[^\n]+)*?)(?=\n\s*\n|\n\s*[A-Z][a-z]+\s*:)',
+            r'\bSUMMARY\b[\s\n]*([^\n]+(?:\n[^\n]+)*?)(?=\n\s*\n|\n\s*[A-Z][a-z]+\s*:)',
+        ]
+        
+        for pattern in patterns:
+            match = re.search(pattern, content, re.IGNORECASE | re.MULTILINE)
+            if match:
+                abstract = match.group(1).strip()
+                # Limit to reasonable length
+                if 50 <= len(abstract) <= 2000:
+                    return abstract
+        
+        return None
+    
+    def _extract_bibtex_metadata(self, bibtex: Optional[str]) -> Tuple[Optional[str], Optional[str], Optional[int], Optional[str]]:
+        """Extract metadata from bibtex entry"""
+        if not bibtex:
+            return None, None, None, None
+            
+        import re
+        
+        title = None
+        authors = None
+        year = None
+        publication = None
+        
+        # Extract title
+        title_match = re.search(r'title\s*=\s*{([^}]+)}', bibtex, re.IGNORECASE)
+        if title_match:
+            title = title_match.group(1).strip()
+        
+        # Extract author
+        author_match = re.search(r'author\s*=\s*{([^}]+)}', bibtex, re.IGNORECASE)
+        if author_match:
+            authors = author_match.group(1).strip()
+        
+        # Extract year
+        year_match = re.search(r'year\s*=\s*{?([0-9]{4})}?', bibtex, re.IGNORECASE)
+        if year_match:
+            try:
+                year = int(year_match.group(1))
+            except ValueError:
+                pass
+        
+        # Extract journal/publication
+        journal_match = re.search(r'journal\s*=\s*{([^}]+)}', bibtex, re.IGNORECASE)
+        if journal_match:
+            publication = journal_match.group(1).strip()
+        else:
+            # Try booktitle for conference papers
+            booktitle_match = re.search(r'booktitle\s*=\s*{([^}]+)}', bibtex, re.IGNORECASE)
+            if booktitle_match:
+                publication = booktitle_match.group(1).strip()
+        
+        return title, authors, year, publication 

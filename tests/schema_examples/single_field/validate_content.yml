@@ -1,0 +1,12 @@
+name: validate_content
+description: "Validate document content quality"
+input:
+  query: all_docs
+  input_columns: ["raw_content", "filename"]
+# Boolean format for single field
+schema:
+  content_valid: {type: "boolean"}
+prompt: |
+  Check if this document has valid, readable content.
+  Return 'true' if the document has valid, readable content.
+  Return 'false' if it's empty, corrupted, or unreadable.
