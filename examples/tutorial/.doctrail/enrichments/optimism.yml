@@ -1,0 +1,11 @@
+name: optimism
+description: Vague ICR demo optimism score over UN speech excerpts
+model: replay
+input:
+  query: un_speeches
+  input_columns: ["title", "country", "raw_content:2500"]
+prompt: |
+  How optimistic is this speech?
+  Return a score from 0 to 5.
+schema:
+  optimism: {type: "integer", minimum: 0, maximum: 5}

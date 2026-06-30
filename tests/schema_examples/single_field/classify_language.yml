@@ -1,0 +1,13 @@
+name: classify_language
+description: "Classify the language of the document"
+model: gpt-4o-mini
+input:
+  query: all_docs
+  input_columns: ["raw_content"]
+# Explicit enum declaration for clarity
+output_column: detected_language
+schema:
+  enum: ["english", "chinese", "mixed", "other"]
+prompt: |
+  Analyze this document and classify its primary language.
+  Return one of: english, chinese, mixed, or other.

@@ -1,0 +1,30 @@
+# Example Doctrail Server Configuration
+#
+# This file configures the multi-database server.
+# Run with: doctrail serve --config examples/doctrail-server.yaml
+
+server:
+  host: 0.0.0.0
+  port: 8000
+
+# Each database is specified as a directory path containing:
+# - *.db file (the SQLite database)
+# - Optional: doctrail.yaml (schema configuration)
+# - Optional: chroma_db/ (vector store for semantic search)
+# - Optional: help.md (database-specific documentation)
+
+databases:
+  # Example: Zotlit literature database
+  # literature: /path/to/zotlit/out
+
+  # Example: Doctrail primary sources database
+  # organs:
+  #   path: /path/to/organs
+  #   description: "China organ policy documents"
+  #   corpus_type: primary
+
+  # For testing, use a local test database
+  test:
+    path: ./tests/demo
+    description: "Test database for development"
+    corpus_type: general

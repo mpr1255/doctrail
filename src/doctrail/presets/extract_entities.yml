@@ -1,0 +1,34 @@
+name: extract_entities
+description: "Extract named entities (people, organizations, places)"
+input:
+  query: all_docs
+  # The prompt is the stable codebook. Per-row text is supplied through
+  # input_columns and truncated here.
+  input_columns: ["raw_content:3000"]
+schema:
+  people:
+    type: array
+    items:
+      type: string
+    maxItems: 10
+  organizations:
+    type: array
+    items:
+      type: string
+    maxItems: 10
+  places:
+    type: array
+    items:
+      type: string
+    maxItems: 10
+prompt: |
+  Extract the main named entities from the document.
+
+  Codebook:
+  - people: named individual persons. Include full names when available; do not include vague roles such as "the minister" unless the role is the only identifying label.
+  - organizations: named institutions, agencies, companies, parties, courts, NGOs, universities, publications, or other organized bodies.
+  - places: named countries, provinces, cities, districts, regions, landmarks, or geopolitical areas.
+
+  Include entities that are substantively relevant to the document's topic.
+  Exclude passing mentions, generic categories, dates, laws, slogans, and document titles unless they are also named organizations or places.
+  If no significant entity appears for a field, return an empty array for that field. Do not return null.

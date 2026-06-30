@@ -1,0 +1,11 @@
+name: country_stance
+description: ICR demo stance code over UN speech excerpts
+input:
+  query: un_speeches
+  input_columns: ["title", "country", "raw_content:2500"]
+prompt: |
+  Code the speaker's stance toward multilateral international cooperation in this excerpt.
+  Use supportive, critical, neutral, or mixed.
+schema:
+  stance: {enum: ["supportive", "critical", "neutral", "mixed"]}
+  rationale: {type: "string", maxLength: 160}

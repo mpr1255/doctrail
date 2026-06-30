@@ -1,0 +1,30 @@
+project_name: doctrail_tutorial
+database: ./out/database.db
+documents_path: ./data/
+default_model: replay
+default_table: documents
+
+sql_queries:
+  all_docs: |
+    SELECT rowid, sha1 FROM documents
+    ORDER BY filename
+  federalist_papers: |
+    SELECT rowid, sha1 FROM documents
+    WHERE filename LIKE 'federalist_%'
+    ORDER BY filename
+  un_speeches: |
+    SELECT rowid, sha1 FROM documents
+    WHERE filepath LIKE '%/un_speeches/%'
+    ORDER BY filename
+  gt_editorials: |
+    SELECT rowid, sha1 FROM documents
+    WHERE filename LIKE 'gt_%'
+    ORDER BY filename
+
+views:
+  priority_columns:
+    - filename
+    - title
+    - consensus_author
+    - paper_number
+    - country

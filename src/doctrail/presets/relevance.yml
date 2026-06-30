@@ -1,0 +1,24 @@
+name: relevance
+description: "Score how relevant this document is to the research topic"
+input:
+  query: all_docs
+  # Replace this generic prompt with a project-specific research question before
+  # using the score for analysis.
+  input_columns: ["raw_content:2000"]
+output_column: relevance_score
+schema:
+  type: integer
+  minimum: 1
+  maximum: 5
+prompt: |
+  Score how relevant this document is to academic research use.
+
+  Codebook:
+  1 = not relevant: unreadable, administrative noise, duplicate boilerplate, or no usable substantive content.
+  2 = weakly relevant: contains some factual information but little analysis, evidence, or research value.
+  3 = moderately relevant: has usable background, descriptive evidence, or clear topical material, but limited original analysis.
+  4 = strongly relevant: presents sustained analysis, evidence, methods, data, or argument that could support research.
+  5 = highly relevant: scholarly or research-grade source with original evidence, method, theory, or detailed analysis central to a research question.
+
+  Base the score on the document's substantive content, not length alone.
+  Return one integer from 1 to 5. Do not return null.

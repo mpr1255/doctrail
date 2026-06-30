@@ -1,0 +1,25 @@
+name: document_type
+description: "Classify document type (academic paper, news, report, etc.)"
+input:
+  query: all_docs
+  # Keep document text here, not interpolated into the prompt, so the codebook
+  # remains the same across rows.
+  input_columns: ["raw_content:2000"]
+output_column: document_type
+schema:
+  enum: ["academic_paper", "news_article", "government_report", "legal_document", "book_chapter", "opinion_piece", "data_report", "other"]
+prompt: |
+  Classify the document into exactly one document_type value.
+
+  Codebook:
+  - academic_paper: peer-reviewed journal article, conference paper, working paper, or scholarly preprint.
+  - news_article: reported journalism from a newspaper, magazine, wire service, broadcast site, or news website.
+  - government_report: official publication, white paper, policy notice, or administrative report from a government body.
+  - legal_document: legislation, regulation, court opinion, court filing, contract, legal brief, or other legal instrument.
+  - book_chapter: chapter, section, or excerpt from a book or edited volume.
+  - opinion_piece: editorial, op-ed, commentary, blog essay, speech, or advocacy essay whose main purpose is argument.
+  - data_report: statistical release, dataset documentation, survey topline, dashboard export, or report mainly presenting measurements.
+  - other: use only when none of the above categories fits.
+
+  If several categories are plausible, choose the document's primary genre.
+  Return one enum value only. Do not return null.

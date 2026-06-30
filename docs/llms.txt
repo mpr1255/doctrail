@@ -1,0 +1,1272 @@
+# Doctrail full manual
+
+Generated from mkdocs navigation by `scripts/build_llms_full.py`.
+
+<!-- quickstart.md -->
+
+# Quick start
+
+## Installation
+
+doctrail is built to be driven by an agent. The setup is short:
+
+1. Install [uv](https://docs.astral.sh/uv/) if you don't have it. uv is a Python package manager. It can be installed like this:
+
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh
+```
+
+(In general, read install scripts before piping them into a shell; this is the official uv installer.)
+
+2. Install doctrail: `uv tool install doctrail`
+
+3. Tell your agent to run `doctrail` — it prints how to operate itself and points to `doctrail agent`, the full operating guide.
+
+(Alternatively, don't install anything. Just point your agent at https://doctrail.dev/llms.txt and tell it you want to install uv, doctrail, and start enriching)
+
+The rest of this page explains what it gets you, and how to drive doctrail yourself if you prefer.
+
+## See it work, no API key needed
+
+Before pointing it at your own files or spending a cent, run the tutorial:
+
+```bash
+doctrail init test fed
+doctrail run test
+```
+
+This scaffolds a small corpus, a code book, and saved model responses into the current folder, then runs the whole pipeline offline. The [tutorial](tutorial.md) walks through exactly what just happened.
+
+## On your own files
+
+The assumption is simple: you are in a project folder, and your documents are in a subfolder of it.
+
+1. Set an API key for your provider, or let `doctrail init` create a `.env` for you.
+2. Run `doctrail init` in your project folder.
+3. Ingest your documents, write one code book, dry-run it, run a small sample, then open the database in any SQLite browser and look at the grid.
+
+```bash
+doctrail ingest --input-dir ./data --yes
+doctrail enrich <name> --dry-run
+doctrail enrich <name> --limit 5
+```
+
+If you would rather not learn the commands, you do not have to: install doctrail, then tell your agent to run `doctrail` and order it around.
+
+## Before real model calls
+
+The tutorial above uses saved replay responses, so it does not need an API key. Your own enrichments do. Put the key in the project folder's `.env` file, which is usually the cleanest option:
+
+```bash
+OPENAI_API_KEY=...
+ANTHROPIC_API_KEY=...
+GEMINI_API_KEY=...
+GOOGLE_API_KEY=...
+OPENROUTER_API_KEY=...
+```
+
+You only need the line for the provider you plan to use. Doctrail also reads keys already exported in your shell environment, so a global key in `~/.zshenv` or `~/.bashrc` is fine if you want one default across projects. A project `.env` is better when different projects should use different providers or accounts. Do not commit `.env`; `doctrail init` adds it to `.gitignore`.
+
+<!-- tutorial.md -->
+
+# Tutorial
+
+If you want to understand how to use doctrail, follow these instructions very carefully, on your own computer, in order. It is only by doing this slowly once that the mental model clicks.
+
+What you are about to do: turn a pile of documents into a grid, then add typed columns to that grid.[^column] "Typed" means each new column must take a certain kind of value — a number, a category ("enum"), a short string — and you decide which. You declare your schema (think: codebook) and the model fills the column in.
+
+## Setup
+
+After following the [quickstart](quickstart.md) to install doctrail, open your terminal, navigate to a fresh empty directory, and type:
+
+```bash
+doctrail init test
+```
+
+This sets up a hidden folder called `.doctrail` (configs live there), a folder called `./data` containing 18 Federalist files — 10 PDFs, 3 HTML files, 5 Word documents — plus UN speech excerpts, and `./out/database.db`, into which those files have already been ingested. The Federalist files include the twelve whose authorship was disputed for 150 years.
+
+Install a database viewer — [TablePlus](https://tableplus.com/) is good — and open `out/database.db`. You will see a `documents` table: one row per file, with the extracted text. Your documents are now in a grid.
+
+Alternatively, open your coding agent in the project folder, give it `https://doctrail.dev/llms.txt`, and tell it to get started. That page is the full agent-facing manual in one file: commands, YAML structure, schema examples, and the basic workflow.
+
+## First enrichment
+
+You would like to know things about these files. Who wrote each one — Hamilton, Madison, or Jay? And how hard does the author lean on fear of disunion — measured on a scale from 0 to 5, per a detailed codebook you supply?
+
+We have prepared this so you can test. Examine the file `.doctrail/enrichments/test.yml`. It declares three things: which rows to read, what to ask (the prompt — read it, it is a real codebook), and the shape every answer must take (the schema: an enum for the author, an integer 0–5 for the fear scale, a one-sentence rationale).
+
+Now type:
+
+```bash
+doctrail run test
+```
+
+This is not really calling a model. We saved the responses ahead of time and the config says `model: replay` — everything else is exactly what a real run does. (When you use your own API key later, the only thing that changes is the model name.)
+
+Open your database again. There is now a `_enrichments` table holding every answer, and a view called `v_documents_enriched`. That view is just a saved SQL query that lays the answers out wide: one row per document, one column per answer. You can change it, or get your agent to make more of them. Sort by `fear_of_disunion`. Check the model's authorship calls against the scholarly consensus column we included. Madison wins.
+
+If you had only wanted a taste, you could have run:
+
+```bash
+doctrail run test --limit 5
+```
+
+The word `test` here is just the name of the enrichment.
+
+## Second enrichment: your own quantity
+
+Maybe you want to measure some other political or sociological quantity. Define a schema for it and put it in `.doctrail/enrichments/`. We prepared a second one, `securitization.yml`, over a different corpus (`doctrail init test` also gave you `./data/un_speeches/` — excerpts from UN General Debate addresses). It asks a classic question from international relations: does the speaker frame some issue — migration, climate, a pandemic — as an existential threat that justifies extraordinary measures? This schema is more complex: it has a boolean gate, and the issue and intensity fields only mean something when the gate is true. Look at it, then:
+
+```bash
+doctrail run securitization --limit 100
+```
+
+The schema defines the model, the prompt, and how the model must respond. That "how" is the whole trick: the model is forced to return structured data matching your codebook, every time, and doctrail stores it where SQL can reach it.
+
+## Kicking it up a notch
+
+Two more ideas, because this is where the real power is.
+
+One document, many annotations. A speech mentions many countries. You don't want one answer per speech — you want one answer per country per speech. The `country_mentions.yml` enrichment shows the pattern: the schema returns a list of objects (country, stance), and doctrail explodes them so each mention becomes its own row in the review view.
+
+Multiple models as coders. Anything you measure with one model, you can measure with two and ask how much they agree. We canned responses from two different models:
+
+```bash
+doctrail icr country_stance -m replay/coder-a -m replay/coder-b
+doctrail icr-report --field stance
+```
+
+That prints Krippendorff's alpha and Cohen's kappa — the same intercoder reliability statistics you would report for human coders. If the models can't agree, your codebook is not as clear as you thought, exactly like with research assistants.
+
+To see what the numbers mean, we prepared two more, one at each extreme:
+
+```bash
+doctrail icr mentions_climate -m replay/coder-a -m replay/coder-b
+doctrail icr-report --field mentions_climate
+doctrail icr optimism -m replay/coder-a -m replay/coder-b
+doctrail icr-report --field optimism
+```
+
+The first asks whether the speech mentions climate change at all. Agreement is near perfect — of course it is: that is a fact of the text, and the codebook says exactly what counts. The second asks how "optimistic" the speech is, 0 to 5, and we wrote that prompt the way people write prompts when they are not thinking: no anchors, no examples, no definition of what a 3 is. Agreement collapses. Now look at why:
+
+```bash
+doctrail view pivot icr_optimism -e optimism --by-model
+```
+
+Open that view in your database browser and read the rows where the coders differ. The texts are not ambiguous — the codebook is: one coder read "optimism" as tone, the other as concrete commitments, and both readings are defensible because we never said which we meant. The fix is not a better model; it is a better codebook. That loop — code, measure agreement, read the disagreements, tighten the codebook — is the whole discipline, and it now costs minutes instead of a semester of research assistants.
+
+## Now do it on your files
+
+You have now created and run enrichments end to end: ingest, declare a codebook, enrich, inspect the view, scale up, validate.
+
+You are ready to open your own project folder in the terminal (how to use the terminal is another topic — if you can't do that, we cannot help you) and point doctrail at your files.
+
+However, the best way to use doctrail is with a terminal agent, like Claude Code or Codex. OpenAI and Anthropic also produce desktop software that bundles the same functionality. That way you barely need to know how terminals work, or you can skip the terminal entirely and use the GUI: open your agent in the right folder, and tell it to run `doctrail docs` — the full manual prints straight from the CLI, no internet required. Then order it around. A typical way of working: describe the outputs you want; the agent whips up a YAML template; you look at it; you tell the agent to run it with `--limit 10`; you open the database and look at the first `v_` view. If you like what you see, run the lot.
+
+You only need a pile of files you want the text out of, and questions you want answered about each one. Think in terms of the grid: your files are rows, and you are adding typed columns.
+
+One last practical point: the tutorial used replayed responses, so it did not need a provider key. Real enrichments do. Before you swap `model: replay` for OpenAI, Anthropic, Gemini, or OpenRouter, put the relevant key in your project `.env` file, or export it from your shell startup file such as `~/.zshenv` or `~/.bashrc`. The environment variable names are `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY` or `GOOGLE_API_KEY`, and `OPENROUTER_API_KEY`.
+
+[^column]: Note that, under the hood, doctrail does *not* simply add a column to your document grid. It is easy to think of it that way, but this would be the wrong data model. The reason is that your schema may become complicated, and you may want to add lots of enrichments of many forms. Perhaps one document needs multiple sets of the same type of enrichment. For example, it deals with country1, country2, and country3; in that case, your unit of analysis is not a document, but a "country-document", and you have a many-to-one relationship between countries and documents. What doctrail actually does is explained in [the data model](data-model.md).
+
+<!-- yaml.md -->
+
+# Code books
+
+A code book is the small YAML file you write for each enrichment: it says which rows to read, what to ask, and what shape the answer must take. (YAML is just the plain-text format it is written in — and you will usually have an agent write it.) A code book draws on four ideas: a database, SQL queries, enrichments, and schemas. The tested examples in `tests/schema_examples/` are the first source of truth. The snippets below are either copied from that corpus or smoke-checked with `doctrail enrich --dry-run`.
+
+## Minimal single-field enum
+
+Source: `tests/schema_examples/single_field/classify_language.yml`.
+
+```yaml
+name: classify_language
+description: "Classify the language of the document"
+model: gpt-4o-mini
+input:
+  query: all_docs
+  input_columns: ["raw_content"]
+output_column: detected_language
+schema:
+  enum: ["english", "chinese", "mixed", "other"]
+prompt: |
+  Analyze this document and classify its primary language.
+  Return one of: english, chinese, mixed, or other.
+```
+
+## Boolean field
+
+Source: `tests/schema_examples/single_field/validate_content.yml`.
+
+```yaml
+name: validate_content
+description: "Validate document content quality"
+input:
+  query: all_docs
+  input_columns: ["raw_content", "filename"]
+schema:
+  content_valid: {type: "boolean"}
+prompt: |
+  Check if this document has valid, readable content.
+  Return 'true' if the document has valid, readable content.
+  Return 'false' if it's empty, corrupted, or unreadable.
+```
+
+## Full current-path config
+
+Smoke-checked with `doctrail enrich --config config.yml packed_relevance --dry-run` and `doctrail enrich --config config.yml donor_payment --dry-run`.
+
+```yaml
+database: ./docs.db
+default_model: gpt-4o-mini
+default_table: documents
+project: docs_smoke
+
+sql_queries:
+  all_docs: |
+    SELECT rowid, sha1 FROM documents ORDER BY rowid
+  donor_docs: |
+    SELECT rowid, sha1 FROM documents
+    WHERE raw_content LIKE '%donor%'
+    ORDER BY rowid
+
+enrichments:
+  - name: packed_relevance
+    input:
+      query: all_docs
+      input_columns: ["filename", "raw_content:240"]
+    system_prompt: "Return only data matching the schema."
+    append_file: context.md
+    prompt: |
+      Mark each item true if it mentions donor-family payment evidence.
+    output_column: is_relevant
+    schema: {type: "boolean"}
+    dedupe_scope: query
+    key_column: sha1
+    pack_size: 5
+    pack_response_mode: selected_indexes
+
+  - name: donor_payment
+    input:
+      query: donor_docs
+      input_columns: ["filename", "raw_content:500"]
+    prompt: |
+      Extract donor-family payment evidence from the supplied document.
+      Use the filename only as source context.
+
+      Codebook:
+      - condolence_money: direct cash or ceremonial money given to a donor family.
+      - relief_fund: money from a relief, hardship, charity, or assistance fund.
+      - subsidy: public or institutional subsidy, reimbursement, or benefit.
+      - none: no donor-family payment evidence appears.
+
+      If payment_type is none, amount must be null and evidence should briefly say no payment evidence was found.
+      If the amount is not stated, amount must be null.
+    schema:
+      payment_type: {enum: ["condolence_money", "relief_fund", "subsidy", "none"]}
+      amount: {type: "float", minimum: 0, optional: true}
+      evidence: {type: "string", maxLength: 300}
+      tags: {enum_list: ["cash", "policy", "medical", "unclear"], max_items: 3}
+      evidence_items:
+        type: "array"
+        maxItems: 3
+        items:
+          type: "object"
+          properties:
+            phrase: {type: "string", maxLength: 120}
+            payment_kind: {enum: ["cash", "subsidy", "unknown"]}
+```
+
+## Prompt construction
+
+Write `prompt` as a codebook, not just a question. Define every enum value, anchor every numeric scale point, and state gate/null behavior for optional fields. For example, if `has_payment` is false, say which evidence fields must be null; if a score runs from 0 to 5, define 0, the middle, and 5.
+
+Keep the prompt as static as possible. Doctrail renders the prompt first, adds schema instructions there for JSON-mode paths or sends provider-native schema payloads as constant request structure, and appends per-row `input_columns` content last. OpenAI automatic prompt caching and Gemini implicit caching on Gemini 2.5 and newer models can bill repeated prefix tokens at cached-input rates when the provider reports a cache hit, though Gemini does not guarantee savings on every request. Doctrail does not currently set Anthropic `cache_control` markers.
+
+Prefer `input_columns` with `:N` truncation, such as `raw_content:3000`, over `{column}` interpolation inside the prompt. Placeholders still work, but a row-specific token breaks the shared prompt prefix there, so everything after it re-bills at full input price per row. If one is truly needed, put it at the very end.
+
+## Token economy pattern
+
+Use a cheap packed pass before an expensive extraction pass when most rows are likely irrelevant. In the example above, `packed_relevance` keeps each row small with `raw_content:240`, sends five rows per request with `pack_size: 5`, and uses `pack_response_mode: selected_indexes` so the model only has to name the relevant item indexes.
+
+That pattern is meant for triage. The packed pass writes a normalized answer for each input row, including false answers for rows the model does not select, so append mode can skip completed packed batches on rerun. Run the richer `donor_payment` extraction only on the narrowed SQL query or a saved relevance view.
+
+## Multi-table inputs
+
+Source: `tests/schema_examples/multi_field/multi_table_review.yml`, with its legacy `output_table` comment removed. The feature is the `table.column` input syntax.
+
+```yaml
+name: multi_table_review
+description: "Review and refine extraction using data from multiple tables"
+model: gpt-4o
+input:
+  query: docs_with_entities
+  input_columns:
+    - "documents.raw_content:1000"
+    - "documents.filename"
+    - "extracted_entities.organizations"
+    - "extracted_entities.locations"
+    - "extracted_entities.key_terms"
+    - "extracted_entities.entity_count"
+schema:
+  organizations: {type: "array", items: {type: "string"}, maxItems: 10}
+  locations: {type: "array", items: {type: "string", lang: "zh"}, maxItems: 5}
+  key_terms: {type: "array", items: {type: "string"}, maxItems: 15}
+  entity_count: {type: "integer", minimum: 0}
+  quality_score: {type: "float", minimum: 0.0, maximum: 1.0}
+  corrections_made: {type: "string", maxLength: 500}
+prompt: |
+  Review the previous entity extraction and source document supplied below.
+
+  Use the existing entity fields as draft model output, not as ground truth.
+  Correct omissions, remove spurious entities, and explain major corrections.
+```
+
+## Language validation
+
+Source: `tests/schema_examples/advanced/test_array_language_validation.yml`.
+
+```yaml title="fragment"
+schema:
+  summary_zh: {type: "string", lang: "zh"}
+  evidence_en: {type: "array", items: {type: "string", lang: "en"}, maxItems: 5}
+  keywords_zh: {type: "array", items: {type: "string", lang: "zh"}, maxItems: 10}
+  confidence: {type: "float", minimum: 0, maximum: 1}
+```
+
+## Multiple models
+
+Source: `tests/schema_examples/advanced/test_enrich_multi_model.yml`.
+
+```yaml
+enrichments:
+  - name: compare_models
+    description: "Compare outputs from multiple models"
+    model: ["gpt-4o-mini", "gpt-3.5-turbo"]
+    input:
+      query: all_docs
+      input_columns: ["raw_content:500"]
+    schema:
+      summary: {type: "string"}
+      sentiment: {enum: ["positive", "negative", "neutral"]}
+    prompt: |
+      Provide a brief summary of this document and determine its sentiment.
+      Summary should be one sentence only.
+```
+
+## YAML imports
+
+Source: `tests/schema_examples/test_yaml_imports.yml`.
+
+```yaml title="fragment"
+database: placeholder
+default_model: gpt-4o-mini
+
+sql_queries:
+  all_docs: |
+    SELECT rowid, sha1 FROM documents
+    ORDER BY rowid
+
+enrichments:
+  - !import single_field/classify_language.yml
+  - !import single_field/validate_content.yml
+```
+
+## Schema surface
+
+| Schema form | Status | Note |
+| --- | --- | --- |
+| `{type: "string"}` | stable | text |
+| `{type: "integer"}` | stable | whole numbers |
+| `{type: "float"}` | stable | decimals |
+| `{type: "boolean"}` | stable | true/false |
+| `{enum: [...]}` | stable | one choice |
+| `{enum_list: [...]}` | stable | several choices |
+| `{type: "array", items: ...}` | stable | JSON list |
+| `{type: "object", properties: ...}` | stable | JSON object |
+| `optional: true` | stable | allows null |
+| `nullable: true` | stable | alias |
+| `minimum`, `maximum` | stable | numeric bounds |
+| `minLength`, `maxLength`, `pattern` | stable | string bounds |
+| `minItems`, `maxItems` | stable | array bounds |
+| `lang: "zh"` or `lang: "en"` | stable | language check |
+| `convert: "chinese_to_pinyin"` | internal | plugin hook |
+| `{type: "number"}` | deprecated | use `float` |
+| `schema: [...]` | deprecated | use `enum` |
+
+## Config key stability
+
+Batch 4 inventory source: `.get(...)` and direct config reads across `src/doctrail/`.
+
+| Key | Status | Note |
+| --- | --- | --- |
+| `database` | stable | SQLite path |
+| `project` | stable | run tag |
+| `default_table` | stable | source fallback |
+| `default_model` | stable | model fallback |
+| `sql_queries` | stable | named SQL |
+| `enrichments` | stable | task list |
+| `name` | stable | enrichment id |
+| `input.query` | stable | named or inline SQL |
+| `input.input_columns` | stable | prompt payload |
+| `prompt` | stable | user prompt |
+| `system_prompt` | stable | system message |
+| `append_file` | stable | prompt appendix |
+| `model` | stable | one or many |
+| `models` | stable | model config map |
+| `schema` | stable | output contract |
+| `output_column` | stable | single-field alias |
+| `key_column` | stable | row key |
+| `dedupe_scope` | stable | query/prompt/enrichment |
+| `pack_size` | stable | sync grouping |
+| `pack_response_mode` | stable | exhaustive or selected_indexes |
+| `output_table` | deprecated | compatibility hint |
+| `dedupe-scope` | deprecated | use underscore |
+| `--execution-mode openai-batch` | deprecated | use `batch` |
+| `output_columns` | internal | derived/legacy |
+| `all_fields_optional` | internal | broad optionality |
+| `min_input_chars` | internal | skip threshold |
+| `truncate` | internal | prefer CLI flag |
+| `reasoning_effort` | internal | GPT-5 control |
+| `exports` | internal | old export path |
+| `output_naming` | internal | export filenames |
+| `views.priority_columns` | internal | view sorting |
+| `zotero` credentials | internal | ingest plugin |
+| `documents_path` | internal | init/ingest helper |
+
+<!-- data-model.md -->
+
+# Data model
+
+Source tables or views keep the original inputs. `documents` is the name of the default table that stores the primary corpus.
+
+The rows you want to enrich are defined in SQL:
+
+```yaml
+sql_queries:
+  all_docs: |
+    SELECT rowid, sha1 FROM documents
+```
+
+The query must return a stable key column. `sha1` is the default, because it assumes that the text came from a file (like a pdf, docx, html, etc.; and a sha1 is a unique identifier for a file). Use `key_column` when the source uses a different identifier.
+
+## Schema at a glance
+
+How the ledger links back to your documents. Joins are by the key column (default `sha1`); these are logical relationships, not enforced SQLite foreign keys. Views (`v_`) are not shown — they are pivots computed over `_enrichments`.
+
+```mermaid
+erDiagram
+    documents ||--o{ "_enrichments" : "key_value = sha1"
+    documents ||--o{ "_enrichment_audit" : "key_value = sha1"
+    "_enrichment_runs" ||--o{ "_enrichments" : run_id
+    "_enrichment_runs" ||--o{ "_enrichment_audit" : run_id
+    "_enrichment_runs" ||--o{ "_enrichment_run_items" : run_id
+    "_prompts" ||--o{ "_enrichments" : prompt_hash
+    documents {
+        text sha1 PK
+        text filename
+        text raw_content
+    }
+    "_enrichments" {
+        int id PK
+        text key_value FK
+        text enrichment_name
+        text field_name
+        text value
+        text value_type
+        text model
+        text prompt_hash
+        text run_id FK
+    }
+    "_enrichment_audit" {
+        int id PK
+        text key_value FK
+        text raw_json
+        text projection_json
+        text run_id FK
+    }
+    "_enrichment_runs" {
+        text run_id PK
+        text enrichment_name
+        text model
+        text dedupe_scope
+    }
+    "_enrichment_run_items" {
+        int id PK
+        text run_id FK
+        text key_value
+    }
+    "_prompts" {
+        text prompt_id PK
+        text prompt_hash
+        text prompt_text
+    }
+```
+
+## Normalized storage
+
+`_enrichment_audit` stores raw calls, raw responses, prompt/query provenance, errors, and the normalized projection payload used for rebuilds.
+
+`_enrichments` stores parsed fields in long form:
+
+```text
+key_value | enrichment_name | field_name | value | model | prompt_hash | run_id
+```
+
+The current row identity is key, enrichment name, field, model, and prompt hash. Upserts keep the current value for that identity while raw responses and projection payloads remain available in audit history; migration side tables preserve recoverable legacy duplicates.
+
+`_prompts` stores prompt text, system prompt text, model, and prompt hash.
+
+`_enrichment_runs` stores run-level provenance: query SQL/hash, model, prompt id, key column, source name, dedupe scope, project, and execution mode.
+
+`_enrichment_run_items` stores the exact input rowset for a run when materialization is enabled.
+
+Doctrail-managed tables use a leading underscore so they do not look like source tables. Schema migration 2 renames older `enrichments`, `enrichment_audit`, `enrichment_runs`, and related bookkeeping tables when it opens an existing database.
+
+## Dedupe
+
+Append mode skips rows only after a successful normalized result exists in `_enrichments` for the dedupe scope. Audit rows alone are not completion.
+
+Null answers are still answers. A parsed null is stored in `_enrichments` with `value_type = 'null'`, so append mode will not resubmit the same row for the same dedupe scope. View type detection ignores those null rows when deciding whether a field should be cast as numeric.
+
+Scopes:
+
+| Scope | Meaning |
+| --- | --- |
+| `query` | same enrichment, model, prompt, and query |
+| `prompt` | same enrichment, model, and prompt |
+| `enrichment` | same enrichment and model |
+| `name` | legacy alias for `enrichment` |
+
+## Views
+
+Run views show one persisted run in wide form. They are best for pilot runs, final runs, and human review.
+
+Pivot views build reusable wide analysis surfaces over normalized enrichments.
+
+Spec views are YAML-defined review surfaces. They can include source columns, enrichment columns, and one exploded JSON-array field.
+
+Final views and final tables layer human overrides or materialize an editable dataset without changing the original model run.
+
+Doctrail-managed views are prefixed with `v_`. For example, a run view is named like `v_run_<enrichment>_<timestamp>`, a spec view named `payments_review` is created as `v_payments_review`, and a final view is named like `v_final_<enrichment>_<timestamp>`.
+
+Model-collapse caveat: default views choose a current/latest value per field. Use `--by-model`, run-specific views, or explicit fields when comparing models.
+
+<!-- cli.md -->
+
+# CLI
+
+Generated from the live Click command tree.
+
+## doctrail
+
+```text
+Usage: doctrail [OPTIONS] COMMAND [ARGS]...
+
+  SQLite document enrichment with normalized outputs and derived views.
+
+  Agents: run `doctrail agent` for the full operating manual in one shot —
+  the mental model, the enrichment workflow, and troubleshooting. Start
+  there; everything else is discoverable from it.
+
+  Humans: `doctrail docs` prints the complete reference manual; this --help lists every command.
+
+Options:
+  --skip-requirements  Skip system requirements check
+  -v, --version        Show version
+  --help               Show this message and exit.
+
+Commands:
+  agent                Print the full agent guide: mental model, workflow, troubleshooting.
+  batch                Manage submitted provider batch enrichment runs.
+  diff-runs            Show where two runs disagree.
+  docs                 Print the packaged manual: everything an agent needs, in one file.
+  document             Get a single document by ID.
+  edit                 Open a project enrichment YAML in $EDITOR.
+  enrich               Enrich database content using LLM processing.
+  export               Export enriched data in various formats.
+  finalize             Materialize an editable final table from a run or existing review view.
+  icr                  Run intercoder reliability: enrich sampled rows with multiple models.
+  icr-report           Compute intercoder reliability statistics from enrichment codings.
+  ingest               Ingest documents from local directories, Zotero, or plugins.
+  init                 Initialize a doctrail project in the current directory.
+  list-enrichments     List all available enrichments from a configuration file.
+  models               List doctrail model identifiers by backend.
+  new                  Create a new custom enrichment.
+  overrides-export     Export one run to a CSV template for human review and overrides.
+  overrides-import     Import human overrides from a CSV and refresh the final merged view.
+  query                Query the database.
+  rebuild-enrichments  Rebuild _enrichments exactly from projection payloads stored in...
+  review               Validate enrichment accuracy with a web UI.
+  run                  Enrich database content using LLM processing.
+  runs                 List recent enrichment runs with persisted run IDs and summary counts.
+  serve                Start the Doctrail multi-database server.
+  skill                Print or install the packaged Doctrail skill.
+  sql                  Execute a read-only SQL query (SELECT only).
+  stats                Get database statistics.
+  view                 Manage derived views for reviewing and analyzing normalized enrichments.
+```
+
+### doctrail agent
+
+```text
+Usage: doctrail agent [OPTIONS]
+
+  Print the full agent guide: mental model, workflow, troubleshooting.
+
+  This is the entry point for an LLM or coding agent driving doctrail. It prints the complete
+  operating manual to stdout, no install required. Same content as `doctrail skill`; `agent` is the
+  name agents reach for.
+
+Options:
+  --help  Show this message and exit.
+```
+
+### doctrail batch
+
+```text
+Usage: doctrail batch [OPTIONS] COMMAND [ARGS]...
+
+  Manage submitted provider batch enrichment runs.
+
+Options:
+  --help  Show this message and exit.
+
+Commands:
+  cancel  Cancel all active batch shards for a run.
+  poll    Poll batch jobs once and reconcile any completed outputs.
+  watch   Poll until a batch-backed run is fully reconciled.
+```
+
+### doctrail batch cancel
+
+```text
+Usage: doctrail batch cancel [OPTIONS]
+
+  Cancel all active batch shards for a run.
+
+Options:
+  --db-path TEXT  Path to SQLite database
+  --run-id TEXT   Run ID to cancel  [required]
+  --help          Show this message and exit.
+```
+
+### doctrail batch poll
+
+```text
+Usage: doctrail batch poll [OPTIONS]
+
+  Poll batch jobs once and reconcile any completed outputs.
+
+Options:
+  --db-path TEXT  Path to SQLite database
+  --run-id TEXT   Poll only one run ID
+  --help          Show this message and exit.
+```
+
+### doctrail batch watch
+
+```text
+Usage: doctrail batch watch [OPTIONS]
+
+  Poll until a batch-backed run is fully reconciled.
+
+Options:
+  --db-path TEXT    Path to SQLite database
+  --run-id TEXT     Run ID to watch  [required]
+  --interval FLOAT  Polling interval in seconds  [default: 5.0]
+  --help            Show this message and exit.
+```
+
+### doctrail diff-runs
+
+```text
+Usage: doctrail diff-runs [OPTIONS]
+
+  Show where two runs disagree.
+
+Options:
+  --db-path PATH   Path to SQLite database
+  --run-a TEXT     First run ID  [required]
+  --run-b TEXT     Second run ID  [required]
+  --limit INTEGER  Max differing cells to show  [default: 20]
+  --json           Output as JSON
+  --help           Show this message and exit.
+```
+
+### doctrail docs
+
+```text
+Usage: doctrail docs [OPTIONS]
+
+  Print the packaged manual: everything an agent needs, in one file.
+
+Options:
+  --help  Show this message and exit.
+```
+
+### doctrail document
+
+```text
+Usage: doctrail document [OPTIONS]
+
+  Get a single document by ID.
+
+Options:
+  --db-path PATH        Path to SQLite database  [required]
+  --id TEXT             Document ID (primary key value)  [required]
+  --format [text|json]  Output format
+  --help                Show this message and exit.
+```
+
+### doctrail edit
+
+```text
+Usage: doctrail edit [OPTIONS] NAME
+
+  Open a project enrichment YAML in $EDITOR.
+
+Options:
+  --help  Show this message and exit.
+```
+
+### doctrail enrich
+
+```text
+Usage: doctrail enrich [OPTIONS] [ENRICHMENT_NAMES]...
+
+  Enrich database content using LLM processing.
+
+  Run enrichments by name:     doctrail enrich language     doctrail enrich language summarize
+
+  In a doctrail project (.doctrail/ folder), enrichments are loaded from
+  .doctrail/enrichments/<name>.yml and merged with .doctrail/config.yml. Model outputs are written
+  to normalized tables; use `doctrail view create` or `doctrail view pivot` to inspect them in a
+  wide, human-readable form.
+
+Options:
+  --config TEXT                   Path to config YAML (auto-detects .doctrail/config.yml)
+  --enrichments TEXT              (Legacy) Enrichment task names
+  --limit INTEGER                 Limit number of rows to process
+  --overwrite                     Overwrite existing data in output columns
+  --verbose                       Enable verbose logging
+  --log-updates                   Log updates to a file
+  --model TEXT                    Override the default model for all enrichments
+  --db-path TEXT                  Override the database path from config
+  --output-db TEXT                Write enrichments to this database instead of the source database
+  --batch-size INTEGER            Override batch size for processing
+  --rowid INTEGER                 Process only a specific row by rowid
+  --sha1 TEXT                     Process only a specific row by sha1 hash
+  --truncate                      Truncate long inputs to fit model context window instead of
+                                  failing
+  --skip-cost-check               Skip cost estimation and confirmation
+  --cost-threshold FLOAT          Cost threshold for confirmation prompt (default: $5.00)
+  --where TEXT                    Filter the enrichment query with an outer SQL WHERE predicate
+  --query TEXT                    Replace the SQL query from config entirely
+  --project TEXT                  Tag enrichments with a project name for filtering (e.g.,
+                                  mock_compliance)
+  --dry-run                       Preview without calling LLM: show row counts, schema, and sample
+                                  input
+  --dedupe-scope [query|prompt|enrichment|name]
+                                  Append-mode dedupe scope. Overrides per-enrichment dedupe_scope.
+  --materialize-inputs / --no-materialize-inputs
+                                  Persist the exact input rowset for each run
+  --execution-mode [sync|batch|openai-batch]
+                                  How to execute the enrichment work. batch maps direct OpenAI
+                                  models to /v1/batches -> /v1/chat/completions, direct Claude
+                                  models to /v1/messages/batches -> /v1/messages, and direct Gemini
+                                  models to File API upload ->
+                                  /v1beta/models/{model}:batchGenerateContent. openai-batch is
+                                  accepted as a legacy alias.  [default: sync]
+  --allow-column-collision        Allow enrichment field names that match source table columns
+  --help                          Show this message and exit.
+```
+
+### doctrail export
+
+```text
+Usage: doctrail export [OPTIONS]
+
+  Export enriched data in various formats.
+
+Options:
+  --config TEXT       Path to the configuration YAML file  [required]
+  --export-type TEXT  Type of export to run (e.g., parallel-translation, case-summaries)  [required]
+  --output-dir TEXT   Override the default output directory from config
+  --verbose           Enable verbose logging
+  --help              Show this message and exit.
+```
+
+### doctrail finalize
+
+```text
+Usage: doctrail finalize [OPTIONS]
+
+  Materialize an editable final table from a run or existing review view.
+
+Options:
+  --db-path PATH  Path to SQLite database
+  --run-id TEXT   Materialize the final surface for one run ID
+  --view TEXT     Materialize an existing review view instead of a run
+  --table TEXT    Writable table name to create
+  --replace       Replace the target table if it already exists
+  --help          Show this message and exit.
+```
+
+### doctrail icr
+
+```text
+Usage: doctrail icr [OPTIONS] ENRICHMENT_NAME
+
+  Run intercoder reliability: enrich sampled rows with multiple models.
+
+  Example:     doctrail icr threat_coding -m openrouter/google/gemini-2.5-flash -m gpt-4o-mini
+  --sample 50 --seed 42
+
+Options:
+  -m, --models TEXT   Models to use as coders (repeat for multiple)  [required]
+  --sample INTEGER    Sample N rows (default: all)
+  --stratify-by TEXT  Stratify sample by this enrichment field
+  --seed INTEGER      Random seed for reproducibility
+  --config TEXT       Path to config YAML (auto-detects .doctrail/config.yml)
+  --db-path TEXT      Database path override
+  --overwrite         Re-run models that already have codings
+  --skip-cost-check   Skip cost confirmation
+  --project TEXT      Tag enrichments with a project name
+  --verbose           Verbose logging
+  --help              Show this message and exit.
+```
+
+### doctrail icr-report
+
+```text
+Usage: doctrail icr-report [OPTIONS]
+
+  Compute intercoder reliability statistics from enrichment codings.
+
+  Example:     doctrail icr-report --db-path out/db.db --field hostility_level
+
+Options:
+  --db-path TEXT                  Database path (defaults to .doctrail/config.yml)
+  --field TEXT                    Field name to analyse  [required]
+  --enrichment-name TEXT          Filter by enrichment name
+  -m, --models TEXT               Specific models to compare (repeat)
+  --sample-id TEXT                Filter to specific ICR sample
+  --level [nominal|ordinal|interval]
+                                  Measurement level (auto-detected if omitted)
+  -o, --output TEXT               Write CSV coding matrix to this path
+  --verbose                       Verbose logging
+  --help                          Show this message and exit.
+```
+
+### doctrail ingest
+
+```text
+Usage: doctrail ingest [OPTIONS]
+
+  Ingest documents from local directories, Zotero, or plugins.
+
+  Supported local file types: txt/md; csv/tsv; pdf; epub; mobi; doc; rtf; docx; xlsx; xls; pptx;
+  ppt; djvu; mhtml/mht; html/htm; png/jpg/jpeg/gif/bmp/tiff/tif.
+
+  Examples:     doctrail ingest --input-dir ./docs --db-path ./data.db     doctrail ingest --zotero
+  --collection "Papers" --db-path ./lit.db     doctrail ingest --plugin zotero --collection "My
+  Research"
+
+Options:
+  --config TEXT                   Path to the configuration YAML file
+  --db-path TEXT                  SQLite database file, or a directory to use/create doctrail.db in
+  --table TEXT                    Table name for documents
+  --verbose                       Enable detailed logging
+  --input-dir TEXT                Input directory (can repeat)
+  --force                         Force ingest even if schema mismatch
+  --overwrite                     Overwrite existing documents
+  --limit INTEGER                 Limit files to process
+  --include-pattern TEXT          Only process matching files
+  --exclude-pattern TEXT          Skip matching files
+  --workers INTEGER RANGE         Number of extraction worker threads  [x>=1]
+  --pdf-engine [auto|pymupdf|pdftotext|mutool|mac-ocr]
+                                  PDF extraction strategy
+  --ocr-engine [auto|textra|ocrmypdf|mac-ocr]
+                                  OCR backend when OCR is needed
+  --readability                   Use readability for HTML
+  --html-extractor [default|smart]
+  --skip-garbage-check            Skip garbage detection
+  -y, --yes                       Skip prompts
+  --fulltext                      Create FTS index
+  --manifest TEXT                 Path to manifest.json
+  --zotero                        Zotero mode
+  --collection TEXT               Zotero collection name
+  --plugin TEXT                   Plugin name
+  --plugin-dir TEXT               Custom plugins directory
+  --cache-db TEXT                 [doi_connector] Cache database
+  --project TEXT                  [doi_connector] Project name
+  --base-path TEXT                [doi_connector] Base path
+  --api-key TEXT                  [zotero] API key
+  --user-id TEXT                  [zotero] User ID
+  --zotero-dir TEXT               [zotero] Data directory
+  --help                          Show this message and exit.
+```
+
+### doctrail init
+
+```text
+Usage: doctrail init [OPTIONS] [[test]] [[fed|un|econ-threat]]
+
+  Initialize a doctrail project in the current directory.
+
+  Creates: - .doctrail/config.yml     (project settings) - .doctrail/enrichments/   (your analysis
+  tasks) - out/{name}.db            (database, unless --database is used) - .env
+  (API key, unless --no-env is used)
+
+  Doctrail stores model outputs in normalized enrichment tables and then materializes user-facing
+  views for review and analysis.
+
+  Example:     cd my_research/     doctrail init
+
+Options:
+  --name TEXT                     Project name (used for database filename)
+  --api-key TEXT                  API key (or set interactively)
+  --provider [openai|gemini|anthropic|openrouter]
+                                  LLM provider (default: openai)
+  --docs TEXT                     Path to documents folder (relative to current dir)
+  --database TEXT                 Path to SQLite database to use in config
+  --no-docs                       Skip document-folder setup for query-first projects
+  --no-env                        Do not create a .env file; rely on existing environment variables
+  -y, --yes                       Skip prompts, use defaults
+  -e, --enrichments TEXT          Enrichments to set up (can repeat)
+  --help                          Show this message and exit.
+```
+
+### doctrail list-enrichments
+
+```text
+Usage: doctrail list-enrichments [OPTIONS]
+
+  List all available enrichments from a configuration file.
+
+Options:
+  --config TEXT  Path to the configuration YAML file  [required]
+  --help         Show this message and exit.
+```
+
+### doctrail models
+
+```text
+Usage: doctrail models [OPTIONS]
+
+  List doctrail model identifiers by backend.
+
+Options:
+  -p, --provider TEXT  Filter by backend (e.g. openai, anthropic, gemini, cli, openrouter/openai)
+  -s, --search TEXT    Search models by name or identifier
+  --refresh            Force refresh the underlying pricing or batch catalog cache
+  -n, --limit INTEGER  Max models to display per section  [default: 10]
+  --all                Show the full OpenRouter catalog with pricing
+  --openai-batch       Show the verified OpenAI batch model catalog and batch pricing
+  --json               Output as JSON
+  --help               Show this message and exit.
+```
+
+### doctrail new
+
+```text
+Usage: doctrail new [OPTIONS] [NAME]
+
+  Create a new custom enrichment.
+
+  Example:     doctrail new sentiment --prompt "Classify the sentiment" --enum
+  "positive,negative,neutral"
+
+Options:
+  -p, --prompt TEXT               Instructions for the LLM
+  -o, --output TEXT               Output column/field name
+  --type [string|integer|number|boolean|array]
+                                  Output type (default: string)
+  --enum TEXT                     Comma-separated enum values (e.g., "positive,negative,neutral")
+  --overwrite                     Overwrite an existing enrichment YAML
+  --help                          Show this message and exit.
+```
+
+### doctrail overrides-export
+
+```text
+Usage: doctrail overrides-export [OPTIONS]
+
+  Export one run to a CSV template for human review and overrides.
+
+Options:
+  --db-path PATH  Path to SQLite database
+  --run-id TEXT   Run ID to export for review  [required]
+  --output PATH   CSV path to write (defaults to ./overrides_<run>.csv)
+  --help          Show this message and exit.
+```
+
+### doctrail overrides-import
+
+```text
+Usage: doctrail overrides-import [OPTIONS]
+
+  Import human overrides from a CSV and refresh the final merged view.
+
+Options:
+  --db-path PATH   Path to SQLite database
+  --run-id TEXT    Run ID to import overrides into  [required]
+  --input PATH     CSV created by overrides-export  [required]
+  --reviewer TEXT  Reviewer name stored with imported overrides
+  --help           Show this message and exit.
+```
+
+### doctrail query
+
+```text
+Usage: doctrail query [OPTIONS] [QUERY_OR_ID]
+
+  Query the database.
+
+  Examples:     doctrail query                    # List documents     doctrail query 1
+  # Show details of document #1     doctrail query -c                 # List with content preview
+  doctrail query --json             # Full JSON output     doctrail query "SELECT ..."       #
+  Custom SQL
+
+Options:
+  -n, --limit INTEGER  Limit number of rows (default: 10)
+  -t, --table TEXT     Table name (defaults to project default_table, then documents)
+  --json               Output as JSON
+  -c, --content        Show content preview
+  --help               Show this message and exit.
+```
+
+### doctrail rebuild-enrichments
+
+```text
+Usage: doctrail rebuild-enrichments [OPTIONS]
+
+  Rebuild _enrichments exactly from projection payloads stored in _enrichment_audit.
+
+Options:
+  --db-path PATH     Path to SQLite database
+  --run-id TEXT      Restrict rebuild to one run ID
+  --enrichment TEXT  Restrict rebuild to one enrichment name
+  --key-value TEXT   Restrict rebuild to one document key
+  -y, --yes          Skip confirmation
+  --help             Show this message and exit.
+```
+
+### doctrail review
+
+```text
+Usage: doctrail review [OPTIONS] DB_PATH
+
+  Validate enrichment accuracy with a web UI.
+
+  Opens a browser-based interface for rapid Y/N validation of LLM classifications. Results are saved
+  to the human_audit table.
+
+  Examples:     doctrail review /path/to/db.db --field is_relevant --sample 50     doctrail review
+  db.db --field language --sample 100 --table documents     doctrail review db.db --field
+  is_relevant --config enrichment.yml
+
+Options:
+  --field TEXT        Field name to review (e.g., is_relevant)  [required]
+  --sample INTEGER    Sample size per class (default: 50)
+  --port INTEGER      Port to run server on (default: 8765)
+  --table TEXT        Table name (default: articles)
+  --config PATH       Config file to get truncation from input_columns
+  --truncate INTEGER  Content truncation limit (overrides config)
+  --help              Show this message and exit.
+```
+
+### doctrail run
+
+```text
+Usage: doctrail run [OPTIONS] [ENRICHMENT_NAMES]...
+
+  Enrich database content using LLM processing.
+
+  Run enrichments by name:     doctrail enrich language     doctrail enrich language summarize
+
+  In a doctrail project (.doctrail/ folder), enrichments are loaded from
+  .doctrail/enrichments/<name>.yml and merged with .doctrail/config.yml. Model outputs are written
+  to normalized tables; use `doctrail view create` or `doctrail view pivot` to inspect them in a
+  wide, human-readable form.
+
+Options:
+  --config TEXT                   Path to config YAML (auto-detects .doctrail/config.yml)
+  --enrichments TEXT              (Legacy) Enrichment task names
+  --limit INTEGER                 Limit number of rows to process
+  --overwrite                     Overwrite existing data in output columns
+  --verbose                       Enable verbose logging
+  --log-updates                   Log updates to a file
+  --model TEXT                    Override the default model for all enrichments
+  --db-path TEXT                  Override the database path from config
+  --output-db TEXT                Write enrichments to this database instead of the source database
+  --batch-size INTEGER            Override batch size for processing
+  --rowid INTEGER                 Process only a specific row by rowid
+  --sha1 TEXT                     Process only a specific row by sha1 hash
+  --truncate                      Truncate long inputs to fit model context window instead of
+                                  failing
+  --skip-cost-check               Skip cost estimation and confirmation
+  --cost-threshold FLOAT          Cost threshold for confirmation prompt (default: $5.00)
+  --where TEXT                    Filter the enrichment query with an outer SQL WHERE predicate
+  --query TEXT                    Replace the SQL query from config entirely
+  --project TEXT                  Tag enrichments with a project name for filtering (e.g.,
+                                  mock_compliance)
+  --dry-run                       Preview without calling LLM: show row counts, schema, and sample
+                                  input
+  --dedupe-scope [query|prompt|enrichment|name]
+                                  Append-mode dedupe scope. Overrides per-enrichment dedupe_scope.
+  --materialize-inputs / --no-materialize-inputs
+                                  Persist the exact input rowset for each run
+  --execution-mode [sync|batch|openai-batch]
+                                  How to execute the enrichment work. batch maps direct OpenAI
+                                  models to /v1/batches -> /v1/chat/completions, direct Claude
+                                  models to /v1/messages/batches -> /v1/messages, and direct Gemini
+                                  models to File API upload ->
+                                  /v1beta/models/{model}:batchGenerateContent. openai-batch is
+                                  accepted as a legacy alias.  [default: sync]
+  --allow-column-collision        Allow enrichment field names that match source table columns
+  --help                          Show this message and exit.
+```
+
+### doctrail runs
+
+```text
+Usage: doctrail runs [OPTIONS]
+
+  List recent enrichment runs with persisted run IDs and summary counts.
+
+Options:
+  --db-path PATH     Path to SQLite database
+  --enrichment TEXT  Filter to one enrichment name
+  --limit INTEGER    Max runs to list  [default: 20]
+  --json             Output as JSON
+  --help             Show this message and exit.
+```
+
+### doctrail serve
+
+```text
+Usage: doctrail serve [OPTIONS]
+
+  Start the Doctrail multi-database server.
+
+  The server provides HTTP endpoints for searching and enriching multiple SQLite databases.
+  Configure databases in a YAML file:
+
+  # doctrail-server.yaml
+  server:
+    host: 0.0.0.0
+    port: 8000
+  databases:
+    literature: /data/literature    # directory containing .db file
+    organs: /data/organs
+
+  Each database directory should contain: - A .db file (the SQLite database) - Optional:
+  doctrail.yaml (schema config) - Optional: chroma_db/ (vector store for semantic search) -
+  Optional: help.md (database-specific documentation)
+
+  Example:     doctrail serve --config doctrail-server.yaml     doctrail serve --port 9000
+
+Options:
+  --config PATH   Server configuration file (default: doctrail-server.yaml)
+  --host TEXT     Override host from config
+  --port INTEGER  Override port from config
+  --verbose       Enable verbose logging
+  --help          Show this message and exit.
+```
+
+### doctrail skill
+
+```text
+Usage: doctrail skill [OPTIONS]
+
+  Print or install the packaged Doctrail skill.
+
+Options:
+  --install  Install the packaged Doctrail skill into ~/.claude/skills/doctrail/SKILL.md
+  --force    Overwrite an existing installed skill when used with --install
+  --help     Show this message and exit.
+```
+
+### doctrail sql
+
+```text
+Usage: doctrail sql [OPTIONS]
+
+  Execute a read-only SQL query (SELECT only).
+
+Options:
+  --db-path PATH        Path to SQLite database  [required]
+  -q, --query TEXT      SQL SELECT query  [required]
+  --format [text|json]  Output format
+  --help                Show this message and exit.
+```
+
+### doctrail stats
+
+```text
+Usage: doctrail stats [OPTIONS]
+
+  Get database statistics.
+
+Options:
+  --db-path PATH        Path to SQLite database  [required]
+  --format [text|json]  Output format
+  --help                Show this message and exit.
+```
+
+### doctrail view
+
+```text
+Usage: doctrail view [OPTIONS] [[list|new|refresh|create|pivot|spec|render]] [NAME]
+
+  Manage derived views for reviewing and analyzing normalized enrichments.
+
+  Doctrail stores model outputs in normalized tables (`_enrichments`, `_enrichment_audit`,
+  `_enrichment_runs`). Views are the user-facing surface: they join source rows with selected
+  enrichment fields in a wide format.
+
+  Commands:
+      doctrail view                     List all views in database
+      doctrail view create              List recent runs / enrichments
+      doctrail view create <enrichment> Materialize the latest run view for one enrichment
+      doctrail view create --run-id <run_id>  Materialize one specific persisted run
+      doctrail view new <name>          Create a custom view SQL file
+      doctrail view spec <name|path>    Create/apply a YAML view spec
+      doctrail view refresh             Execute all .doctrail/views/*.sql and *.yml
+      doctrail view pivot <name> -e <enrichment>  Create a reusable wide analysis view
+      doctrail view render <name>       Export a materialized view to HTML, CSV, or JSON
+
+  View workflow:
+      doctrail runs
+      doctrail view create --run-id <run_id>
+      doctrail overrides-export --run-id <run_id>
+
+  Pivot examples:
+      doctrail view pivot my_review -e framing_v6
+      doctrail view pivot my_review -e framing --fields hostility,frame --include "title,raw_content:500"
+      doctrail view pivot icr_check -e framing --by-model --include title
+
+  View spec example:
+      doctrail view spec payments_review
+      doctrail view refresh
+      doctrail view render payments_review --output payments_review.html
+
+  Review shortcut:
+      doctrail view create my_enrichment
+      doctrail query "SELECT * FROM v_run_my_enrichment_20260228_1430 LIMIT 20"
+
+Options:
+  --table TEXT              Source table to join against (default: from config)
+  --run-id TEXT             Run ID to build a view for
+  -e, --enrichment TEXT     Enrichment name (for pivot action)
+  --fields TEXT             Comma-separated field names to include (default: all)
+  --include TEXT            Source columns to include, with optional :N truncation (e.g.
+                            "title,raw_content:500")
+  --by-model                Create per-model columns for ICR comparison
+  --output TEXT             Output path for render action
+  --format [html|csv|json]  Output format for render action  [default: html]
+  --limit INTEGER           Optional row limit for render action
+  --help                    Show this message and exit.
+```

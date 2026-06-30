@@ -1,0 +1,53 @@
+database: /tmp/doctrail_demo/test.db
+default_model: gpt-4o-mini
+
+sql_queries:
+  all_docs: |
+    SELECT rowid, sha1 FROM documents
+
+enrichments:
+  - name: detect_language
+    description: Detect the primary language of the document
+    input:
+      query: all_docs
+      input_columns:
+        - raw_content:500
+    prompt: |
+      What is the primary language of this text? Choose from: English, Chinese, Spanish, French, German, Other.
+      Respond with just the language name from the list.
+
+      Text: {{raw_content}}
+    model: gpt-4o-mini
+    schema:
+      enum: ["English", "Chinese", "Spanish", "French", "German", "Other"]
+    output_column: language
+
+  - name: summarize
+    description: Create a brief summary
+    input:
+      query: all_docs
+      input_columns:
+        - raw_content:1000
+    prompt: |
+      Summarize this text in 1-2 sentences. Be concise.
+
+      Text: {{raw_content}}
+    model: gpt-4o-mini
+    schema:
+      summary_text: {type: "string"}
+    output_column: summary
+
+  - name: extract_topics
+    description: Extract main topics as a list
+    input:
+      query: all_docs
+      input_columns:
+        - raw_content:1000
+    prompt: |
+      Extract 2-3 main topics or themes from this text. Return as a comma-separated list.
+
+      Text: {{raw_content}}
+    model: gpt-4o-mini
+    schema:
+      topics_list: {type: "string"}
+    output_column: topics

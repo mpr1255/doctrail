@@ -1,0 +1,114 @@
+[project]
+name = "doctrail"
+version = "0.3.1"
+description = "SQLite database enrichment tool using LLMs"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.12"
+dependencies = [
+    "click>=8.0",
+    "typer",
+    "loguru",
+    "rich",
+    "pyzotero",
+    "sqlite-utils",
+    "sqlite-fts4",
+    "tiktoken",
+    "aiohttp",
+    "beautifulsoup4",
+    "chardet",
+    "PyYAML",
+    "openai",
+    "anthropic>=0.40",
+    "jinja2",
+    "mhtml-to-html-py",
+    "google-genai>=1.0.0",
+    "pypinyin>=0.54.0",
+    "pyalex>=0.18",
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.32.0",
+    "readability-lxml>=0.8",
+    "questionary>=2.0",
+    "tqdm>=4.0",
+    "pydantic>=2.0",
+    # Document extraction (Python-first; legacy Office fallbacks may use system tools)
+    "pymupdf>=1.24", # PDF text extraction (replaces pdftotext, mutool)
+    "python-docx>=1.0", # DOCX extraction
+    "ebooklib>=0.18", # EPUB extraction (replaces ebook-convert for EPUB)
+    "lxml>=5.0", # HTML/XML parsing
+    "claude-agent-sdk>=0.1.45",
+    "openpyxl>=3.1.5",
+    "python-pptx>=1.0.2",
+    "xlrd>=2.0.2",
+    "prompt-toolkit<3.0.52",
+    "krippendorff>=0.7",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest",
+    "pytest-asyncio",
+    "pytest-mock",
+    "respx", # For mocking HTTP requests if needed later
+]
+ocr = [
+    "ocrmypdf>=16.0",  # Requires tesseract system package
+]
+icr = [
+]
+
+[project.scripts]
+doctrail = "doctrail.cli:cli"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build]
+exclude = [
+    "**/.unison/**",
+    ".history/**",
+    ".deleted/**",
+    ".venv/**",
+    ".venv*/**",
+    "_paper/**",
+    "agents/**",
+    "data/**",
+    "notes/**",
+    "out/**",
+    "scratch/**",
+    "tmp/**",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/doctrail"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"docs/llms.txt" = "doctrail/_docs/llms.txt"
+"skills/doctrail/SKILL.md" = "doctrail/_docs/SKILL.md"
+"examples/tutorial" = "doctrail/_examples/tutorial"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3.5",
+    "pytest-asyncio>=0.26.0",
+    "pytest-mock>=3.14.0",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+norecursedirs = [
+    ".unison",
+    ".venv",
+    ".venv*",
+    ".history",
+    ".deleted",
+    "agents",
+    "data",
+    "notes",
+    "out",
+    "scratch",
+    "tmp",
+]

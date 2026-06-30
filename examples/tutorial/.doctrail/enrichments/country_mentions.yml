@@ -1,0 +1,18 @@
+name: country_mentions
+description: Extract country mentions and stance from UN speech excerpts
+model: replay
+input:
+  query: un_speeches
+  input_columns: ["title", "country", "raw_content:2500"]
+prompt: |
+  Extract up to three countries or international actors mentioned in the excerpt.
+  For each item, record the country or actor and whether the speaker's stance is supportive, critical, neutral, or mixed.
+schema:
+  mentions:
+    type: "array"
+    maxItems: 3
+    items:
+      type: "object"
+      properties:
+        country: {type: "string", maxLength: 80}
+        stance: {enum: ["supportive", "critical", "neutral", "mixed"]}

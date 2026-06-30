@@ -1,0 +1,24 @@
+name: language
+description: "Detect the primary language of each document"
+input:
+  query: all_docs
+  # Language detection usually needs only a short prefix of the document.
+  input_columns: ["raw_content:1000"]
+output_column: language
+schema:
+  enum: ["english", "chinese", "spanish", "french", "german", "japanese", "korean", "other"]
+prompt: |
+  Identify the document's primary language.
+
+  Codebook:
+  - english: most substantive text is English.
+  - chinese: most substantive text is Chinese, including simplified or traditional characters.
+  - spanish: most substantive text is Spanish.
+  - french: most substantive text is French.
+  - german: most substantive text is German.
+  - japanese: most substantive text is Japanese.
+  - korean: most substantive text is Korean.
+  - other: the primary language is not one of the listed languages, the text is genuinely mixed with no dominant language, or the document is unreadable.
+
+  Use the language of the main body, not boilerplate navigation, metadata, citations, or URLs.
+  Return one enum value only. Do not return null.

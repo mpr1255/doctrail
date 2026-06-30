@@ -1,0 +1,13 @@
+name: econ_threat
+enrichment: econ_threat
+source_table: documents
+key_column: sha1
+include:
+  - filename
+  - raw_content:600
+explode:
+  field: threats
+  object_fields:
+    - country
+    - econ_threat
+    - quote

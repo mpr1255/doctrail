@@ -1,0 +1,30 @@
+name: econ_threat
+description: Translate a Global Times editorial and rate the economic threat it directs at each country it targets
+model: replay
+input:
+  query: gt_editorials
+  input_columns: ["filename", "raw_content:3000"]
+prompt: |
+  These are excerpts from Chinese state-media editorials (Global Times, 社评).
+  First, translate the editorial into clear, faithful English.
+  Then list each foreign country or bloc the editorial targets, and rate how
+  strongly the text threatens it with economic consequences — trade, tariffs,
+  sanctions, boycotts, or investment — on a 0-3 scale:
+    0 = no economic threat,
+    1 = implied or general pressure,
+    2 = explicit warning of economic costs,
+    3 = explicit threat of concrete economic retaliation.
+  Give the country in English, the 0-3 level, and a short translated quote that
+  justifies it. List at most six countries, most-threatened first.
+schema:
+  english_translation:
+    type: "string"
+  threats:
+    type: "array"
+    maxItems: 6
+    items:
+      type: "object"
+      properties:
+        country: {type: "string", maxLength: 80}
+        econ_threat: {type: "integer", minimum: 0, maximum: 3}
+        quote: {type: "string", maxLength: 240}

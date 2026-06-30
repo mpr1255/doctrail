@@ -1,0 +1,290 @@
+{
+  "au_general_debate_2023.html": {
+    "corpus": "un_speeches",
+    "country": "Australia",
+    "retrieved_on": "2026-06-10",
+    "sha1": "310889573f47d792476ad832b259fe502e3fa8bb",
+    "source_pdf_sha256": "595c5659c6821035a7f0aadd272f12a42138d6db4809084fddeafbab96e34486",
+    "source_url": "https://gadebate.un.org/sites/default/files/gastatements/78/au_en.pdf",
+    "title": "Australia general debate excerpt"
+  },
+  "br_general_debate_2023.pdf": {
+    "corpus": "un_speeches",
+    "country": "Brazil",
+    "retrieved_on": "2026-06-10",
+    "sha1": "e6827c5ac580eed060400bb5b8cafae5fa5d285c",
+    "source_pdf_sha256": "dcfbd861ba8d8dd85c28acf3ff061f4dd80aaaf2540a7830d858527adb6947f8",
+    "source_url": "https://gadebate.un.org/sites/default/files/gastatements/78/br_en.pdf",
+    "title": "Brazil general debate excerpt"
+  },
+  "ca_general_debate_2023.docx": {
+    "corpus": "un_speeches",
+    "country": "Canada",
+    "retrieved_on": "2026-06-10",
+    "sha1": "0d521f0fb15d5742f5ff6a98c816e85af7d52ab7",
+    "source_pdf_sha256": "de49fa8cf905e9df7a223dde1608833eef1c3b191502a4415ad21a61576697dd",
+    "source_url": "https://gadebate.un.org/sites/default/files/gastatements/78/ca_en.pdf",
+    "title": "Canada general debate excerpt"
+  },
+  "federalist_01.html": {
+    "consensus_author": "hamilton",
+    "corpus": "federalist",
+    "paper_group": "undisputed",
+    "paper_number": 1,
+    "retrieved_on": "2026-06-10",
+    "sha1": "990928ff92efdc6923208b5ab295316b4b7af2d9",
+    "source_text_sha256": "66ee3352731064f655094c7eefe03e70a28fccb83d39a80c1b59a61c29148f32",
+    "source_url": "https://www.gutenberg.org/cache/epub/1404/pg1404.txt",
+    "title": "Federalist No. 1"
+  },
+  "federalist_02.docx": {
+    "consensus_author": "jay",
+    "corpus": "federalist",
+    "paper_group": "undisputed",
+    "paper_number": 2,
+    "retrieved_on": "2026-06-10",
+    "sha1": "d500b50e8b2189f38910d640264a59019e806cba",
+    "source_text_sha256": "3f6ff0b8b30ebd414356c874817694adadb28f897cc6bfc1a6b71e44398361b5",
+    "source_url": "https://www.gutenberg.org/cache/epub/1404/pg1404.txt",
+    "title": "Federalist No. 2"
+  },
+  "federalist_06.docx": {
+    "consensus_author": "hamilton",
+    "corpus": "federalist",
+    "paper_group": "undisputed",
+    "paper_number": 6,
+    "retrieved_on": "2026-06-10",
+    "sha1": "0ed07edf58180cf28fdd57501a28da0fa0d1ea61",
+    "source_text_sha256": "35e05da66939adfc73f35110f3951898bc349994552350e55d05e04875c34635",
+    "source_url": "https://www.gutenberg.org/cache/epub/1404/pg1404.txt",
+    "title": "Federalist No. 6"
+  },
+  "federalist_09.docx": {
+    "consensus_author": "hamilton",
+    "corpus": "federalist",
+    "paper_group": "undisputed",
+    "paper_number": 9,
+    "retrieved_on": "2026-06-10",
+    "sha1": "46fafb7d32f7c87c815395f7676455decdc3fd6f",
+    "source_text_sha256": "9953b5333b87c2ed42eac363a9fd1dcb28b74dd4dfcf99b180a116c308f63011",
+    "source_url": "https://www.gutenberg.org/cache/epub/1404/pg1404.txt",
+    "title": "Federalist No. 9"
+  },
+  "federalist_10.docx": {
+    "consensus_author": "madison",
+    "corpus": "federalist",
+    "paper_group": "undisputed",
+    "paper_number": 10,
+    "retrieved_on": "2026-06-10",
+    "sha1": "5809e8732157013fd6b8242c90ed731df5c865fb",
+    "source_text_sha256": "dcd94f203363d67fdf0b498fc03349a2bec41ca6592bf28070d6f4960024055c",
+    "source_url": "https://www.gutenberg.org/cache/epub/1404/pg1404.txt",
+    "title": "Federalist No. 10"
+  },
+  "federalist_14.docx": {
+    "consensus_author": "madison",
+    "corpus": "federalist",
+    "paper_group": "undisputed",
+    "paper_number": 14,
+    "retrieved_on": "2026-06-10",
+    "sha1": "29206c21f46b59332d1c8badb97cad1450929b51",
+    "source_text_sha256": "ebb6a70fc305982836027419ff437db84f40693e0175814bf46f43e5e28206db",
+    "source_url": "https://www.gutenberg.org/cache/epub/1404/pg1404.txt",
+    "title": "Federalist No. 14"
+  },
+  "federalist_49.pdf": {
+    "consensus_author": "madison",
+    "corpus": "federalist",
+    "paper_group": "disputed",
+    "paper_number": 49,
+    "retrieved_on": "2026-06-10",
+    "sha1": "3fafceabeea5cce00de76e8fbb0c97911820a758",
+    "source_text_sha256": "0e2471bc9d24ab082ab8fa9f158371e41e8505c810c1e4a1ee4e02c16a029aff",
+    "source_url": "https://www.gutenberg.org/cache/epub/1404/pg1404.txt",
+    "title": "Federalist No. 49"
+  },
+  "federalist_50.pdf": {
+    "consensus_author": "madison",
+    "corpus": "federalist",
+    "paper_group": "disputed",
+    "paper_number": 50,
+    "retrieved_on": "2026-06-10",
+    "sha1": "e2124db23cd5759caa85eacde3250065aa3d6b32",
+    "source_text_sha256": "73a3023f7058bbc52d92627df671adbbc1f5e0a01e26cf23653ccb8b6fc96365",
+    "source_url": "https://www.gutenberg.org/cache/epub/1404/pg1404.txt",
+    "title": "Federalist No. 50"
+  },
+  "federalist_51.pdf": {
+    "consensus_author": "madison",
+    "corpus": "federalist",
+    "paper_group": "disputed",
+    "paper_number": 51,
+    "retrieved_on": "2026-06-10",
+    "sha1": "01d151a9b988c171a0b21fc08159b9cfb770d515",
+    "source_text_sha256": "e6e89870bfd5d959485a15050525239810bef3c41e4243c47bf42a7840ae9c67",
+    "source_url": "https://www.gutenberg.org/cache/epub/1404/pg1404.txt",
+    "title": "Federalist No. 51"
+  },
+  "federalist_52.pdf": {
+    "consensus_author": "madison",
+    "corpus": "federalist",
+    "paper_group": "disputed",
+    "paper_number": 52,
+    "retrieved_on": "2026-06-10",
+    "sha1": "2816e51d0a9960a5b44f3158bbdb9a2fbdd345e4",
+    "source_text_sha256": "e6867e291975dbe8a8bb5141d0d6bbd8094a69db4e666602786c7cd871132aa0",
+    "source_url": "https://www.gutenberg.org/cache/epub/1404/pg1404.txt",
+    "title": "Federalist No. 52"
+  },
+  "federalist_53.pdf": {
+    "consensus_author": "madison",
+    "corpus": "federalist",
+    "paper_group": "disputed",
+    "paper_number": 53,
+    "retrieved_on": "2026-06-10",
+    "sha1": "29f35d128de3618172a0a1bc2b1688f47ceaf18f",
+    "source_text_sha256": "93a51a0490836236712dd7ad7722963478082d927c2b84b99c3a579588f862f1",
+    "source_url": "https://www.gutenberg.org/cache/epub/1404/pg1404.txt",
+    "title": "Federalist No. 53"
+  },
+  "federalist_54.pdf": {
+    "consensus_author": "madison",
+    "corpus": "federalist",
+    "paper_group": "disputed",
+    "paper_number": 54,
+    "retrieved_on": "2026-06-10",
+    "sha1": "69911ca00dfdb6285782d2cd2f85f380fb2acad6",
+    "source_text_sha256": "fa860f350de29fe25d88df92f856718f3a30521b89d7c787db62ec89811484dd",
+    "source_url": "https://www.gutenberg.org/cache/epub/1404/pg1404.txt",
+    "title": "Federalist No. 54"
+  },
+  "federalist_55.pdf": {
+    "consensus_author": "madison",
+    "corpus": "federalist",
+    "paper_group": "disputed",
+    "paper_number": 55,
+    "retrieved_on": "2026-06-10",
+    "sha1": "40559d81b36698cd5b17992b1faeb2d8af558008",
+    "source_text_sha256": "d1cb34a7938e26f1baa8740e660f539abe625205d7a46fd1dd7ff2b06cece5c7",
+    "source_url": "https://www.gutenberg.org/cache/epub/1404/pg1404.txt",
+    "title": "Federalist No. 55"
+  },
+  "federalist_56.pdf": {
+    "consensus_author": "madison",
+    "corpus": "federalist",
+    "paper_group": "disputed",
+    "paper_number": 56,
+    "retrieved_on": "2026-06-10",
+    "sha1": "01675a7fdc6fddfa030bc7bb1d81ed0500a4351c",
+    "source_text_sha256": "66ac3c93218bb49a06d7bdd8866192572ccc2f19edc9bda34b33bf07b280b8dc",
+    "source_url": "https://www.gutenberg.org/cache/epub/1404/pg1404.txt",
+    "title": "Federalist No. 56"
+  },
+  "federalist_57.pdf": {
+    "consensus_author": "madison",
+    "corpus": "federalist",
+    "paper_group": "disputed",
+    "paper_number": 57,
+    "retrieved_on": "2026-06-10",
+    "sha1": "1b67b6f213432c4052e4da5eeac35f1cde00b659",
+    "source_text_sha256": "e3b16330bb40f750d8217df52e7fc43756f5414a26938bd7a943b6e6bee91a28",
+    "source_url": "https://www.gutenberg.org/cache/epub/1404/pg1404.txt",
+    "title": "Federalist No. 57"
+  },
+  "federalist_58.pdf": {
+    "consensus_author": "madison",
+    "corpus": "federalist",
+    "paper_group": "disputed",
+    "paper_number": 58,
+    "retrieved_on": "2026-06-10",
+    "sha1": "82bbd2c349fdfa62be837460a63acf418e7f8a36",
+    "source_text_sha256": "f1ebb7aa6769ee97b8f842de3d1c047082cb793aa896c9fc07fed05e490481c0",
+    "source_url": "https://www.gutenberg.org/cache/epub/1404/pg1404.txt",
+    "title": "Federalist No. 58"
+  },
+  "federalist_62.html": {
+    "consensus_author": "madison",
+    "corpus": "federalist",
+    "paper_group": "disputed",
+    "paper_number": 62,
+    "retrieved_on": "2026-06-10",
+    "sha1": "d4ed77aaa873fdaa419b88b9b32236f5e050048f",
+    "source_text_sha256": "72d9e20b902f4b179fa87e8b4cd74838c3ec57af147a2dcdb7cb2df5df4ce8a8",
+    "source_url": "https://www.gutenberg.org/cache/epub/1404/pg1404.txt",
+    "title": "Federalist No. 62"
+  },
+  "federalist_63.html": {
+    "consensus_author": "madison",
+    "corpus": "federalist",
+    "paper_group": "disputed",
+    "paper_number": 63,
+    "retrieved_on": "2026-06-10",
+    "sha1": "6b344b7620fdefbc58157e8e55bc65d201f3c429",
+    "source_text_sha256": "48f80f044ed43eedae6a9ffea98ed2ccc3b9abfdf4501886ecef85db2a631e62",
+    "source_url": "https://www.gutenberg.org/cache/epub/1404/pg1404.txt",
+    "title": "Federalist No. 63"
+  },
+  "fj_general_debate_2023.pdf": {
+    "corpus": "un_speeches",
+    "country": "Fiji",
+    "retrieved_on": "2026-06-10",
+    "sha1": "0e1e52efea78ea283436d4e7417c7e6723a3757d",
+    "source_pdf_sha256": "1ee161f83c830d893ce062e9b03baaa2f24c6e7afdfa5b8b23239e4fc3020580",
+    "source_url": "https://gadebate.un.org/sites/default/files/gastatements/78/fj_en.pdf",
+    "title": "Fiji general debate excerpt"
+  },
+  "ie_general_debate_2023.html": {
+    "corpus": "un_speeches",
+    "country": "Ireland",
+    "retrieved_on": "2026-06-10",
+    "sha1": "26729ab896265a6e478159e6c04a4124b13d54b0",
+    "source_pdf_sha256": "dceb142d1a96214c4797fcc23be08a355c6966b43ba3cd5da8215e5a86d1ac87",
+    "source_url": "https://gadebate.un.org/sites/default/files/gastatements/78/ie_en.pdf",
+    "title": "Ireland general debate excerpt"
+  },
+  "in_general_debate_2023.pdf": {
+    "corpus": "un_speeches",
+    "country": "India",
+    "retrieved_on": "2026-06-10",
+    "sha1": "9429da3d06ba9ff7b0de575529471dd8738862b8",
+    "source_pdf_sha256": "a914835ac953c7386e78e2be5f34c42800535f1ce2f8489e5e43d8c38e1d3bea",
+    "source_url": "https://gadebate.un.org/sites/default/files/gastatements/78/in_en.pdf",
+    "title": "India general debate excerpt"
+  },
+  "jp_general_debate_2023.docx": {
+    "corpus": "un_speeches",
+    "country": "Japan",
+    "retrieved_on": "2026-06-10",
+    "sha1": "4d8e2a743996c76bc013fce95d15f5f04ff63d83",
+    "source_pdf_sha256": "46d4f2cf4b9a2e7513f374931e366274e63849dae7caaf31535141236d846d9b",
+    "source_url": "https://gadebate.un.org/sites/default/files/gastatements/78/jp_en.pdf",
+    "title": "Japan general debate excerpt"
+  },
+  "ke_general_debate_2023.docx": {
+    "corpus": "un_speeches",
+    "country": "Kenya",
+    "retrieved_on": "2026-06-10",
+    "sha1": "0e4c8226f7abc83277b256d2edd68a7d2fc2d53a",
+    "source_pdf_sha256": "35cf9293c4c37ef3cbc73d28b7f2812774680e73050818a92a3c17180ba93780",
+    "source_url": "https://gadebate.un.org/sites/default/files/gastatements/78/ke_en.pdf",
+    "title": "Kenya general debate excerpt"
+  },
+  "ng_general_debate_2023.html": {
+    "corpus": "un_speeches",
+    "country": "Nigeria",
+    "retrieved_on": "2026-06-10",
+    "sha1": "70e0fe59fc4c20371154b35d1d5ed9c507670d84",
+    "source_pdf_sha256": "1fc3297269730e74b8086e0b6c588554d707ad67a5cedfe06791a0431ce86c7e",
+    "source_url": "https://gadebate.un.org/sites/default/files/gastatements/78/ng_en.pdf",
+    "title": "Nigeria general debate excerpt"
+  },
+  "za_general_debate_2023.pdf": {
+    "corpus": "un_speeches",
+    "country": "South Africa",
+    "retrieved_on": "2026-06-10",
+    "sha1": "db970f7cc8e8e7b73f8dfbe2a76800c2b7659cc2",
+    "source_pdf_sha256": "28617bf46a8e3e118f4f3da0dd9c257967dbc5dea38c35fbaf7347cdc36dab12",
+    "source_url": "https://gadebate.un.org/sites/default/files/gastatements/78/za_en.pdf",
+    "title": "South Africa general debate excerpt"
+  }
+}

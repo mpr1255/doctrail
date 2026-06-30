@@ -1,0 +1,21 @@
+name: sentiment
+description: "Classify the overall sentiment of each document"
+input:
+  query: all_docs
+  # Keep this generic codebook static; revise the enum definitions if your
+  # project needs domain-specific sentiment.
+  input_columns: ["raw_content:2000"]
+output_column: sentiment
+schema:
+  enum: ["positive", "negative", "neutral", "mixed"]
+prompt: |
+  Classify the overall sentiment or evaluative tone of the document.
+
+  Codebook:
+  - positive: the document's dominant tone is approving, optimistic, favorable, celebratory, or supportive.
+  - negative: the dominant tone is critical, pessimistic, accusatory, alarming, or disapproving.
+  - neutral: the document is mainly descriptive, procedural, balanced, or factual with little evaluative tone.
+  - mixed: substantial positive and negative evaluations both appear, and neither clearly dominates.
+
+  Judge the document's own tone, not your view of the events described.
+  Return one enum value only. Do not return null.

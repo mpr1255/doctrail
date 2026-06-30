@@ -1,0 +1,26 @@
+From: fixture@example.invalid
+Subject: Federalist fixture
+Date: Thu, 01 Jan 1970 00:00:00 +0000
+Snapshot-Content-Location: https://example.invalid/federalist-fixture
+MIME-Version: 1.0
+Content-Type: multipart/related;
+ boundary="===============9160072713197377044=="
+
+--===============9160072713197377044==
+Content-Type: text/html; charset="utf-8"
+Content-Transfer-Encoding: quoted-printable
+MIME-Version: 1.0
+Content-Location: https://example.invalid/federalist-fixture
+
+<!doctype html>
+<html><head><meta charset=3D"utf-8"><title>Federalist fixture</title></head><=
+body><h1>Federalist fixture</h1><p>After an unequivocal experience of the ine=
+fficacy of the subsisting federal government, you are called upon to delibera=
+te on a new Constitution for the United States of America.</p><p>The subject =
+speaks its own importance; comprehending in its consequences nothing less tha=
+n the existence of the Union, the safety and welfare of the parts of which it=
+ is composed.</p><p>This public-domain excerpt is used to exercise Doctrail e=
+xtraction paths across file formats.
+</p></body></html>
+
+--===============9160072713197377044==--

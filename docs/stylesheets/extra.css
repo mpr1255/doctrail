@@ -1,0 +1,112 @@
+/* Enlarge the header logo a little */
+.md-header__button.md-logo img,
+.md-header__button.md-logo svg {
+  height: 2rem;
+  width: auto;
+}
+
+/* ----------------------------------------------------------------------------
+   Doctrail brand polish
+   ------------------------------------------------------------------------- */
+:root {
+  --dt-orange: #ff5a1f;
+  --dt-orange-deep: #e23e00;
+  --md-accent-fg-color: var(--dt-orange);
+}
+
+/* Slate (dark) mode: lift the orange so it reads on near-black */
+[data-md-color-scheme="slate"] {
+  --dt-orange: #ff7a47;
+  --dt-orange-deep: #ff5a1f;
+}
+
+/* Headings: tighter, bolder, more present */
+.md-typeset h1,
+.md-typeset h2,
+.md-typeset h3 {
+  letter-spacing: -0.02em;
+}
+
+.md-typeset h1 {
+  font-weight: 800;
+  line-height: 1.1;
+}
+
+/* The page's lead title pops with a warm gradient */
+.md-content h1:first-of-type {
+  font-size: 2.6rem;
+  background: linear-gradient(95deg, var(--dt-orange), var(--dt-orange-deep));
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+/* Section headers get a hairline rule and more breathing room */
+.md-typeset h2 {
+  font-weight: 700;
+  margin-top: 2.6rem;
+  padding-top: 1.2rem;
+  border-top: 1px solid var(--md-default-fg-color--lightest);
+}
+
+/* Links: accent colour with an underline that grows on hover */
+.md-typeset a {
+  color: var(--dt-orange-deep);
+  text-decoration: none;
+  background-image: linear-gradient(var(--dt-orange), var(--dt-orange));
+  background-repeat: no-repeat;
+  background-position: 0 100%;
+  background-size: 0% 2px;
+  transition: background-size 0.2s ease;
+}
+.md-typeset a:hover {
+  background-size: 100% 2px;
+}
+
+/* Inline code: a subtle tinted chip */
+.md-typeset code {
+  background: color-mix(in srgb, var(--dt-orange) 12%, transparent);
+  border-radius: 0.3rem;
+  padding: 0.1em 0.35em;
+}
+
+/* Fenced blocks: rounded, softly shadowed, with a brand edge */
+.md-typeset .highlight {
+  border-radius: 0.55rem;
+  border-left: 3px solid var(--dt-orange);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12);
+  overflow: hidden;
+}
+.md-typeset .highlight code {
+  background: none;
+}
+
+/* Primary buttons in the brand colour */
+.md-typeset .md-button--primary {
+  background: var(--dt-orange);
+  border-color: var(--dt-orange);
+  color: #fff;
+}
+
+/* Active nav item carries the brand colour */
+.md-nav__link--active {
+  color: var(--dt-orange-deep);
+  font-weight: 700;
+}
+
+/* The demo gifs read as framed screenshots */
+.md-typeset img[src*="demo"] {
+  border-radius: 0.6rem;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.18);
+}
+
+/* Heading permalinks: always visible, in the brand colour */
+.md-typeset .headerlink {
+  opacity: 0.3;
+  color: var(--dt-orange);
+  transition: opacity 0.2s ease;
+}
+.md-typeset :hover > .headerlink,
+.md-typeset .headerlink:hover {
+  opacity: 1;
+}

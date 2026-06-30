@@ -1,0 +1,38 @@
+name: research_methods
+description: "Identify research methods used in academic papers"
+input:
+  query: all_docs
+  # This method codebook benefits from more context, but the per-row text still
+  # belongs in input_columns rather than inside the prompt.
+  input_columns: ["raw_content:4000"]
+schema:
+  study_type:
+    enum: ["quantitative", "qualitative", "mixed_methods", "theoretical", "review", "not_applicable"]
+  methods_used:
+    type: array
+    items:
+      type: string
+    maxItems: 5
+  data_sources:
+    type: array
+    items:
+      type: string
+    maxItems: 5
+prompt: |
+  Identify the research design and methods used in the document.
+
+  Codebook for study_type:
+  - quantitative: uses numerical data, statistical models, measurement, experiments, surveys, or formal quantitative comparisons.
+  - qualitative: uses interviews, ethnography, archival interpretation, case studies, discourse analysis, process tracing, or close reading.
+  - mixed_methods: explicitly combines quantitative and qualitative evidence or methods.
+  - theoretical: primarily develops concepts, formal theory, normative argument, or analytical framework without original empirical analysis.
+  - review: synthesizes existing literature, evidence, policy, or data rather than presenting a new primary study.
+  - not_applicable: not a research document, or no research method can be identified from the text.
+
+  Field rules:
+  - methods_used: name up to 5 specific methods, such as "regression analysis", "interviews", "content analysis", "case study", or "literature review".
+  - data_sources: name up to 5 data sources, such as "survey", "government statistics", "court records", "archives", "news articles", or "secondary literature".
+  - If study_type is not_applicable, return empty arrays for methods_used and data_sources.
+  - If a method or data source is unclear, omit it rather than guessing.
+
+  Do not return null for any field.

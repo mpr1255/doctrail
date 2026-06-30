@@ -1,0 +1,110 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+env:
+  UV_PYTHON: "3.12"
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install Python
+        run: uv python install 3.12
+
+      - name: Check release tag matches package version
+        run: |
+          package_version="$(uv run --no-sync python - <<'PY'
+          import tomllib
+          with open("pyproject.toml", "rb") as f:
+              print(tomllib.load(f)["project"]["version"])
+          PY
+          )"
+          tag_version="${GITHUB_REF_NAME#v}"
+          if [ "$package_version" != "$tag_version" ]; then
+            echo "Tag $GITHUB_REF_NAME does not match pyproject version $package_version" >&2
+            exit 1
+          fi
+
+      - name: Check lockfile
+        run: uv lock --check
+
+      - name: Install dependencies
+        run: uv sync --locked --extra test
+
+      - name: Generate full manual
+        run: uv run python scripts/build_llms_full.py
+
+      - name: Check generated manual
+        run: git diff --exit-code docs/llms.txt
+
+      - name: Run tests
+        run: uv run python -m pytest tests/ -x -q -k "not integration"
+
+      - name: Prepare distribution directory
+        run: |
+          uv run --no-sync python - <<'PY'
+          import shutil
+          from pathlib import Path
+          dist = Path("dist")
+          if dist.exists():
+              shutil.rmtree(dist)
+          PY
+
+      - name: Build package artifacts
+        run: uv build --no-sources
+
+      - name: Refuse paper artifacts
+        run: |
+          for archive in dist/*.tar.gz; do
+            if tar -tzf "$archive" | grep -E '^doctrail-[^/]+/(_paper|paper)(/|$)'; then
+              echo "Paper files are present in $archive" >&2
+              exit 1
+            fi
+          done
+          for wheel in dist/*.whl; do
+            if unzip -Z1 "$wheel" | grep -E '^(_paper|paper)(/|$)'; then
+              echo "Paper files are present in $wheel" >&2
+              exit 1
+            fi
+          done
+
+      - name: Check package metadata
+        run: uvx --from twine twine check dist/*
+
+      - name: Smoke test wheel
+        run: |
+          for wheel in dist/*.whl; do
+            uvx --from "$wheel" doctrail --version
+          done
+
+      - name: Smoke test source distribution
+        run: |
+          for archive in dist/*.tar.gz; do
+            uvx --from "$archive" doctrail --version
+          done
+
+      - name: Upload package artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: doctrail-dist
+          path: dist/*
+
+      - name: Publish to PyPI
+        run: uv publish --trusted-publishing always

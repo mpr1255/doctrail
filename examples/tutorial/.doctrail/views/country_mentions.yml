@@ -1,0 +1,14 @@
+name: country_mentions
+enrichment: country_mentions
+source_table: documents
+key_column: sha1
+include:
+  - filename
+  - title
+  - country
+explode:
+  field: mentions
+  object_fields:
+    - country
+    - stance
+  alias_prefix: mention_

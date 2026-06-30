@@ -1,0 +1,28 @@
+name: securitization
+description: Code securitization in UN speech excerpts
+model: replay
+input:
+  query: un_speeches
+  input_columns: ["title", "country", "raw_content:2500"]
+prompt: |
+  Code securitization in the Copenhagen-school sense: the speaker frames an issue as an existential or survival-level threat and demands urgent, extraordinary measures beyond routine policy.
+
+  Set securitizes to true only when both elements are present:
+  - existential or survival-level threat framing; and
+  - a demand for urgent, exceptional, or extraordinary action.
+
+  General concern, ordinary policy disagreement, humanitarian sympathy, or routine calls for cooperation are not enough.
+
+  Intensity scale:
+  0 = no threat framing.
+  1 = routine concern without security framing.
+  2 = serious problem but not existential or exceptional.
+  3 = severe threat language with an urgent response implied.
+  4 = explicit existential or survival-level threat with urgent collective action demanded.
+  5 = explicit existential threat plus extraordinary measures demanded.
+
+  Only answer securitized_issue and intensity when securitizes is true. If securitizes is false, set securitized_issue and intensity to null.
+schema:
+  securitizes: {type: "boolean"}
+  securitized_issue: {enum: ["migration", "climate", "terrorism", "pandemic", "economic_collapse", "other"], optional: true}
+  intensity: {type: "integer", minimum: 0, maximum: 5, optional: true}

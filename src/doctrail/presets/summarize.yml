@@ -1,0 +1,20 @@
+name: summarize
+description: "Generate a concise summary of each document"
+input:
+  query: all_docs
+  # Increase or reduce the :N limit to control per-row input cost.
+  input_columns: ["raw_content:4000"]
+output_column: summary
+schema:
+  type: string
+prompt: |
+  Summarize the document for a research database.
+
+  Codebook:
+  - Write 2 to 3 sentences, no more than 100 words.
+  - State the document's main subject, argument, finding, or purpose.
+  - Mention the most important actor, place, method, or evidence when it is central to the document.
+  - Do not add facts that are not in the document.
+  - Do not include citation boilerplate, navigation text, or formatting notes.
+
+  If the document is empty or unreadable, return a short sentence saying that the document has no readable substantive content. Do not return null.

@@ -1,0 +1,23 @@
+name: keywords
+description: "Extract key topics from each document"
+input:
+  query: all_docs
+  # Adjust the :N limit if your documents are long; keep the prompt itself static.
+  input_columns: ["raw_content:3000"]
+output_column: keywords
+schema:
+  type: array
+  items:
+    type: string
+  maxItems: 5
+prompt: |
+  Extract the document's main topics as keywords.
+
+  Codebook:
+  - Return 3 to 5 short keyword phrases when the document has meaningful topical content.
+  - Each phrase should be 1 to 4 words.
+  - Prefer substantive concepts, actors, places, methods, or policy areas over generic words such as "report", "article", or "document".
+  - Use lower-case phrases unless capitalization is part of a proper noun.
+  - Merge near-duplicates; do not return both "climate change" and "climate".
+
+  If the document is empty, unreadable, or has no clear topic, return an empty array. Do not return null.

@@ -1,0 +1,11 @@
+name: mentions_climate
+description: Crisp ICR demo for whether UN speech excerpts mention climate
+model: replay
+input:
+  query: un_speeches
+  input_columns: ["title", "country", "raw_content:2500"]
+prompt: |
+  Code whether the excerpt mentions climate change or climate policy.
+  Count explicit references to climate change, global warming, emissions, carbon, net zero, fossil fuels, renewable energy, climate finance, loss and damage, sea-level rise, or extreme weather linked to climate. Do not count generic sustainable development, disasters, poverty, or environment language unless climate is named or clearly linked.
+schema:
+  mentions_climate: {type: "boolean"}
