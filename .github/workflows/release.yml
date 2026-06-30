@@ -48,14 +48,8 @@ jobs:
       - name: Install dependencies
         run: uv sync --locked --extra test
 
-      - name: Generate full manual
-        run: uv run python scripts/build_llms_full.py
-
-      - name: Check generated manual
-        run: git diff --exit-code docs/llms.txt
-
-      - name: Run tests
-        run: uv run python -m pytest tests/ -x -q -k "not integration"
+      - name: Check generated docs artifacts
+        run: make release-check
 
       - name: Prepare distribution directory
         run: |

@@ -33,4 +33,4 @@ jobs:
         run: uv sync --locked --extra test
 
       - name: Run tests
-        run: uv run python -m pytest tests/ -x -q -k "not integration"
+        run: make test

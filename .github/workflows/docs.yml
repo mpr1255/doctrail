@@ -29,12 +29,8 @@ jobs:
           enable-cache: true
       - name: Install Python
         run: uv python install 3.12
-      - name: Generate full manual
-        run: uv run python scripts/build_llms_full.py
-      - name: Check generated manual
-        run: git diff --exit-code docs/llms.txt
       - name: Build docs
-        run: uv run --with mkdocs-material --with mkdocs-click mkdocs build --strict
+        run: make docs
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:
