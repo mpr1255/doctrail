@@ -6,6 +6,7 @@ repo_name: mpr1255/doctrail
 
 theme:
   name: material
+  custom_dir: docs/overrides
   logo: assets/mascot.png
   favicon: assets/mascot.png
   font:
@@ -40,6 +41,7 @@ extra_css:
   - stylesheets/extra.css
 
 nav:
+  - Doctrail: index.md
   - Quick start: quickstart.md
   - Tutorial: tutorial.md
   - Code books: yaml.md

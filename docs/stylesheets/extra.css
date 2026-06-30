@@ -5,6 +5,15 @@
   width: auto;
 }
 
+.md-header__title-link {
+  color: inherit;
+  text-decoration: none;
+}
+
+.md-header__title-link:hover {
+  color: var(--dt-orange);
+}
+
 /* ----------------------------------------------------------------------------
    Doctrail brand polish
    ------------------------------------------------------------------------- */
