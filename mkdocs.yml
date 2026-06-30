@@ -41,7 +41,6 @@ extra_css:
   - stylesheets/extra.css
 
 nav:
-  - Doctrail: index.md
   - Quick start: quickstart.md
   - Tutorial: tutorial.md
   - Code books: yaml.md

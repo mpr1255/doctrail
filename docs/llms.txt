@@ -6,6 +6,10 @@ Generated from mkdocs navigation by `scripts/build_llms_full.py`.
 
 # Doctrail
 
+<div class="dt-start-callout" markdown>
+To begin right away, point your agent at [doctrail.org/llms.txt](https://doctrail.org/llms.txt) and/or run `uvx doctrail`.
+</div>
+
 Doctrail is a software library that allows researchers to perform and validate the large-scale enrichment of text corpora with large language models. It is written to be driven by agents (Claude Code, Codex) as much as humans, though humans must understand how it works. It grew naturally out of several applied computational social science research projects, eventually evolving to become a standalone tool.
 
 Here is an example.

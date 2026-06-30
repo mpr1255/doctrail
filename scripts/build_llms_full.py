@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build docs/llms.txt from mkdocs nav order."""
+"""Build docs/llms.txt from the docs home, mkdocs nav order, and CLI reference."""
 
 from __future__ import annotations
 
@@ -16,6 +16,7 @@ SRC = ROOT / "src"
 DOCS = ROOT / "docs"
 MKDOCS = ROOT / "mkdocs.yml"
 OUTPUT = DOCS / "llms.txt"
+INDEX_DOC = "index.md"
 CLI_DOC = "cli.md"
 
 
@@ -33,6 +34,17 @@ def iter_nav_paths(items: Iterable[object]) -> Iterable[str]:
                     yield value
                 elif isinstance(value, list):
                     yield from iter_nav_paths(value)
+
+
+def iter_manual_paths(items: Iterable[object]) -> Iterable[str]:
+    seen: set[str] = set()
+    if (DOCS / INDEX_DOC).exists():
+        seen.add(INDEX_DOC)
+        yield INDEX_DOC
+    for path in iter_nav_paths(items):
+        if path.endswith(".md") and path not in seen:
+            seen.add(path)
+            yield path
 
 
 class _MkdocsLoader(yaml.SafeLoader):
@@ -83,11 +95,7 @@ def render_cli_reference() -> str:
 
 def main() -> None:
     config = yaml.load(MKDOCS.read_text(encoding="utf-8"), Loader=_MkdocsLoader)
-    nav_paths = [
-        path
-        for path in iter_nav_paths(config.get("nav", []))
-        if path.endswith(".md")
-    ]
+    manual_paths = list(iter_manual_paths(config.get("nav", [])))
 
     parts = [
         "# Doctrail full manual",
@@ -96,7 +104,7 @@ def main() -> None:
         "",
     ]
 
-    for rel_path in nav_paths:
+    for rel_path in manual_paths:
         doc_path = DOCS / rel_path
         if rel_path == CLI_DOC:
             text = render_cli_reference()

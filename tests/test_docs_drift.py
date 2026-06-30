@@ -159,18 +159,14 @@ def test_cli_help_uses_post_rename_names():
 def test_llms_full_is_fresh():
     module = _load_build_llms_module()
     config = yaml.load((ROOT / "mkdocs.yml").read_text(encoding="utf-8"), Loader=module._MkdocsLoader)
-    nav_paths = [
-        path
-        for path in module.iter_nav_paths(config.get("nav", []))
-        if path.endswith(".md")
-    ]
+    manual_paths = list(module.iter_manual_paths(config.get("nav", [])))
     parts = [
         "# Doctrail full manual",
         "",
         "Generated from mkdocs navigation by `scripts/build_llms_full.py`.",
         "",
     ]
-    for rel_path in nav_paths:
+    for rel_path in manual_paths:
         if rel_path == module.CLI_DOC:
             text = module.render_cli_reference()
         else:
