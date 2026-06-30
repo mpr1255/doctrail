@@ -1,6 +1,6 @@
 site_name: Doctrail
 site_description: YAML-first SQLite document enrichment with LLMs
-site_url: https://doctrail.dev/
+site_url: https://doctrail.org/
 repo_url: https://github.com/mpr1255/doctrail
 repo_name: mpr1255/doctrail
 

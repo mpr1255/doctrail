@@ -13,9 +13,9 @@ Doctrail is meant to be driven by both researchers and coding agents.
 
 ## Start here
 
-For researchers and users, the documentation is at <https://doctrail.dev>.
+For researchers and users, the documentation is at <https://doctrail.org>.
 
-For LLMs and coding agents, the complete operating manual is at <https://doctrail.dev/llms.txt>.
+For LLMs and coding agents, the complete operating manual is at <https://doctrail.org/llms.txt>.
 
 ## Install
 
@@ -42,7 +42,7 @@ uv run doctrail --help
 
 ## Documentation
 
-The full documentation is at [https://doctrail.dev](https://doctrail.dev).
+The full documentation is at [https://doctrail.org](https://doctrail.org).
 
 Inside the package, `doctrail docs` prints the reference documentation offline.
 

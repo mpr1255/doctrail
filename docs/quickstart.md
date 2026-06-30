@@ -16,7 +16,7 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 
 3. Tell your agent to run `doctrail` — it prints how to operate itself and points to `doctrail agent`, the full operating guide.
 
-(Alternatively, don't install anything. Just point your agent at https://doctrail.dev/llms.txt and tell it you want to install uv, doctrail, and start enriching)
+(Alternatively, don't install anything. Just point your agent at https://doctrail.org/llms.txt and tell it you want to install uv, doctrail, and start enriching)
 
 The rest of this page explains what it gets you, and how to drive doctrail yourself if you prefer.
 

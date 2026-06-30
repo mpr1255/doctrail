@@ -16,7 +16,7 @@ This sets up a hidden folder called `.doctrail` (configs live there), a folder c
 
 Install a database viewer — [TablePlus](https://tableplus.com/) is good — and open `out/database.db`. You will see a `documents` table: one row per file, with the extracted text. Your documents are now in a grid.
 
-Alternatively, open your coding agent in the project folder, give it `https://doctrail.dev/llms.txt`, and tell it to get started. That page is the full agent-facing manual in one file: commands, YAML structure, schema examples, and the basic workflow.
+Alternatively, open your coding agent in the project folder, give it `https://doctrail.org/llms.txt`, and tell it to get started. That page is the full agent-facing manual in one file: commands, YAML structure, schema examples, and the basic workflow.
 
 ## First enrichment
 

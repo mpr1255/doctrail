@@ -107,7 +107,7 @@ Another project combined tens of thousands of editorials from three PRC state me
 
 Use the [quick start](quickstart.md) to install and get going, the [tutorial](tutorial.md) for the guided walkthrough, the [code books](yaml.md) page for the complete config surface, and the [reference](cli.md) for exact commands and flags.
 
-Or, better yet, don't do any of that! Just point your agent (i.e. Codex, Claude Code, whether terminal-based or desktop application) at [llms.txt](https://doctrail.dev/llms.txt) and tell it you want to enrich a pile of documents.
+Or, better yet, don't do any of that! Just point your agent (i.e. Codex, Claude Code, whether terminal-based or desktop application) at [llms.txt](https://doctrail.org/llms.txt) and tell it you want to enrich a pile of documents.
 
 As long as you, the human operator, have a fairly clear mental model of how the machinery works, you don't have to manage the implementation details. You describe your goals to the agent, inspect and iterate on the codebook, and get the agent to use Doctrail to carry it out. Doctrail is designed to be driven by agents.
 
