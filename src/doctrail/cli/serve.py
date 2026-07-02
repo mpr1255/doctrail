@@ -2,6 +2,7 @@
 Serve command - start the Doctrail multi-database server.
 """
 import os
+import importlib.util
 from typing import Optional
 
 import click
@@ -58,10 +59,13 @@ def serve(
     """
     setup_logging(verbose)
 
+    if importlib.util.find_spec("fastapi") is None or importlib.util.find_spec("uvicorn") is None:
+        _exit_error("Server dependencies are not installed. Install with `uv tool install 'doctrail[server]'`.")
+
     try:
         import uvicorn
     except ImportError:
-        _exit_error("uvicorn not installed. Add it to the project environment.")
+        _exit_error("Server dependencies are not installed. Install with `uv tool install 'doctrail[server]'`.")
 
     # Set config path in environment for server to pick up
     if config_path:

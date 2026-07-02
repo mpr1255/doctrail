@@ -1,5 +1,40 @@
 # Changelog
 
+## 0.3.2 - security, rerun, and release polish
+
+### Security and environment safety
+
+- Changed `doctrail serve` to bind `127.0.0.1` by default instead of `0.0.0.0`.
+- Disabled legacy write-capable HTTP endpoints by default; `/enrich`, `/ingest`, and `/export` now require explicit `--enable-write-api`.
+- Required a bearer token when legacy write endpoints are enabled on a non-loopback server host.
+- Changed runtime `.env` discovery so a bare unrelated cwd `.env` is ignored; marked Doctrail project `.env` files still override inherited shell keys as the project-local source of truth.
+
+### Rerun, cost, and billing correctness
+
+- Fixed query-scope append-mode planning so skipped rows are removed before cost estimation, run creation, and provider submission.
+- Fixed skipped reruns so they report zero processed rows and no longer print a run-view query for a view that was never created.
+- Fixed run-view creation to return no view artifact when a run has no enrichment fields.
+- Fixed structured-output persistence failures so a SQLite write error does not trigger a second billed legacy LLM call.
+- Added active provider-batch detection for OpenAI, Anthropic, and Gemini so duplicate in-flight batch submissions are blocked before upload/submission.
+- Fixed OpenAI structured-output fallback usage accounting so billed failed tiers are included when a later tier succeeds.
+
+### Tutorial, review, export, and server cleanup
+
+- Made quickstart and tutorial both use the full `doctrail init test` fixture.
+- Removed `consensus_author` from the tutorial model input while keeping it available as source metadata for comparison.
+- Renamed the tutorial repeated-item field to `mentioned_country` so generated views do not collide with the source `country` column.
+- Added `--key-column` support to `doctrail review` and fixed the review server join for non-`sha1` projects.
+- Sanitized export naming patterns so row-sourced filenames cannot escape the configured output directory.
+- Removed stale `doctrail sync` search guidance and made unsupported Chroma server search return a clear unavailable response.
+- Removed dead shipped modules for the old web ingestor, unused config abstraction, and unused LLM client.
+
+### Packaging and docs
+
+- Added PyPI project metadata: authors, classifiers, homepage, documentation, source, issues, and changelog links.
+- Moved FastAPI/Uvicorn into the `server` extra while keeping server tests covered through the test extra.
+- Added an OpenAI SDK floor and next-major cap.
+- Fixed stale doctrail.dev-era/generated-doc references, docs typos, and regenerated `docs/llms.txt`.
+
 ## 0.3.1 - revamp release readiness
 
 ### Documentation and tutorial fixtures

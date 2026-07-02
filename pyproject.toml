@@ -1,11 +1,30 @@
 [project]
 name = "doctrail"
-version = "0.3.1"
+version = "0.3.2"
 description = "SQLite database enrichment tool using LLMs"
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
 requires-python = ">=3.12"
+authors = [
+    { name = "Doctrail contributors" },
+]
+maintainers = [
+    { name = "Doctrail contributors" },
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Framework :: FastAPI",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Database",
+    "Topic :: Scientific/Engineering :: Information Analysis",
+    "Topic :: Text Processing",
+]
 dependencies = [
     "click>=8.0",
     "typer",
@@ -19,15 +38,13 @@ dependencies = [
     "beautifulsoup4",
     "chardet",
     "PyYAML",
-    "openai",
+    "openai>=1.76,<2",
     "anthropic>=0.40",
     "jinja2",
     "mhtml-to-html-py",
     "google-genai>=1.0.0",
     "pypinyin>=0.54.0",
     "pyalex>=0.18",
-    "fastapi>=0.115.0",
-    "uvicorn[standard]>=0.32.0",
     "readability-lxml>=0.8",
     "questionary>=2.0",
     "tqdm>=4.0",
@@ -45,12 +62,25 @@ dependencies = [
     "krippendorff>=0.7",
 ]
 
+[project.urls]
+Homepage = "https://doctrail.org"
+Documentation = "https://doctrail.org/llms.txt"
+Source = "https://github.com/mpr1255/doctrail"
+Issues = "https://github.com/mpr1255/doctrail/issues"
+Changelog = "https://github.com/mpr1255/doctrail/blob/master/CHANGELOG.md"
+
 [project.optional-dependencies]
 test = [
+    "fastapi>=0.115.0",
     "pytest",
     "pytest-asyncio",
     "pytest-mock",
     "respx", # For mocking HTTP requests if needed later
+    "uvicorn[standard]>=0.32.0",
+]
+server = [
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.32.0",
 ]
 ocr = [
     "ocrmypdf>=16.0",  # Requires tesseract system package
