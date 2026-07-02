@@ -1091,10 +1091,11 @@ class TestGeminiBatchHelpers:
 class TestFactoryCapabilities:
     """Test that the factory correctly fetches and passes capabilities."""
 
-    def test_factory_prefers_project_env_file_over_inherited_environment(self, monkeypatch, tmp_path):
-        """Provider resolution should prefer the nearest project .env over shell env."""
+    def test_factory_prefers_marked_project_env_file_over_inherited_environment(self, monkeypatch, tmp_path):
+        """Provider resolution should prefer a marked project .env over shell env."""
         import doctrail.llm_providers.factory as factory_module
 
+        (tmp_path / ".doctrail").mkdir()
         (tmp_path / ".env").write_text("OPENAI_API_KEY=sk-project-local\n")
         monkeypatch.chdir(tmp_path)
 
@@ -1102,6 +1103,18 @@ class TestFactoryCapabilities:
             provider = factory_module.get_llm_provider("gpt-4o-mini")
 
         assert provider.client.api_key == "sk-project-local"
+
+    def test_factory_ignores_unmarked_cwd_env_file(self, monkeypatch, tmp_path):
+        """A bare cwd .env should not silently replace inherited credentials."""
+        import doctrail.llm_providers.factory as factory_module
+
+        (tmp_path / ".env").write_text("OPENAI_API_KEY=sk-unrelated-local\n")
+        monkeypatch.chdir(tmp_path)
+
+        with patch.dict(os.environ, {"OPENAI_API_KEY": "sk-inherited-shell"}):
+            provider = factory_module.get_llm_provider("gpt-4o-mini")
+
+        assert provider.client.api_key == "sk-inherited-shell"
 
     @pytest.mark.asyncio
     async def test_factory_fetches_openrouter_capabilities(self):

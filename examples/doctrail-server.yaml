@@ -4,7 +4,7 @@
 # Run with: doctrail serve --config examples/doctrail-server.yaml
 
 server:
-  host: 0.0.0.0
+  host: 127.0.0.1
   port: 8000
 
 # Each database is specified as a directory path containing:

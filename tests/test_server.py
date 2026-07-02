@@ -19,6 +19,14 @@ from doctrail.core import ConfigurationError, EnrichmentError, DatabaseError
 client = TestClient(app)
 
 
+@pytest.fixture
+def write_api_enabled(monkeypatch):
+    """Enable legacy write endpoints for compatibility endpoint tests."""
+    monkeypatch.setenv("DOCTRAIL_ENABLE_WRITE_API", "1")
+    monkeypatch.setenv("DOCTRAIL_SERVER_HOST", "127.0.0.1")
+    monkeypatch.delenv("DOCTRAIL_SERVER_TOKEN", raising=False)
+
+
 class TestHealthEndpoints:
     """Test health check endpoints."""
 
@@ -39,6 +47,77 @@ class TestHealthEndpoints:
         assert "version" in data
 
 
+class TestLegacyWriteApiSecurity:
+    """Legacy write endpoints should be closed unless explicitly enabled."""
+
+    @patch('doctrail.server.run_enrichment')
+    def test_write_endpoint_disabled_by_default(self, mock_run_enrichment, monkeypatch):
+        monkeypatch.delenv("DOCTRAIL_ENABLE_WRITE_API", raising=False)
+        monkeypatch.delenv("DOCTRAIL_SERVER_TOKEN", raising=False)
+        monkeypatch.setenv("DOCTRAIL_SERVER_HOST", "127.0.0.1")
+
+        response = client.post("/enrich", json={
+            "config_path": "test_config.yml",
+            "enrichments": ["test_task"],
+        })
+
+        assert response.status_code == 403
+        assert "Legacy write API disabled" in response.json()["detail"]
+        mock_run_enrichment.assert_not_called()
+
+    @patch('doctrail.server.run_enrichment')
+    def test_non_loopback_write_endpoint_requires_token(self, mock_run_enrichment, monkeypatch):
+        monkeypatch.setenv("DOCTRAIL_ENABLE_WRITE_API", "1")
+        monkeypatch.setenv("DOCTRAIL_SERVER_HOST", "0.0.0.0")
+        monkeypatch.delenv("DOCTRAIL_SERVER_TOKEN", raising=False)
+
+        response = client.post("/enrich", json={
+            "config_path": "test_config.yml",
+            "enrichments": ["test_task"],
+        })
+
+        assert response.status_code == 403
+        assert "bearer token is required" in response.json()["detail"]
+        mock_run_enrichment.assert_not_called()
+
+    @patch('doctrail.server.run_enrichment')
+    def test_token_required_when_configured(self, mock_run_enrichment, monkeypatch):
+        monkeypatch.setenv("DOCTRAIL_ENABLE_WRITE_API", "1")
+        monkeypatch.setenv("DOCTRAIL_SERVER_HOST", "0.0.0.0")
+        monkeypatch.setenv("DOCTRAIL_SERVER_TOKEN", "secret")
+
+        response = client.post("/enrich", json={
+            "config_path": "test_config.yml",
+            "enrichments": ["test_task"],
+        })
+
+        assert response.status_code == 401
+        mock_run_enrichment.assert_not_called()
+
+    @patch('doctrail.server.run_enrichment')
+    def test_token_allows_enabled_write_endpoint(self, mock_run_enrichment, monkeypatch):
+        monkeypatch.setenv("DOCTRAIL_ENABLE_WRITE_API", "1")
+        monkeypatch.setenv("DOCTRAIL_SERVER_HOST", "0.0.0.0")
+        monkeypatch.setenv("DOCTRAIL_SERVER_TOKEN", "secret")
+        mock_run_enrichment.return_value = {
+            'status': 'success',
+            'enrichments_run': ['test_task'],
+            'results': [],
+            'errors': [],
+            'total_processed': 0,
+        }
+
+        response = client.post(
+            "/enrich",
+            headers={"Authorization": "Bearer secret"},
+            json={"config_path": "test_config.yml", "enrichments": ["test_task"]},
+        )
+
+        assert response.status_code == 200
+        mock_run_enrichment.assert_called_once()
+
+
+@pytest.mark.usefixtures("write_api_enabled")
 class TestEnrichEndpoint:
     """Test /enrich endpoint."""
 
@@ -160,6 +239,7 @@ class TestEnrichEndpoint:
             assert call_kwargs['overwrite'] is True
 
 
+@pytest.mark.usefixtures("write_api_enabled")
 class TestIngestEndpoint:
     """Test /ingest endpoint."""
 
@@ -261,6 +341,7 @@ class TestIngestEndpoint:
         assert "Configuration error" in response.json()["detail"]
 
 
+@pytest.mark.usefixtures("write_api_enabled")
 class TestExportEndpoint:
     """Test /export endpoint."""
 
@@ -309,6 +390,7 @@ class TestExportEndpoint:
         assert "Configuration error" in response.json()["detail"]
 
 
+@pytest.mark.usefixtures("write_api_enabled")
 class TestRequestModels:
     """Test Pydantic request models validate correctly."""
 

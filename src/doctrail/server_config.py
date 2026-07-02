@@ -186,7 +186,7 @@ class DatabaseConfig:
 @dataclass
 class ServerConfig:
     """Configuration for the multi-database server."""
-    host: str = "0.0.0.0"
+    host: str = "127.0.0.1"
     port: int = 8000
     databases: Dict[str, DatabaseConfig] = field(default_factory=dict)
 
@@ -206,7 +206,7 @@ class ServerConfig:
 
         # Parse server section
         server_data = data.get("server", {})
-        host = server_data.get("host", "0.0.0.0")
+        host = server_data.get("host", "127.0.0.1")
         port = server_data.get("port", 8000)
 
         # Parse databases section

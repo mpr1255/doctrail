@@ -45,10 +45,6 @@ def find_doctrail_env_file(start_dir: Optional[str | Path] = None) -> Optional[P
     """Find the nearest doctrail project .env file for the current working tree."""
     current_dir = Path(start_dir or Path.cwd()).resolve()
 
-    direct_env = current_dir / ".env"
-    if direct_env.is_file():
-        return direct_env
-
     for candidate_dir in (current_dir, *current_dir.parents):
         candidate_env = candidate_dir / ".env"
         if candidate_env.is_file() and (candidate_dir / ".doctrail").exists():
@@ -93,16 +89,18 @@ def load_doctrail_environment(
     *,
     override: bool = True,
 ) -> Optional[Path]:
-    """Load .env settings into the process environment so doctrail-local values beat
-    inherited shell env.
+    """Load .env settings into the process environment.
 
     Two sources, applied lowest-precedence first:
       1. The doctrail source-tree root .env (source-run convenience; absent once installed
          as a wheel). Keeps a machine-wide key scoped to doctrail without a shell export.
       2. The nearest project .env for the current working tree (cwd, or an ancestor that
-         also contains a .doctrail/ marker).
+         also contains a .doctrail/ marker). A bare .env in an unrelated cwd is ignored.
 
     The project .env is applied last, so a project can override the source-root default.
+    With the default override=True, a marked doctrail project's .env also overrides
+    inherited shell env, which keeps project-specific billing credentials local to the
+    project.
     Returns the most specific .env that was applied, or None if neither was found.
     """
     applied: Optional[Path] = None

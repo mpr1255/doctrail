@@ -33,10 +33,11 @@ import logging
 import os
 import sqlite3
 from contextlib import asynccontextmanager
+from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
-from fastapi import FastAPI, HTTPException, Query, Depends
+from fastapi import FastAPI, Header, HTTPException, Query, Depends
 from fastapi.responses import JSONResponse, PlainTextResponse
 from pydantic import BaseModel, Field
 from .core import (
@@ -64,6 +65,11 @@ from .search import (
 
 logger = logging.getLogger(__name__)
 
+try:
+    DOCTRAIL_VERSION = version("doctrail")
+except PackageNotFoundError:
+    DOCTRAIL_VERSION = "0.0.0+unknown"
+
 # Global state
 server_config = None  # ServerConfig instance
 chroma_clients: Dict[str, Any] = {}  # name -> (client, collection)
@@ -85,7 +91,7 @@ class DatabaseInfo(BaseModel):
 class ServerInfoResponse(BaseModel):
     """Response for root endpoint."""
     service: str = "doctrail"
-    version: str = "0.2.1"
+    version: str = DOCTRAIL_VERSION
     databases: List[DatabaseInfo]
     usage: str = "GET /db/{database_name}/help for database-specific documentation"
 
@@ -302,12 +308,42 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Doctrail API",
     description="Multi-database search and enrichment server",
-    version="0.2.1",
+    version=DOCTRAIL_VERSION,
     lifespan=lifespan,
 )
 
 
 # Dependency to get database config and request-scoped connection
+
+def _env_flag(name: str) -> bool:
+    return os.environ.get(name, "").lower() in {"1", "true", "yes", "on"}
+
+
+def _host_requires_write_token() -> bool:
+    host = os.environ.get("DOCTRAIL_SERVER_HOST", "127.0.0.1")
+    return host not in {"127.0.0.1", "localhost", "::1"}
+
+
+async def require_write_api(authorization: Optional[str] = Header(None)) -> None:
+    """Gate legacy write-capable HTTP endpoints."""
+    if not _env_flag("DOCTRAIL_ENABLE_WRITE_API"):
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "Legacy write API disabled. Start the server with "
+                "--enable-write-api to use this endpoint."
+            ),
+        )
+
+    token = os.environ.get("DOCTRAIL_SERVER_TOKEN")
+    if _host_requires_write_token() and not token:
+        raise HTTPException(
+            status_code=403,
+            detail="A bearer token is required when write endpoints are enabled on a non-loopback host.",
+        )
+
+    if token and authorization != f"Bearer {token}":
+        raise HTTPException(status_code=401, detail="Invalid or missing bearer token.")
 
 def _get_db_config(db_name: str):
     """Get database config by name."""
@@ -347,7 +383,7 @@ async def root():
         return {
             "status": "ok",
             "service": "doctrail",
-            "version": "0.2.1",
+            "version": DOCTRAIL_VERSION,
             "mode": "legacy",
             "databases": [],
             "usage": "Use /enrich, /ingest, /export endpoints. Or set DOCTRAIL_SERVER_CONFIG for multi-db mode."
@@ -367,7 +403,7 @@ async def root():
     return {
         "status": "ok",
         "service": "doctrail",
-        "version": "0.2.1",
+        "version": DOCTRAIL_VERSION,
         "mode": "multi-database",
         "databases": databases,
         "usage": "GET /db/{database_name}/help for database-specific documentation"
@@ -377,7 +413,7 @@ async def root():
 @app.get("/health", response_model=HealthResponse)
 async def health():
     """Health check endpoint."""
-    return {"status": "ok", "version": "0.2.1"}
+    return {"status": "ok", "version": DOCTRAIL_VERSION}
 
 
 # Help endpoints
@@ -827,7 +863,7 @@ async def list_collections(db_name: str):
 
 # Legacy endpoints (backward compatible with original Doctrail server)
 
-@app.post("/enrich", response_model=EnrichmentResponse)
+@app.post("/enrich", response_model=EnrichmentResponse, dependencies=[Depends(require_write_api)])
 async def enrich(request: EnrichmentRequest):
     """
     Run enrichment tasks on database content using LLM processing.
@@ -866,7 +902,7 @@ async def enrich(request: EnrichmentRequest):
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
 
-@app.post("/ingest", response_model=IngestResponse)
+@app.post("/ingest", response_model=IngestResponse, dependencies=[Depends(require_write_api)])
 async def ingest(request: IngestRequest):
     """
     Ingest documents into database from various sources.
@@ -910,7 +946,7 @@ async def ingest(request: IngestRequest):
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
 
-@app.post("/export", response_model=ExportResponse)
+@app.post("/export", response_model=ExportResponse, dependencies=[Depends(require_write_api)])
 async def export(request: ExportRequest):
     """
     Export enriched data in various formats.
@@ -951,4 +987,5 @@ async def list_enrichments_endpoint(request: ListEnrichmentsRequest):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000, log_level="info")
+    os.environ.setdefault("DOCTRAIL_SERVER_HOST", "127.0.0.1")
+    uvicorn.run(app, host="127.0.0.1", port=8000, log_level="info")

@@ -15,9 +15,21 @@ from .utils import _exit_error, setup_logging
               help='Server configuration file (default: doctrail-server.yaml)')
 @click.option('--host', default=None, help='Override host from config')
 @click.option('--port', default=None, type=int, help='Override port from config')
+@click.option('--enable-write-api', is_flag=True,
+              help='Enable legacy /enrich, /ingest, and /export HTTP endpoints')
+@click.option('--token', default=None,
+              help='Bearer token required for write endpoints when enabled')
 @click.option('--verbose', is_flag=True, help='Enable verbose logging')
 @click.pass_context
-def serve(ctx, config_path: Optional[str], host: Optional[str], port: Optional[int], verbose: bool):
+def serve(
+    ctx,
+    config_path: Optional[str],
+    host: Optional[str],
+    port: Optional[int],
+    enable_write_api: bool,
+    token: Optional[str],
+    verbose: bool,
+):
     """
     Start the Doctrail multi-database server.
 
@@ -27,7 +39,7 @@ def serve(ctx, config_path: Optional[str], host: Optional[str], port: Optional[i
     \b
     # doctrail-server.yaml
     server:
-      host: 0.0.0.0
+      host: 127.0.0.1
       port: 8000
     databases:
       literature: /data/literature    # directory containing .db file
@@ -42,6 +54,7 @@ def serve(ctx, config_path: Optional[str], host: Optional[str], port: Optional[i
     Example:
         doctrail serve --config doctrail-server.yaml
         doctrail serve --port 9000
+        doctrail serve --host 0.0.0.0 --enable-write-api --token "$DOCTRAIL_SERVER_TOKEN"
     """
     setup_logging(verbose)
 
@@ -57,7 +70,7 @@ def serve(ctx, config_path: Optional[str], host: Optional[str], port: Optional[i
         os.environ["DOCTRAIL_SERVER_CONFIG"] = "doctrail-server.yaml"
 
     # Load config to get defaults
-    final_host = host or "0.0.0.0"
+    final_host = host or "127.0.0.1"
     final_port = port or 8000
 
     if os.environ.get("DOCTRAIL_SERVER_CONFIG"):
@@ -70,7 +83,25 @@ def serve(ctx, config_path: Optional[str], host: Optional[str], port: Optional[i
             if verbose:
                 click.echo(f"Could not load config: {e}", err=True)
 
+    loopback_hosts = {"127.0.0.1", "localhost", "::1"}
+    wide_bind = final_host not in loopback_hosts
+    if enable_write_api:
+        os.environ["DOCTRAIL_ENABLE_WRITE_API"] = "1"
+        if token:
+            os.environ["DOCTRAIL_SERVER_TOKEN"] = token
+        if wide_bind and not os.environ.get("DOCTRAIL_SERVER_TOKEN"):
+            _exit_error(
+                "Refusing to enable write endpoints on a non-loopback host without "
+                "--token or DOCTRAIL_SERVER_TOKEN."
+            )
+    else:
+        os.environ.pop("DOCTRAIL_ENABLE_WRITE_API", None)
+
+    os.environ["DOCTRAIL_SERVER_HOST"] = final_host
+
     click.echo(f"Starting Doctrail server on http://{final_host}:{final_port}")
+    if not enable_write_api:
+        click.echo("Legacy write endpoints are disabled. Use --enable-write-api to enable them.")
 
     # Run server
     uvicorn.run(
