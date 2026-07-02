@@ -35,4 +35,4 @@ test:
 deploy: docs package-docs-check test
 	git status --short
 
-release-check: generated-clean package-docs-check test
+release-check: generated-clean docs package-docs-check test
