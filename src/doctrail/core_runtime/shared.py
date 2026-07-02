@@ -80,6 +80,40 @@ BATCH_PROVIDER_CONFIGS = {
 }
 
 
+def _find_active_matching_batch_job(
+    *,
+    db_path: str,
+    provider_name: str,
+    provider_config: Dict[str, Any],
+    enrichment_name: str,
+    model: str,
+    prompt_id: str,
+    query_hash: str,
+    dedupe_scope: str,
+    current_run_id: str,
+) -> Optional[Dict[str, Any]]:
+    """Return an active provider job for the same batch identity, if one exists."""
+    active_statuses = sorted(provider_config["active_statuses"])
+    for job in list_enrichment_batch_jobs(db_path, statuses=active_statuses):
+        if job.get("run_id") == current_run_id:
+            continue
+        if job.get("provider") != provider_name or job.get("model") != model:
+            continue
+
+        run = get_enrichment_run(db_path, job["run_id"])
+        if not run:
+            continue
+        if (
+            run.get("enrichment_name") == enrichment_name
+            and run.get("model") == model
+            and run.get("prompt_id") == prompt_id
+            and run.get("query_hash") == query_hash
+            and run.get("dedupe_scope") == dedupe_scope
+        ):
+            return {"job": job, "run": run}
+    return None
+
+
 def _uses_direct_anthropic(model: str) -> bool:
     """Return True for models sent to Anthropic's direct API."""
     return model.startswith("claude") or model.startswith("anthropic/")
@@ -523,6 +557,28 @@ async def _submit_batch_jobs(
     input_columns = enrichment_config.get("input", {}).get("input_columns", [])
     output_schema = enrichment_config.get("schema")
     structured_output = pydantic_model is not None
+
+    current_run = get_enrichment_run(db_path, run_id)
+    active_match = _find_active_matching_batch_job(
+        db_path=db_path,
+        provider_name=provider_name,
+        provider_config=provider_config,
+        enrichment_name=enrichment_config["name"],
+        model=model,
+        prompt_id=(current_run or {}).get("prompt_id") or "",
+        query_hash=(current_run or {}).get("query_hash") or "",
+        dedupe_scope=(current_run or {}).get("dedupe_scope") or "query",
+        current_run_id=run_id,
+    )
+    if active_match:
+        job = active_match["job"]
+        run = active_match["run"]
+        raise EnrichmentError(
+            "Matching provider batch already active: "
+            f"run_id={run['run_id']} provider_batch_id={job.get('provider_batch_id')} "
+            f"status={job.get('status')}. Poll it with "
+            f"`doctrail batch watch --run-id {run['run_id']}`."
+        )
 
     shards: List[Dict[str, Any]] = []
     current_requests: List[Any] = []

@@ -666,6 +666,94 @@ def test_query_scope_cost_estimate_counts_only_unprocessed_rows(temp_env, monkey
     assert observed == {"row_keys": ["doc3"], "actual_total": 1}
 
 
+def test_structured_persist_failure_does_not_call_legacy_fallback(temp_env, monkeypatch):
+    """A DB write failure after a structured response must not trigger a second LLM call."""
+    from doctrail.core import EnrichmentError, run_enrichment
+
+    db_path = temp_env["db_path"]
+    config_path = temp_env["temp_dir"] / "persist_failure.yml"
+
+    conn = sqlite3.connect(db_path)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS documents (
+            sha1 TEXT PRIMARY KEY,
+            filename TEXT,
+            raw_content TEXT
+        )
+    """)
+    conn.execute("DELETE FROM documents")
+    conn.execute(
+        "INSERT INTO documents (sha1, filename, raw_content) VALUES (?, ?, ?)",
+        ("doc1", "one.txt", "x" * 300),
+    )
+    conn.commit()
+    conn.close()
+
+    config = {
+        "database": str(db_path),
+        "default_table": "documents",
+        "sql_queries": {
+            "all_docs": "SELECT rowid, sha1 FROM documents",
+        },
+        "enrichments": [
+            {
+                "name": "structured_summary",
+                "input": {
+                    "query": "all_docs",
+                    "input_columns": ["raw_content"],
+                },
+                "prompt": "Summarize this: {raw_content}",
+                "model": "gpt-4o-mini",
+                "output_column": "summary",
+                "schema": {"summary": {"type": "string"}},
+            }
+        ],
+    }
+
+    with open(config_path, "w") as handle:
+        yaml.dump(config, handle)
+
+    calls = {"structured": 0, "legacy": 0}
+
+    async def fake_structured(**kwargs):
+        calls["structured"] += 1
+        return {
+            "enrichment_id": "persist-failure-1",
+            "rowid": kwargs["row"].get("rowid"),
+            "key_value": kwargs["row"]["sha1"],
+            "original": {},
+            "updated": {"summary": "structured answer"},
+            "raw_json": '{"summary": "structured answer"}',
+            "full_prompt": "prompt",
+            "usage": {},
+        }
+
+    async def fake_legacy(*args, **kwargs):
+        calls["legacy"] += 1
+        return {
+            "key_value": "doc1",
+            "updated": "legacy answer",
+        }
+
+    def fail_persist(*args, **kwargs):
+        raise sqlite3.OperationalError("simulated write failure")
+
+    monkeypatch.setattr("doctrail.llm_operations.process_row_structured", fake_structured)
+    monkeypatch.setattr("doctrail.llm_operations.process_row", fake_legacy)
+    monkeypatch.setattr("doctrail.llm_operations.persist_enrichment_result", fail_persist)
+
+    with pytest.raises(EnrichmentError) as exc_info:
+        asyncio.run(run_enrichment(
+            config_path=str(config_path),
+            enrichments=["structured_summary"],
+            overwrite=False,
+            skip_cost_check=True,
+        ))
+
+    assert "simulated write failure" in str(exc_info.value)
+    assert calls == {"structured": 1, "legacy": 0}
+
+
 def test_run_enrichment_pack_selected_indexes_unpacks_row_level_results(temp_env, monkeypatch):
     """Packed boolean screening should persist one ordinary row result per source row."""
     from doctrail.core import run_enrichment

@@ -28,6 +28,74 @@ from doctrail.utils.model_pricing import get_openai_batch_model_info
 from tests.doctrail_support import *
 
 
+@pytest.mark.parametrize(
+    ("provider_name", "active_status", "model"),
+    [
+        ("openai", "validating", "gpt-4o-mini"),
+        ("anthropic", "in_progress", "claude-sonnet-4"),
+        ("gemini", "BATCH_STATE_RUNNING", "gemini-2.5-flash"),
+    ],
+)
+def test_active_batch_guard_recognizes_provider_statuses(temp_env, provider_name, active_status, model):
+    """The shared active-batch guard should cover every direct batch provider."""
+    from doctrail.core_runtime.shared import (
+        BATCH_PROVIDER_CONFIGS,
+        _find_active_matching_batch_job,
+    )
+    from doctrail.db_operations import (
+        create_enrichment_batch_job,
+        start_enrichment_run,
+    )
+
+    db_path = str(temp_env["db_path"])
+    run_id = f"{provider_name}_active_run"
+    prompt_id = "prompt_123"
+    query_hash = "query_123"
+
+    start_enrichment_run(
+        db_path,
+        run_id=run_id,
+        command_started_at=datetime.now().isoformat(),
+        enrichment_name="batch_summary",
+        model=model,
+        prompt_id=prompt_id,
+        query_sql="SELECT rowid, sha1 FROM documents",
+        query_hash=query_hash,
+        key_column="sha1",
+        source_name="documents",
+        dedupe_scope="query",
+        status="submitted",
+    )
+    create_enrichment_batch_job(
+        db_path,
+        run_id=run_id,
+        provider=provider_name,
+        endpoint=BATCH_PROVIDER_CONFIGS[provider_name]["endpoint"],
+        model=model,
+        input_file_id=f"{provider_name}_input",
+        provider_batch_id=f"{provider_name}_batch",
+        status=active_status,
+        request_count=1,
+        input_file_bytes=10,
+    )
+
+    match = _find_active_matching_batch_job(
+        db_path=db_path,
+        provider_name=provider_name,
+        provider_config=BATCH_PROVIDER_CONFIGS[provider_name],
+        enrichment_name="batch_summary",
+        model=model,
+        prompt_id=prompt_id,
+        query_hash=query_hash,
+        dedupe_scope="query",
+        current_run_id="new_run",
+    )
+
+    assert match is not None
+    assert match["run"]["run_id"] == run_id
+    assert match["job"]["status"] == active_status
+
+
 def test_anthropic_batch_submission_and_poll_success(temp_env, monkeypatch):
     """Direct Anthropic models should submit, poll, and reconcile through the existing batch flow."""
     from doctrail.core import run_enrichment, poll_batch_runs

@@ -984,16 +984,16 @@ async def process_batch(results, prompt, model, pbar, input_cols, parsed_input_c
                     config=config,
                     table=table,
                 )
-                
-                if result:  # Store ALL results, including failures/nulls for audit trail
-                    async with db_semaphore:
-                        await persist_result(result)
-                return result
 
             except Exception as e:
                 logging.error(f"Error in schema-driven processing: {e}")
                 # Fall back to legacy processing
                 pass
+            else:
+                if result:  # Store ALL results, including failures/nulls for audit trail
+                    async with db_semaphore:
+                        await persist_result(result)
+                return result
         
         # LEGACY: Existing hardcoded processing logic
         if enrichment_config['name'] in TRANSLATION_ENRICHMENTS and enrichment_config['name'] == 'translate_to_english_by_line':

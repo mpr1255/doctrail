@@ -59,6 +59,29 @@ class TokenUsage:
         output_cost = (self.output_tokens / 1_000_000) * output_price
         return input_cost + output_cost
 
+
+class StructuredGenerationError(Exception):
+    """Structured generation failure that may still carry billed token usage."""
+
+    def __init__(self, message: str, usage: Optional[TokenUsage] = None):
+        super().__init__(message)
+        self.usage = usage
+
+
+def _combine_token_usage(usages: List[Optional[TokenUsage]]) -> Optional[TokenUsage]:
+    """Combine usage from multiple billed fallback attempts."""
+    present = [usage for usage in usages if usage is not None]
+    if not present:
+        return None
+    return TokenUsage(
+        input_tokens=sum(usage.input_tokens for usage in present),
+        output_tokens=sum(usage.output_tokens for usage in present),
+        cached_input_tokens=sum(usage.cached_input_tokens for usage in present),
+        model=present[-1].model,
+        batch_pricing=any(usage.batch_pricing for usage in present),
+    )
+
+
 class OpenAIProvider:
     """OpenAI LLM provider. Also used for OpenAI-compatible APIs (e.g. OpenRouter)."""
 
@@ -145,6 +168,7 @@ class OpenAIProvider:
 
         caps = self._capabilities
         usage = None
+        billed_usages: List[Optional[TokenUsage]] = []
         resolved_reasoning_effort = self._resolve_reasoning_effort(reasoning_effort)
 
         # Models with neither structured_outputs nor response_format: skip tiers 1&2,
@@ -180,6 +204,7 @@ class OpenAIProvider:
                         output_tokens=response.usage.completion_tokens,
                         model=self.model
                     )
+                    billed_usages.append(usage)
                     logger.debug(f"Token usage: {usage.input_tokens} in, {usage.output_tokens} out, est. ${usage.estimate_cost():.4f}")
 
                 parsed_result = response.choices[0].message.parsed
@@ -189,10 +214,12 @@ class OpenAIProvider:
 
                 logger.debug(f"Tier 1 (native structured) success: {type(parsed_result)}")
                 if return_usage:
-                    return parsed_result, usage
+                    return parsed_result, _combine_token_usage(billed_usages)
                 return parsed_result
 
             except Exception as e:
+                if getattr(e, "usage", None):
+                    billed_usages.append(e.usage)
                 logger.warning(f"Tier 1 (native structured output) failed: {e}")
         else:
             logger.debug(f"Tier 1 skipped: model '{self.model}' lacks structured_outputs support")
@@ -208,12 +235,15 @@ class OpenAIProvider:
                     max_tokens,
                     reasoning_effort=resolved_reasoning_effort,
                 )
+                billed_usages.append(usage)
                 logger.debug(f"Tier 2 (JSON mode) success: {type(result)}")
                 if return_usage:
-                    return result, usage
+                    return result, _combine_token_usage(billed_usages)
                 return result
 
             except Exception as e:
+                if getattr(e, "usage", None):
+                    billed_usages.append(e.usage)
                 logger.warning(f"Tier 2 (JSON mode) failed: {e}")
         else:
             logger.debug(f"Tier 2 skipped: model '{self.model}' lacks response_format support")
@@ -253,11 +283,12 @@ class OpenAIProvider:
                 reasoning_effort=resolved_reasoning_effort,
                 return_usage=True,
             )
+            billed_usages.append(usage)
             data = self._extract_json_from_text(text_response)
             result = pydantic_model(**data)
             logger.debug(f"Tier 3 (text + JSON extraction) success: {type(result)}")
             if return_usage:
-                return result, usage
+                return result, _combine_token_usage(billed_usages)
             return result
 
         except Exception as e:
@@ -301,11 +332,14 @@ class OpenAIProvider:
             )
 
         text = response.choices[0].message.content
-        if not text:
-            raise ValueError("JSON mode returned empty response")
+        try:
+            if not text:
+                raise ValueError("JSON mode returned empty response")
 
-        data = json.loads(text)
-        result = pydantic_model(**data)
+            data = json.loads(text)
+            result = pydantic_model(**data)
+        except Exception as exc:
+            raise StructuredGenerationError(str(exc), usage=usage) from exc
         return result, usage
 
     @staticmethod

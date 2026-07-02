@@ -457,6 +457,35 @@ This reflects the aggressive tone throughout.'''
         assert token_usage.output_tokens == 17
 
     @pytest.mark.asyncio
+    async def test_fallback_usage_includes_billed_failed_tiers(self):
+        """Usage returned after fallback should include earlier billed attempts."""
+        provider = OpenAIProvider(api_key="test-key", model="gpt-4o-mini")
+
+        provider.client.beta.chat.completions.parse = AsyncMock(
+            return_value=_make_parse_response(
+                None,
+                usage=_make_usage_mock(prompt_tokens=100, completion_tokens=20),
+            )
+        )
+        provider.client.chat.completions.create = AsyncMock(
+            return_value=_make_chat_response(
+                '{"hostility_level": 2, "explanation": "fallback worked"}',
+                usage=_make_usage_mock(prompt_tokens=30, completion_tokens=7),
+            )
+        )
+
+        result, token_usage = await provider.generate_structured(
+            messages=[{"role": "user", "content": "classify this"}],
+            pydantic_model=SimpleResult,
+            return_usage=True,
+        )
+
+        assert result.explanation == "fallback worked"
+        assert isinstance(token_usage, TokenUsage)
+        assert token_usage.input_tokens == 130
+        assert token_usage.output_tokens == 27
+
+    @pytest.mark.asyncio
     async def test_claude_sonnet_via_openrouter(self):
         """Simulate Claude Sonnet 4 via OpenRouter: no structured_outputs, no response_format.
 

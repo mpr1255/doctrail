@@ -99,6 +99,79 @@ def test_openai_batch_submission_shards_large_run(temp_env, monkeypatch):
     assert all(len(upload["lines"]) == expected for upload, expected in zip(backend.uploaded_files, request_counts))
 
 
+def test_openai_batch_duplicate_active_submission_is_blocked(temp_env, monkeypatch):
+    """A matching active provider batch should block a duplicate submission before upload."""
+    from doctrail.core import EnrichmentError, run_enrichment
+
+    db_path = temp_env["db_path"]
+    config_path = temp_env["temp_dir"] / "batch_duplicate.yml"
+
+    conn = sqlite3.connect(db_path)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS documents (
+            sha1 TEXT PRIMARY KEY,
+            filename TEXT,
+            raw_content TEXT
+        )
+    """)
+    conn.execute("DELETE FROM documents")
+    conn.execute(
+        "INSERT INTO documents (sha1, filename, raw_content) VALUES (?, ?, ?)",
+        ("duplicate_sha1", "duplicate.txt", "alpha beta gamma"),
+    )
+    conn.commit()
+    conn.close()
+
+    config = {
+        "database": str(db_path),
+        "default_table": "documents",
+        "sql_queries": {
+            "all_docs": "SELECT rowid, sha1 FROM documents ORDER BY sha1",
+        },
+        "enrichments": [
+            {
+                "name": "batch_summary",
+                "input": {
+                    "query": "all_docs",
+                    "input_columns": ["filename"],
+                },
+                "prompt": "Summarize {filename}",
+                "model": "gpt-4o-mini",
+                "output_column": "summary",
+            }
+        ],
+    }
+    with open(config_path, "w") as handle:
+        yaml.dump(config, handle)
+
+    provider = OpenAIProvider(api_key="test-key", model="gpt-4o-mini")
+    backend = FakeOpenAIBatchBackend(provider)
+    monkeypatch.setattr("doctrail.core._get_batch_provider", lambda model: provider)
+
+    first = asyncio.run(run_enrichment(
+        config_path=str(config_path),
+        enrichments=["batch_summary"],
+        overwrite=True,
+        skip_cost_check=True,
+        execution_mode="batch",
+    ))
+    assert first["status"] == "submitted"
+    assert len(backend.uploaded_files) == 1
+
+    with pytest.raises(EnrichmentError) as exc_info:
+        asyncio.run(run_enrichment(
+            config_path=str(config_path),
+            enrichments=["batch_summary"],
+            overwrite=True,
+            skip_cost_check=True,
+            execution_mode="batch",
+        ))
+
+    assert "Matching provider batch already active" in str(exc_info.value)
+    assert "doctrail batch watch --run-id" in str(exc_info.value)
+    assert len(backend.uploaded_files) == 1
+
+
 def test_openai_batch_submission_failure_finalizes_run(temp_env, monkeypatch):
     """A provider submit failure should mark the run failed instead of leaving it submitted forever."""
     from doctrail.core import run_enrichment
