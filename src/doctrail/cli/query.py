@@ -18,6 +18,7 @@ from .utils import _exit_error, _load_project_config
 from ..db_operations import (
     ENRICHMENT_OVERRIDES_TABLE,
     ENRICHMENTS_TABLE,
+    _quote_identifier,
 )
 
 
@@ -137,8 +138,9 @@ def query(ctx, query_or_id: str, limit: int, table: str, as_json: bool, content:
         click.echo(f"Available tables: {', '.join(db.table_names())}", err=True)
         raise click.exceptions.Exit(1)
 
-    rows = list(db.execute(f"SELECT rowid, * FROM {table} LIMIT ?", [limit]).fetchall())
-    columns = [d[0] for d in db.execute(f"SELECT rowid, * FROM {table} LIMIT 1").description]
+    table_ref = _quote_identifier(table, "table name")
+    rows = list(db.execute(f"SELECT rowid, * FROM {table_ref} LIMIT ?", [limit]).fetchall())
+    columns = [d[0] for d in db.execute(f"SELECT rowid, * FROM {table_ref} LIMIT 1").description]
 
     if as_json:
         result = [dict(zip(columns, row)) for row in rows]

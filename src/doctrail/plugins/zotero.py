@@ -34,6 +34,7 @@ import sqlite_utils
 # OpenAlex abstract fetching via direct API calls (no external dependency needed)
 
 # Import the process_document function from ingest package
+from doctrail.core_utils import load_doctrail_environment
 from doctrail.ingest import process_document
 
 console = Console()
@@ -123,21 +124,10 @@ class Plugin:
         logger.add(sys.stderr, level=log_level)
         
         # Get Zotero credentials
+        load_doctrail_environment()
         final_api_key = api_key or config.get('zotero_api_key') or os.environ.get('ZOTERO_API_KEY')
         final_user_id = user_id or config.get('zotero_user_id') or os.environ.get('ZOTERO_USER_ID')
-        
-        if not final_api_key or not final_user_id:
-            # Fall back to a .env file in the current working directory
-            env_path = Path.cwd() / ".env"
-            if env_path.exists():
-                logger.info(f"Loading Zotero credentials from {env_path}")
-                with open(env_path) as f:
-                    for line in f:
-                        if line.startswith('ZOTERO_API_KEY='):
-                            final_api_key = line.split('=', 1)[1].strip().strip('"')
-                        elif line.startswith('ZOTERO_USER_ID='):
-                            final_user_id = line.split('=', 1)[1].strip().strip('"')
-        
+
         if not final_api_key or not final_user_id:
             raise ValueError(
                 "ERROR: Zotero API credentials not found.\n\n"
@@ -145,7 +135,7 @@ class Plugin:
                 "1. Command line: --api-key and --user-id\n"
                 "2. Config file: zotero_api_key and zotero_user_id\n"
                 "3. Environment: ZOTERO_API_KEY and ZOTERO_USER_ID\n"
-                "4. A .env file in the current directory (ZOTERO_API_KEY, ZOTERO_USER_ID)\n"
+                "4. A project .env file in an initialized Doctrail project\n"
             )
         
         # Set default Zotero directory - try common locations

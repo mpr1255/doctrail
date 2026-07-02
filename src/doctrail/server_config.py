@@ -20,6 +20,8 @@ from typing import Dict, Optional, Any, List
 import yaml
 import sqlite3
 
+from .db_operations import _quote_identifier
+
 logger = logging.getLogger(__name__)
 
 
@@ -162,7 +164,8 @@ class DatabaseConfig:
             with self.get_connection() as conn:
                 # Document count
                 table = self.schema.documents_table
-                cursor = conn.execute(f"SELECT COUNT(*) FROM {table}")
+                table_ref = _quote_identifier(table, "documents table")
+                cursor = conn.execute(f"SELECT COUNT(*) FROM {table_ref}")
                 stats["document_count"] = cursor.fetchone()[0]
 
                 # Chunk count if available

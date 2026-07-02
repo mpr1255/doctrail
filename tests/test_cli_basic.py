@@ -15,6 +15,7 @@ These are fast sanity checks, not full integration tests.
 """
 
 import json
+import hashlib
 import py_compile
 import sqlite3
 import subprocess
@@ -38,6 +39,53 @@ def test_cli_help():
     assert 'Usage:' in result.output
     assert 'enrich' in result.output
     assert 'ingest' in result.output
+
+
+@pytest.mark.asyncio
+async def test_ingest_existing_row_check_quotes_table_name(tmp_path):
+    """Append-mode ingest should detect existing rows in quoted table names."""
+    from doctrail.ingest.core import process_ingest
+
+    input_dir = tmp_path / "input"
+    input_dir.mkdir()
+    source_file = input_dir / "doc.txt"
+    source_file.write_text("hello", encoding="utf-8")
+    file_sha1 = hashlib.sha1(source_file.read_bytes()).hexdigest()
+
+    db_path = tmp_path / "docs.db"
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        """
+        CREATE TABLE "docs table" (
+            sha1 TEXT PRIMARY KEY,
+            filename TEXT,
+            filepath TEXT,
+            raw_content TEXT,
+            file_created TEXT,
+            file_modified TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO "docs table"
+            (sha1, filename, filepath, raw_content, file_created, file_modified)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (file_sha1, "doc.txt", str(source_file), "hello", "now", "now"),
+    )
+    conn.commit()
+    conn.close()
+
+    result = await process_ingest(
+        db_path=str(db_path),
+        input_dir=str(input_dir),
+        table="docs table",
+        force=True,
+        yes=True,
+    )
+
+    assert result["successful"] == 0
 
 
 def test_enrich_help():

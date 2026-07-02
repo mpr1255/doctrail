@@ -27,6 +27,7 @@ from loguru import logger
 # Import from sibling modules
 from .database import insert_document, check_db_schema, setup_fts, clean_metadata
 from .document_processor import process_document, SkippedFileException
+from ..db_operations import _quote_identifier
 from ..file_filters import should_skip_file, apply_file_patterns
 from .manifest import load_manifest, get_file_metadata, find_manifest_in_directory
 
@@ -327,7 +328,8 @@ async def process_ingest(
     if not overwrite:
         try:
             if table in db.table_names():
-                existing_sha1s = {row[0] for row in db.execute(f"SELECT sha1 FROM {table}")}
+                table_ref = _quote_identifier(table, "table name")
+                existing_sha1s = {row[0] for row in db.execute(f"SELECT sha1 FROM {table_ref}")}
                 logger.info(f"Found {len(existing_sha1s)} existing documents in table '{table}'")
         except Exception as e:
             logger.warning(f"Could not read existing documents: {e}")

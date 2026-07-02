@@ -19,7 +19,6 @@ Architecture:
     /db/{name}/text/{id}        → Get raw text
     /db/{name}/collections      → List collections
     /db/{name}/stats            → Database statistics
-    /db/{name}/enrich           → Run enrichment (POST)
 
 Legacy endpoints (backward compatible):
     /enrich                     → Run enrichment with config file
@@ -60,6 +59,7 @@ from .search import (
     format_document_text,
     SearchResponse as CoreSearchResponse,
 )
+from .db_operations import _quote_identifier
 
 logger = logging.getLogger(__name__)
 
@@ -497,41 +497,34 @@ async def help_enrich():
 
     return """# Enrichment API
 
+The HTTP server is read-first by default. Write-capable legacy endpoints are
+disabled unless the server is started with `doctrail serve --enable-write-api`.
+When enabled on a non-loopback host, they also require a bearer token.
+
 ## Run enrichment
 
-POST /db/{name}/enrich
+POST /enrich
 
 Request body:
 ```json
 {
     "config_path": "/path/to/config.yaml",
-    "enrichment_name": "detect_language",
+    "enrichments": ["detect_language"],
     "limit": 10,
     "overwrite": false
 }
 ```
 
-Or inline enrichment:
-```json
-{
-    "prompt": "Classify the language of this text",
-    "schema": {"enum": ["English", "Chinese", "Other"]},
-    "model": "gpt-4o-mini",
-    "limit": 10
-}
-```
+## Ingest documents
 
-## List enrichments
+POST /ingest
 
-GET /db/{name}/enrichments
+## Export data
 
-Returns available enrichment configurations.
+POST /export
 
-## Get enrichment result
-
-GET /db/{name}/enrichment/{doc_id}/{enrichment_name}
-
-Returns stored enrichment result for a document.
+Prefer the CLI for new workflows. These endpoints exist for backward
+compatibility and should not be exposed without an explicit token.
 """
 
 
@@ -722,9 +715,12 @@ async def get_text(db_name: str, doc_id: str):
         pk_col = db_config.schema.pk_column
         doc_table = db_config.schema.documents_table
         content_col = db_config.schema.content_column
+        pk_col_ref = _quote_identifier(pk_col, "primary key column")
+        doc_table_ref = _quote_identifier(doc_table, "documents table")
+        content_col_ref = _quote_identifier(content_col, "content column")
 
         cursor = conn.execute(
-            f"SELECT {content_col} FROM {doc_table} WHERE {pk_col} = ?",
+            f"SELECT {content_col_ref} FROM {doc_table_ref} WHERE {pk_col_ref} = ?",
             (doc_id,)
         )
         row = cursor.fetchone()
@@ -764,7 +760,10 @@ async def list_collections(db_name: str):
         # Fall back to collections column (denormalized)
         try:
             doc_table = db_config.schema.documents_table
-            cursor = conn.execute(f"SELECT DISTINCT collections FROM {doc_table} WHERE collections IS NOT NULL")
+            doc_table_ref = _quote_identifier(doc_table, "documents table")
+            cursor = conn.execute(
+                f"SELECT DISTINCT collections FROM {doc_table_ref} WHERE collections IS NOT NULL"
+            )
             all_collections = set()
             for row in cursor.fetchall():
                 if row[0]:

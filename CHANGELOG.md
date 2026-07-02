@@ -8,6 +8,7 @@
 - Disabled legacy write-capable HTTP endpoints by default; `/enrich`, `/ingest`, and `/export` now require explicit `--enable-write-api`.
 - Required a bearer token when legacy write endpoints are enabled on a non-loopback server host.
 - Changed runtime `.env` discovery so only marked Doctrail project `.env` files are loaded. They override inherited shell keys as the project-local source of truth; bare unrelated cwd `.env` files and package/global `.env` files are ignored.
+- Brought Zotero plugin credential loading under the same marked-project `.env` precedence policy.
 
 ### Rerun, cost, and billing correctness
 
@@ -26,6 +27,7 @@
 - Added `--key-column` support to `doctrail review` and fixed the review server join for non-`sha1` projects.
 - Sanitized export naming patterns so row-sourced filenames cannot escape the configured output directory.
 - Removed stale `doctrail sync` search guidance and made unsupported Chroma server search return a clear unavailable response.
+- Corrected server enrichment help so it no longer advertises unimplemented `/db/{name}/enrich` routes.
 - Removed dead shipped modules for the old web ingestor, unused config abstraction, and unused LLM client.
 
 ### Packaging and docs
@@ -33,6 +35,7 @@
 - Added PyPI project metadata: authors, classifiers, homepage, documentation, source, issues, and changelog links.
 - Moved FastAPI/Uvicorn into the `server` extra while keeping server tests covered through the test extra.
 - Added an OpenAI SDK floor and next-major cap.
+- Hardened configured table/key/content identifier handling across server, search, query, and ingest read paths.
 - Fixed stale doctrail.dev-era/generated-doc references, docs typos, and regenerated `docs/llms.txt`.
 
 ## 0.3.1 - revamp release readiness

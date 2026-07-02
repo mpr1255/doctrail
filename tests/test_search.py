@@ -314,6 +314,28 @@ class TestGetDocument:
 
         assert doc is None
 
+    def test_get_document_quotes_configured_identifiers(self):
+        """Configured table/key names should be quoted, not interpolated raw."""
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.execute(
+            'CREATE TABLE "docs table" ("doc id" TEXT PRIMARY KEY, title TEXT)'
+        )
+        conn.execute(
+            'INSERT INTO "docs table" ("doc id", title) VALUES (?, ?)',
+            ("doc-1", "Quoted identifiers"),
+        )
+
+        doc = get_document(
+            conn,
+            "doc-1",
+            documents_table="docs table",
+            pk_column="doc id",
+        )
+
+        assert doc is not None
+        assert doc.columns["title"] == "Quoted identifiers"
+
 
 class TestGetStats:
     """Test database statistics."""
@@ -329,6 +351,17 @@ class TestGetStats:
         assert "tables" in stats
         assert "documents" in stats["tables"]
         assert "chunks" in stats["tables"]
+
+    def test_get_stats_quotes_configured_table_name(self):
+        """Configured table names should support valid quoted SQLite names."""
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.execute('CREATE TABLE "docs table" (id INTEGER PRIMARY KEY)')
+        conn.execute('INSERT INTO "docs table" DEFAULT VALUES')
+
+        stats = get_stats(conn, documents_table="docs table")
+
+        assert stats["document_count"] == 1
 
 
 class TestFormatting:
@@ -419,6 +452,33 @@ class TestCliSearch:
 
         assert result.exit_code == 0
         assert 'db-path' in result.output.lower()
+
+    def test_query_default_table_quotes_configured_identifier(self, tmp_path, monkeypatch):
+        """The default table preview path should quote config-provided table names."""
+        db_path = tmp_path / "docs.db"
+        conn = sqlite3.connect(db_path)
+        conn.execute(
+            'CREATE TABLE "docs table" (sha1 TEXT PRIMARY KEY, filename TEXT, raw_content TEXT)'
+        )
+        conn.execute(
+            'INSERT INTO "docs table" (sha1, filename, raw_content) VALUES (?, ?, ?)',
+            ("doc-1", "doc.txt", "hello"),
+        )
+        conn.commit()
+        conn.close()
+
+        project_dir = tmp_path / "project"
+        (project_dir / ".doctrail").mkdir(parents=True)
+        (project_dir / ".doctrail" / "config.yml").write_text(
+            f"database: {db_path}\ndefault_table: docs table\n"
+        )
+        runner = CliRunner()
+        monkeypatch.chdir(project_dir)
+
+        result = runner.invoke(cli, ["query"])
+
+        assert result.exit_code == 0, result.output
+        assert "doc.txt" in result.output
 
     def test_document_cli_help(self):
         """Test document --help."""

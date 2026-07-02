@@ -13,6 +13,7 @@ from fastapi.testclient import TestClient
 
 from doctrail.server import app
 from doctrail.core import ConfigurationError, EnrichmentError, DatabaseError
+from doctrail.server_config import DatabaseConfig, SchemaConfig, ServerConfig
 
 
 # Create test client
@@ -45,6 +46,15 @@ class TestHealthEndpoints:
         data = response.json()
         assert data["status"] == "ok"
         assert "version" in data
+
+    def test_help_enrich_describes_gated_legacy_endpoints(self):
+        """Fallback enrich help should not advertise unimplemented /db write routes."""
+        response = client.get("/help/enrich")
+
+        assert response.status_code == 200
+        assert "POST /enrich" in response.text
+        assert "--enable-write-api" in response.text
+        assert "POST /db/{name}/enrich" not in response.text
 
 
 class TestLegacyWriteApiSecurity:
@@ -115,6 +125,47 @@ class TestLegacyWriteApiSecurity:
 
         assert response.status_code == 200
         mock_run_enrichment.assert_called_once()
+
+
+def test_text_endpoint_quotes_configured_identifiers(tmp_path, monkeypatch):
+    """Configured document table/key/content names should be safely quoted."""
+    import doctrail.server as server_module
+
+    db_dir = tmp_path / "weird"
+    db_dir.mkdir()
+    db_path = db_dir / "weird.db"
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        'CREATE TABLE "docs table" ("doc id" TEXT PRIMARY KEY, "body text" TEXT)'
+    )
+    conn.execute(
+        'INSERT INTO "docs table" ("doc id", "body text") VALUES (?, ?)',
+        ("doc-1", "quoted content"),
+    )
+    conn.commit()
+    conn.close()
+
+    db_config = DatabaseConfig(
+        name="weird",
+        path=db_dir,
+        db_file=db_path,
+        schema=SchemaConfig(
+            pk_column="doc id",
+            content_column="body text",
+            documents_table="docs table",
+        ),
+    )
+    monkeypatch.setattr(
+        server_module,
+        "server_config",
+        ServerConfig(databases={"weird": db_config}),
+    )
+
+    assert db_config.get_stats()["document_count"] == 1
+    response = client.get("/db/weird/text/doc-1")
+
+    assert response.status_code == 200
+    assert response.text == "quoted content"
 
 
 @pytest.mark.usefixtures("write_api_enabled")

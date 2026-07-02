@@ -9,6 +9,7 @@ Tests for the doctrail init command (new current-directory design).
 import os
 import builtins
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 from click.testing import CliRunner
@@ -324,6 +325,63 @@ class TestInitCommand:
 
             assert result.exit_code == 0
             assert "doctrail view" in result.output
+
+    @pytest.mark.asyncio
+    async def test_zotero_plugin_ignores_unmarked_cwd_env_file(self, tmp_path, monkeypatch):
+        """Zotero ingest should share Doctrail's marked-project .env policy."""
+        from doctrail.plugins.zotero import Plugin
+
+        (tmp_path / ".env").write_text(
+            "ZOTERO_API_KEY=unmarked-key\n"
+            "ZOTERO_USER_ID=12345\n"
+        )
+        monkeypatch.chdir(tmp_path)
+
+        with patch.dict(os.environ, {}, clear=True):
+            with pytest.raises(ValueError, match="Zotero API credentials not found"):
+                await Plugin().ingest(
+                    db_path=str(tmp_path / "zotero.db"),
+                    config={},
+                    collection="Research",
+                )
+
+    @pytest.mark.asyncio
+    async def test_zotero_plugin_prefers_marked_project_env_file(self, tmp_path, monkeypatch):
+        """A marked project .env should override inherited Zotero credentials."""
+        from doctrail.plugins import zotero as zotero_plugin
+        from doctrail.plugins.zotero import Plugin
+
+        class FakeZotero:
+            def __init__(self, user_id, library_type, api_key):
+                self.user_id = user_id
+                self.library_type = library_type
+                self.api_key = api_key
+
+            def key_info(self):
+                raise RuntimeError(f"{self.user_id}:{self.api_key}")
+
+        storage_dir = tmp_path / "Zotero" / "storage"
+        storage_dir.mkdir(parents=True)
+        (tmp_path / ".doctrail").mkdir()
+        (tmp_path / ".env").write_text(
+            "ZOTERO_API_KEY=project-key\n"
+            "ZOTERO_USER_ID=99999\n"
+        )
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(zotero_plugin.zotero, "Zotero", FakeZotero)
+
+        with patch.dict(
+            os.environ,
+            {"ZOTERO_API_KEY": "shell-key", "ZOTERO_USER_ID": "11111"},
+            clear=True,
+        ):
+            with pytest.raises(ConnectionError, match="99999:project-key"):
+                await Plugin().ingest(
+                    db_path=str(tmp_path / "zotero.db"),
+                    config={},
+                    collection="Research",
+                    zotero_dir=str(tmp_path / "Zotero"),
+                )
 
 
 if __name__ == "__main__":

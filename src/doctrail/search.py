@@ -276,6 +276,7 @@ def chroma_search(
     # Build filter for eligible document IDs if needed
     filter_ids = None
     if collection or year_min or year_max:
+        documents_table_ref = _quote_identifier(documents_table, "documents table")
         conditions = []
         params = []
         if collection:
@@ -290,7 +291,7 @@ def chroma_search(
 
         where_clause = " AND ".join(conditions)
         rows = conn.execute(
-            f"SELECT id FROM {documents_table} WHERE {where_clause}",
+            f"SELECT id FROM {documents_table_ref} WHERE {where_clause}",
             params
         ).fetchall()
         eligible_doc_ids = {row["id"] for row in rows}
@@ -344,6 +345,9 @@ def chroma_search(
 
     # Fetch content from SQLite
     results = []
+    documents_table_ref = _quote_identifier(documents_table, "documents table")
+    pk_column_ref = _quote_identifier(pk_column, "primary key column")
+    title_column_ref = _quote_identifier(title_column, "title column")
     for composite_id, distance in zip(chroma_results["ids"][0], chroma_results["distances"][0]):
         try:
             parts = composite_id.split("_")
@@ -358,11 +362,11 @@ def chroma_search(
                 c.content,
                 c.chunk_index,
                 c.document_id,
-                d.{pk_column} as doc_pk,
-                d.{title_column} as title,
+                d.{pk_column_ref} as doc_pk,
+                d.{title_column_ref} as title,
                 (SELECT COUNT(*) FROM chunks WHERE document_id = c.document_id) as total_chunks
             FROM chunks c
-            JOIN {documents_table} d ON d.id = c.document_id
+            JOIN {documents_table_ref} d ON d.id = c.document_id
             WHERE c.document_id = ? AND c.chunk_index = ?
         """, (doc_id, chunk_idx)).fetchone()
 
@@ -468,9 +472,12 @@ def get_document(
     Returns:
         DocumentResult or None if not found
     """
+    documents_table_ref = _quote_identifier(documents_table, "documents table")
+    pk_column_ref = _quote_identifier(pk_column, "primary key column")
+
     try:
         cursor = conn.execute(
-            f"SELECT * FROM {documents_table} WHERE {pk_column} = ?",
+            f"SELECT * FROM {documents_table_ref} WHERE {pk_column_ref} = ?",
             (doc_id,)
         )
         row = cursor.fetchone()
@@ -501,10 +508,11 @@ def get_stats(
         Dict with counts and table info
     """
     stats = {}
+    documents_table_ref = _quote_identifier(documents_table, "documents table")
 
     try:
         # Document count
-        cursor = conn.execute(f"SELECT COUNT(*) FROM {documents_table}")
+        cursor = conn.execute(f"SELECT COUNT(*) FROM {documents_table_ref}")
         stats["document_count"] = cursor.fetchone()[0]
 
         # Chunk count
