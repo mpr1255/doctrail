@@ -49,8 +49,12 @@ def test_enrich_endpoint_missing_config(client):
     assert 'detail' in data or 'error' in str(data).lower()
 
 
-def test_enrich_endpoint_validation(client):
+def test_enrich_endpoint_validation(client, monkeypatch):
     """Test that /enrich validates request body."""
+    monkeypatch.setenv("DOCTRAIL_ENABLE_WRITE_API", "1")
+    monkeypatch.setenv("DOCTRAIL_SERVER_HOST", "127.0.0.1")
+    monkeypatch.delenv("DOCTRAIL_SERVER_TOKEN", raising=False)
+
     # Missing required fields
     response = client.post('/enrich', json={})
     assert response.status_code == 422  # Validation error
