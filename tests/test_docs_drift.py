@@ -175,4 +175,4 @@ def test_llms_full_is_fresh():
 
     expected = "\n".join(parts).rstrip() + "\n"
     actual = (DOCS / "llms.txt").read_text(encoding="utf-8")
-    assert actual == expected, "docs/llms.txt is stale; run scripts/build_llms_full.py"
+    assert actual == expected, "docs/llms.txt is stale; run uv run python scripts/build_llms_full.py"

@@ -13,7 +13,7 @@ Set Padding 16
 Set TypingSpeed 40ms
 Set Theme "Catppuccin Mocha"
 
-Type "doctrail init test fed"
+Type "doctrail init test"
 Sleep 600ms
 Enter
 Sleep 12s

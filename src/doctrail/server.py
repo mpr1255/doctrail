@@ -2,7 +2,7 @@
 FastAPI server for Doctrail operations.
 
 This server provides HTTP endpoints for:
-- Multi-database search (FTS, semantic, SQL)
+- Multi-database search (FTS, SQL)
 - Enrichment operations
 - Database management
 - Self-documenting help system
@@ -14,7 +14,6 @@ Architecture:
     /help/enrich                → Enrichment API docs (generic)
     /db/{name}/help             → Database-specific help
     /db/{name}/fts              → Full-text search
-    /db/{name}/chroma           → Semantic search
     /db/{name}/sql              → Raw SQL queries
     /db/{name}/document/{id}    → Get document
     /db/{name}/text/{id}        → Get raw text
@@ -53,7 +52,6 @@ from .core import (
 # Import core search functions (shared with CLI)
 from .search import (
     fts_search as core_fts_search,
-    chroma_search as core_chroma_search,
     sql_query as core_sql_query,
     get_document as core_get_document,
     get_stats as core_get_stats,
@@ -72,9 +70,6 @@ except PackageNotFoundError:
 
 # Global state
 server_config = None  # ServerConfig instance
-chroma_clients: Dict[str, Any] = {}  # name -> (client, collection)
-embedding_cache: Dict[str, List[float]] = {}  # query -> embedding
-openai_client = None
 
 
 # Pydantic models for requests/responses
@@ -239,7 +234,7 @@ class ListEnrichmentsResponse(BaseModel):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup and shutdown handling."""
-    global server_config, chroma_clients, openai_client
+    global server_config
 
     # Try to load server config for multi-database mode
     config_path = os.environ.get("DOCTRAIL_SERVER_CONFIG")
@@ -256,29 +251,8 @@ async def lifespan(app: FastAPI):
                         conn.execute("SELECT 1")
                     logger.info(f"Connected to database '{name}' at {db_config.db_file}")
 
-                    # Initialize Chroma if available
-                    if db_config.has_chroma():
-                        try:
-                            import chromadb
-                            chroma_client = chromadb.PersistentClient(path=str(db_config.chroma_path))
-                            chroma_collection = chroma_client.get_collection("chunks")
-                            chroma_clients[name] = (chroma_client, chroma_collection)
-                            logger.info(f"Loaded Chroma for '{name}' with {chroma_collection.count():,} vectors")
-                        except Exception as e:
-                            logger.warning(f"Failed to load Chroma for '{name}': {e}")
-
                 except Exception as e:
                     logger.error(f"Failed to connect to database '{name}': {e}")
-
-            # Initialize OpenAI client if needed (for semantic search)
-            api_key = os.environ.get("OPENAI_API_KEY")
-            if api_key and chroma_clients:
-                try:
-                    from openai import OpenAI
-                    openai_client = OpenAI(api_key=api_key)
-                    logger.info("OpenAI client initialized for semantic search")
-                except ImportError:
-                    logger.warning("OpenAI package not installed, semantic search disabled")
 
             # Print startup banner
             print("\n" + "=" * 60)
@@ -434,7 +408,6 @@ async def help_overview():
         "1. List databases: GET /",
         "2. Get database help: GET /db/{name}/help",
         "3. Search: GET /db/{name}/fts?q=keyword",
-        "4. Semantic search: GET /db/{name}/chroma?q=concept",
         "",
         "## Available databases",
         "",
@@ -445,7 +418,6 @@ async def help_overview():
             lines.append(f"- **{name}**: {db.description}")
             lines.append(f"  - Path: {db.db_file}")
             lines.append(f"  - Chunks: {'✓' if db.has_chunks() else '✗'}")
-            lines.append(f"  - Vectors: {'✓' if db.has_chroma() else '✗'}")
             lines.append("")
     else:
         lines.append("No databases configured. Set DOCTRAIL_SERVER_CONFIG.")
@@ -490,20 +462,6 @@ Example queries:
 - Phrase: `?q="civil society"`
 - Boolean: `?q=china AND politics`
 - Prefix: `?q=democ*`
-
-## Semantic search (Chroma)
-
-Conceptual search using embeddings:
-
-```
-GET /db/{name}/chroma?q=concept&limit=10
-```
-
-Parameters:
-- q: Natural language query
-- limit: Max results (default: 10)
-- collection: Filter by collection
-- format: "text" or "json"
 
 ## SQL queries
 
@@ -607,7 +565,6 @@ async def db_help(db_name: str):
     lines.extend([
         f"- Corpus type: {db_config.corpus_type}",
         f"- FTS enabled: {'✓' if db_config.has_chunks() else '✗'}",
-        f"- Semantic search: {'✓' if db_config.has_chroma() else '✗'}",
         "",
         "## Schema",
         "",
@@ -632,9 +589,6 @@ async def db_help(db_name: str):
         f"- GET /db/{db_name}/document/{{id}} - Get document",
         f"- GET /db/{db_name}/stats - Database statistics",
     ])
-
-    if db_config.has_chroma():
-        lines.append(f"- GET /db/{db_name}/chroma?q=... - Semantic search")
 
     return "\n".join(lines)
 
@@ -698,49 +652,11 @@ async def chroma_search(
     year_max: Optional[int] = None,
     format: str = Query("text", pattern="^(text|json)$"),
 ):
-    """Semantic search using Chroma vector store."""
-    async with open_db(db_name) as (db_config, conn):
-        response = core_chroma_search(
-            conn=conn,
-            query=q,
-            chroma_path=str(db_config.chroma_path),
-            limit=limit,
-            documents_table=db_config.schema.documents_table,
-            pk_column=db_config.schema.pk_column,
-            title_column=db_config.schema.title_column,
-            collection=collection,
-            year_min=year_min,
-            year_max=year_max,
-        )
-
-    if response.error:
-        raise HTTPException(status_code=400, detail=response.error)
-
-    if format == "json":
-        # Convert core response to server response format
-        results = [
-            SearchResult(
-                doc_id=r.doc_id,
-                title=r.title,
-                snippet=r.content[:200] + "..." if r.content and len(r.content) > 200 else r.content,
-                score=r.score,
-                metadata={
-                    "chunk_index": r.chunk_index,
-                    "total_chunks": r.total_chunks,
-                    **r.metadata,
-                },
-            )
-            for r in response.results
-        ]
-        return SearchResponse(
-            query=q,
-            database=db_name,
-            results=results,
-            total=response.total,
-        )
-
-    # Text format
-    return PlainTextResponse(format_search_results_text(response))
+    """Semantic search is not shipped in the current server surface."""
+    raise HTTPException(
+        status_code=410,
+        detail="Chroma semantic search is not included in this Doctrail release.",
+    )
 
 
 @app.get("/db/{db_name}/sql")

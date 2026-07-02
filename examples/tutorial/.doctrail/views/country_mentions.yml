@@ -9,6 +9,6 @@ include:
 explode:
   field: mentions
   object_fields:
-    - country
+    - mentioned_country
     - stance
   alias_prefix: mention_

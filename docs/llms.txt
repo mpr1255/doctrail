@@ -65,7 +65,7 @@ As Doctrail uses LLMs to enrich the files, the results are stored in an append-o
 
 In the end, all this is intended to make it trivial to iterate on a prompt and codebook, to confirm its behavior on a new random sample, and only then implement it on thousands, tens of thousands, of hundreds of thousands of documents in the corpus.
 
-There are many anciliary benefits to using a database as the storage engine, including:
+There are many ancillary benefits to using a database as the storage engine, including:
 
 * Your corpus and its enrichments stay together in a single file, linked by keys;
 * Each write is atomic and incremental, meaning you can resume large runs that get interrupted and no data should be lost or corrupted;
@@ -79,7 +79,7 @@ There are many anciliary benefits to using a database as the storage engine, inc
 
 Here are two main ways that doctrail can be used.
 
-**The qualitative triage loop**. I have 3,000 court decisions, and I have a hunch that some much smaller number of them contain data relevant to my research question. I might want to code these with variables, or I may simply want to closely read and think about what is in them and the differences between them. One could use keywords to filter down the number, but it is difficult to think of every possible keyword that could define the research question. One wishes to employ human-like 'understanding' of meaning and to screen each of them individually, looking at the court decision and the research question and saying: "Is this relevant?" In doctrail this would be a cheap screening enrichment (`relevant: boolean`, i.e. the column name would be `relevant` and it could take a value or `0` or `1`), run in batch mode on a cheap model, and it would result in a few hundred cases for closer analysis. It is then simple to pull random samples from the excluded group to ensure that relevant documents were not left on the table. Not all of the remaining 50 documents may be relevant, but Doctrail has quickly triaged the relevant document set.
+**The qualitative triage loop**. I have 3,000 court decisions, and I have a hunch that some much smaller number of them contain data relevant to my research question. I might want to code these with variables, or I may simply want to closely read and think about what is in them and the differences between them. One could use keywords to filter down the number, but it is difficult to think of every possible keyword that could define the research question. One wishes to employ human-like 'understanding' of meaning and to screen each of them individually, looking at the court decision and the research question and saying: "Is this relevant?" In doctrail this would be a cheap screening enrichment (`relevant: boolean`, i.e. the column name would be `relevant` and it could take a value of `0` or `1`), run in batch mode on a cheap model, and it would result in a few hundred candidate cases for closer analysis. It is then simple to pull random samples from the excluded group to ensure that relevant documents were not left on the table. Not all of the remaining candidate documents may be relevant, but Doctrail has quickly triaged the relevant document set.
 
 **A measurement pipeline.** Many times, one will wish to construct a qualitative measure and apply it identically to every row, producing a measure of some feature of a text that is theoretically relevant. Such a measure might only apply to a subset of documents in a large corpus, so Doctrail can perform the first task of reducing the population of relevant records with a SQL filter, and send only that subset off for enrichment. Whether that measure can be trusted is the subject of the next section.
 
@@ -99,7 +99,7 @@ Doctrail's validation framework is in active development. A key idea is that doc
 
 ## Two example use cases
 
-One project began with over 100,000 rows scraped from the Chinese internet. These include media reports, government press releases, announcements on the websites of hospitals, and more. The research question involved identifying the subset of these documents to described details of a specific policy, and to then to measure the implementation of that policy in a systematic manner. First, Doctrail used a small LLM to run a 'relevance' filter on the documents; the prompt simply described the research question and said "Is this document relevant?" This removed the majority of the corpus. Of course, we then sampled from the 'irrelevant' set to make sure they were indeed irrelevant. Now, on a defined subset, it was possible and meaningful to apply successive enrichments that extracted structured data such as: `policy_name`, `year_began`, `fune_name`, `amount`, `families_involved`, and so forth. This is a far better approach than trying to define a dictionary upfront. And because everything is in SQLite, it became simple to increasingly refine the funnel, so that in the end only a few dozen documents with highly diagnostic evidence were the subject of analysis.
+One project began with over 100,000 rows scraped from the Chinese internet. These include media reports, government press releases, announcements on the websites of hospitals, and more. The research question involved identifying the subset of documents that described details of a specific policy, and then measuring the implementation of that policy in a systematic manner. First, Doctrail used a small LLM to run a 'relevance' filter on the documents; the prompt simply described the research question and said "Is this document relevant?" This removed the majority of the corpus. Of course, we then sampled from the 'irrelevant' set to make sure they were indeed irrelevant. Now, on a defined subset, it was possible and meaningful to apply successive enrichments that extracted structured data such as: `policy_name`, `year_began`, `fund_name`, `amount`, `families_involved`, and so forth. This is a far better approach than trying to define a dictionary upfront. And because everything is in SQLite, it became simple to increasingly refine the funnel, so that in the end only a few dozen documents with highly diagnostic evidence were the subject of analysis.
 
 Another project combined tens of thousands of editorials from three PRC state media, in both English and Chinese. First, the table of editorials had to be turned into a table of country-editorial pairs, because this was the unit of analysis. SQLite made this simple and kept all our data together, linked by keys. We could then run successive enrichments across this reshaped table, before finally validating them against human codes. The codes stored in SQLite then fed directly into a build pipeline that performed the modeling and produced the descriptive statistics, tables, and validation measures—meaning that later changes in the database are automatically carried through all outputs.
 
@@ -152,7 +152,7 @@ The rest of this page explains what it gets you, and how to drive doctrail yours
 Before pointing it at your own files or spending a cent, run the tutorial:
 
 ```bash
-doctrail init test fed
+doctrail init test
 doctrail run test
 ```
 
@@ -248,7 +248,7 @@ The schema defines the model, the prompt, and how the model must respond. That "
 
 Two more ideas, because this is where the real power is.
 
-One document, many annotations. A speech mentions many countries. You don't want one answer per speech — you want one answer per country per speech. The `country_mentions.yml` enrichment shows the pattern: the schema returns a list of objects (country, stance), and doctrail explodes them so each mention becomes its own row in the review view.
+One document, many annotations. A speech mentions many countries. You don't want one answer per speech — you want one answer per country per speech. The `country_mentions.yml` enrichment shows the pattern: the schema returns a list of objects (`mentioned_country`, `stance`), and doctrail explodes them so each mention becomes its own row in the review view.
 
 Multiple models as coders. Anything you measure with one model, you can measure with two and ask how much they agree. We canned responses from two different models:
 
@@ -1194,6 +1194,7 @@ Options:
   --port INTEGER      Port to run server on (default: 8765)
   --table TEXT        Table name (default: articles)
   --config PATH       Config file to get truncation from input_columns
+  --key-column TEXT   Source table key column (default: config key_column or sha1)
   --truncate INTEGER  Content truncation limit (overrides config)
   --help              Show this message and exit.
 ```
@@ -1277,7 +1278,7 @@ Usage: doctrail serve [OPTIONS]
 
   # doctrail-server.yaml
   server:
-    host: 0.0.0.0
+    host: 127.0.0.1
     port: 8000
   databases:
     literature: /data/literature    # directory containing .db file
@@ -1288,13 +1289,16 @@ Usage: doctrail serve [OPTIONS]
   Optional: help.md (database-specific documentation)
 
   Example:     doctrail serve --config doctrail-server.yaml     doctrail serve --port 9000
+  doctrail serve --host 0.0.0.0 --enable-write-api --token "$DOCTRAIL_SERVER_TOKEN"
 
 Options:
-  --config PATH   Server configuration file (default: doctrail-server.yaml)
-  --host TEXT     Override host from config
-  --port INTEGER  Override port from config
-  --verbose       Enable verbose logging
-  --help          Show this message and exit.
+  --config PATH       Server configuration file (default: doctrail-server.yaml)
+  --host TEXT         Override host from config
+  --port INTEGER      Override port from config
+  --enable-write-api  Enable legacy /enrich, /ingest, and /export HTTP endpoints
+  --token TEXT        Bearer token required for write endpoints when enabled
+  --verbose           Enable verbose logging
+  --help              Show this message and exit.
 ```
 
 ### doctrail skill

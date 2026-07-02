@@ -488,7 +488,7 @@ def write_scaffold(built_files: list[BuiltFile]) -> None:
             model: replay
             input:
               query: federalist_papers
-              input_columns: ["title", "consensus_author", "raw_content:4500"]
+              input_columns: ["title", "raw_content:4500"]
             prompt: |
               Code this Federalist paper using the codebook below.
 
@@ -562,7 +562,7 @@ def write_scaffold(built_files: list[BuiltFile]) -> None:
               input_columns: ["title", "country", "raw_content:2500"]
             prompt: |
               Extract up to three countries or international actors mentioned in the excerpt.
-              For each item, record the country or actor and whether the speaker's stance is supportive, critical, neutral, or mixed.
+              For each item, record the mentioned country or actor and whether the speaker's stance is supportive, critical, neutral, or mixed.
             schema:
               mentions:
                 type: "array"
@@ -570,7 +570,7 @@ def write_scaffold(built_files: list[BuiltFile]) -> None:
                 items:
                   type: "object"
                   properties:
-                    country: {type: "string", maxLength: 80}
+                    mentioned_country: {type: "string", maxLength: 80}
                     stance: {enum: ["supportive", "critical", "neutral", "mixed"]}
             """
         ),
@@ -648,7 +648,7 @@ def write_scaffold(built_files: list[BuiltFile]) -> None:
             explode:
               field: mentions
               object_fields:
-                - country
+                - mentioned_country
                 - stance
               alias_prefix: mention_
             """
@@ -683,8 +683,8 @@ def write_scaffold(built_files: list[BuiltFile]) -> None:
                 "label": "default",
                 "response": {
                     "mentions": [
-                        {"country": country, "stance": COUNTRY_STANCE_A[country]},
-                        {"country": "United Nations", "stance": "supportive"},
+                        {"mentioned_country": country, "stance": COUNTRY_STANCE_A[country]},
+                        {"mentioned_country": "United Nations", "stance": "supportive"},
                     ]
                 },
             })

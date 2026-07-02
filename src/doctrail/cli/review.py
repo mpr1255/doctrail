@@ -16,8 +16,18 @@ from .utils import load_config
 @click.option('--port', default=8765, type=int, help='Port to run server on (default: 8765)')
 @click.option('--table', default='articles', help='Table name (default: articles)')
 @click.option('--config', type=click.Path(exists=True), help='Config file to get truncation from input_columns')
+@click.option('--key-column', default=None, help='Source table key column (default: config key_column or sha1)')
 @click.option('--truncate', type=int, help='Content truncation limit (overrides config)')
-def review(db_path: str, field: str, sample: int, port: int, table: str, config: Optional[str], truncate: Optional[int]):
+def review(
+    db_path: str,
+    field: str,
+    sample: int,
+    port: int,
+    table: str,
+    config: Optional[str],
+    key_column: Optional[str],
+    truncate: Optional[int],
+):
     """
     Validate enrichment accuracy with a web UI.
 
@@ -33,11 +43,13 @@ def review(db_path: str, field: str, sample: int, port: int, table: str, config:
 
     # Determine truncation limit
     trunc_limit = truncate  # CLI override takes precedence
+    resolved_key_column = key_column or 'sha1'
 
     if trunc_limit is None and config:
         # Try to extract from config's input_columns
         try:
             config_data = load_config(config)
+            resolved_key_column = key_column or config_data.get('key_column') or 'sha1'
             enrichments = config_data.get('enrichments', [])
             # Find enrichment that produces this field
             for e in enrichments:
@@ -64,7 +76,7 @@ def review(db_path: str, field: str, sample: int, port: int, table: str, config:
 
     click.echo(f"Starting review server for field '{field}'...")
     click.echo(f"Database: {db_path}")
-    click.echo(f"Sample: {sample} per class, truncation: {trunc_limit} chars")
+    click.echo(f"Sample: {sample} per class, key column: {resolved_key_column}, truncation: {trunc_limit} chars")
 
     run_review_server(
         db_path=db_path,
@@ -72,5 +84,6 @@ def review(db_path: str, field: str, sample: int, port: int, table: str, config:
         sample_per_class=sample,
         port=port,
         table_name=table,
+        key_column=resolved_key_column,
         truncate_limit=trunc_limit
     )

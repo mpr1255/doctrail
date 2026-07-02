@@ -25,7 +25,7 @@ The rest of this page explains what it gets you, and how to drive doctrail yours
 Before pointing it at your own files or spending a cent, run the tutorial:
 
 ```bash
-doctrail init test fed
+doctrail init test
 doctrail run test
 ```
 

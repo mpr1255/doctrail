@@ -56,7 +56,7 @@ The schema defines the model, the prompt, and how the model must respond. That "
 
 Two more ideas, because this is where the real power is.
 
-One document, many annotations. A speech mentions many countries. You don't want one answer per speech — you want one answer per country per speech. The `country_mentions.yml` enrichment shows the pattern: the schema returns a list of objects (country, stance), and doctrail explodes them so each mention becomes its own row in the review view.
+One document, many annotations. A speech mentions many countries. You don't want one answer per speech — you want one answer per country per speech. The `country_mentions.yml` enrichment shows the pattern: the schema returns a list of objects (`mentioned_country`, `stance`), and doctrail explodes them so each mention becomes its own row in the review view.
 
 Multiple models as coders. Anything you measure with one model, you can measure with two and ask how much they agree. We canned responses from two different models:
 

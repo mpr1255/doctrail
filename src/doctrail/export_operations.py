@@ -1,12 +1,33 @@
 import os
 import json
 import logging
+import re
 from pathlib import Path
 from typing import List, Dict
 import yaml
 from jinja2 import Template
 import subprocess
 from .db_operations import execute_query
+
+UNSAFE_FILENAME_CHARS = re.compile(r"[\x00-\x1f/\\:]+")
+
+
+def sanitize_output_basename(value: str) -> str:
+    """Return a safe filename stem from a user-configurable naming pattern."""
+    name = str(value or "").strip()
+    name = name.replace("..", "_")
+    name = UNSAFE_FILENAME_CHARS.sub("_", name)
+    name = name.strip(" ._")
+    return name or "document"
+
+
+def safe_output_path(output_dir: Path, basename: str, suffix: str) -> Path:
+    """Build an output path and ensure it stays under output_dir."""
+    output_root = output_dir.resolve()
+    candidate = (output_root / f"{sanitize_output_basename(basename)}.{suffix}").resolve()
+    if not candidate.is_relative_to(output_root):
+        raise ValueError(f"Output path escapes output directory: {candidate}")
+    return candidate
 
 def create_markdown_document(row: Dict, config: Dict, export_name: str) -> str:
     """Generate a markdown document from database row and template configuration"""
@@ -71,12 +92,12 @@ def get_output_filename(row: Dict, naming_pattern: str, fallback_pattern: str) -
     """Generate filename based on pattern with fallback"""
     try:
         # Try the main pattern first, using any fields from the row
-        return naming_pattern.format(**row)
+        return sanitize_output_basename(naming_pattern.format(**row))
     except (KeyError, ValueError):
         # Fall back to simpler pattern
-        return fallback_pattern.format(
+        return sanitize_output_basename(fallback_pattern.format(
             sha1=row.get('sha1', 'unknown')
-        )
+        ))
 
 def export_documents(db_path: str, config: Dict, output_dir: str, export_name: str) -> None:
     """Export documents based on configuration"""
@@ -88,9 +109,9 @@ def export_documents(db_path: str, config: Dict, output_dir: str, export_name: s
     export_config = config['exports'][export_name]
     
     # Expand and create output directory
-    output_dir = os.path.expanduser(output_dir)
-    os.makedirs(output_dir, exist_ok=True)
-    logging.info(f"Exporting to directory: {output_dir}")
+    output_path_root = Path(os.path.expanduser(output_dir)).resolve()
+    output_path_root.mkdir(parents=True, exist_ok=True)
+    logging.info(f"Exporting to directory: {output_path_root}")
     
     # Get naming patterns
     naming_pattern = export_config.get('output_naming', 
@@ -129,14 +150,14 @@ def export_documents(db_path: str, config: Dict, output_dir: str, export_name: s
         md_content = create_markdown_document(row, config, export_name)
         
         # Write markdown file
-        md_path = Path(output_dir) / f"{base_name}.md"
+        md_path = safe_output_path(output_path_root, base_name, "md")
         with open(md_path, 'w', encoding='utf-8') as f:
             f.write(md_content)
         
         # Convert to requested formats using pandoc
         for fmt in formats:
             try:
-                output_path = Path(output_dir) / f"{base_name}.{fmt}"
+                output_path = safe_output_path(output_path_root, base_name, fmt)
                 
                 # Basic pandoc command
                 cmd = [

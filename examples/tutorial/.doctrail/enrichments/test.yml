@@ -3,7 +3,7 @@ description: Federalist authorship and fear-of-disunion coding
 model: replay
 input:
   query: federalist_papers
-  input_columns: ["title", "consensus_author", "raw_content:4500"]
+  input_columns: ["title", "raw_content:4500"]
 prompt: |
   Code this Federalist paper using the codebook below.
 

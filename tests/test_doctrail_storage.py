@@ -1538,6 +1538,74 @@ def test_integer_key_column_skip_logic_handles_non_string_keys(temp_env):
     assert run_count[0] == 1
 
 
+def test_review_items_respect_configured_key_column(temp_env):
+    """Review sampling should join enrichments through the configured source key."""
+    from doctrail.db_operations import ensure_enrichments_table
+    from doctrail.review_server import get_review_items
+
+    db_path = temp_env["db_path"]
+    ensure_enrichments_table(str(db_path))
+
+    conn = sqlite3.connect(db_path)
+    conn.execute("DROP TABLE IF EXISTS articles")
+    conn.execute("""
+        CREATE TABLE articles (
+            article_id INTEGER PRIMARY KEY,
+            title TEXT,
+            filename TEXT,
+            raw_content TEXT
+        )
+    """)
+    conn.execute(
+        "INSERT INTO articles (article_id, title, filename, raw_content) VALUES (?, ?, ?, ?)",
+        (101, "Article title", "article.txt", "review content"),
+    )
+    conn.execute(
+        """
+        INSERT INTO _enrichments (
+            key_value, enrichment_name, field_name, value, value_type,
+            timestamp, model, prompt_hash, enrichment_id
+        ) VALUES (?, ?, ?, ?, ?, datetime('now'), ?, ?, ?)
+        """,
+        ("101", "stance_review", "stance", "supportive", "string", "gpt-4o-mini", "prompt", "enrich-101"),
+    )
+    conn.commit()
+    conn.close()
+
+    items, _truncate = get_review_items(
+        str(db_path),
+        "stance",
+        sample_per_class=10,
+        table_name="articles",
+        key_column="article_id",
+    )
+
+    assert len(items) == 1
+    assert items[0]["sha1"] == "101"
+    assert items[0]["title"] == "Article title"
+
+
+def test_export_output_names_are_sanitized_under_output_dir(tmp_path):
+    """User-configurable export naming should not create paths outside output_dir."""
+    from doctrail.export_operations import get_output_filename, safe_output_path
+
+    output_dir = tmp_path / "exports"
+    output_dir.mkdir()
+
+    basename = get_output_filename(
+        {"sha1": "abc123", "title": "../../outside:report"},
+        "{title}",
+        "doc_{sha1}",
+    )
+    output_path = safe_output_path(output_dir, basename, "md")
+
+    assert "/" not in basename
+    assert "\\" not in basename
+    assert ".." not in basename
+    assert output_path.parent == output_dir.resolve()
+    assert output_path.name.endswith(".md")
+
+
 def test_execute_query_optimized_uses_explicit_default_table(tmp_path):
     """Optimized fetches should use the caller-provided default table instead of guessing from SQL text."""
     from doctrail.db_operations import execute_query_optimized

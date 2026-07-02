@@ -121,7 +121,7 @@ def fts_search(
                 results=[],
                 total=0,
                 mode="fts",
-                error="No FTS index found. Run 'doctrail sync' first."
+                error="No FTS index found. Build a chunks table or document_fts virtual table before using FTS search."
             )
 
         sql = f"""
@@ -227,7 +227,7 @@ def chroma_search(
             results=[],
             total=0,
             mode="chroma",
-            error=f"Chroma database not found: {chroma_path}. Run 'doctrail sync' first."
+            error=f"Chroma database not found: {chroma_path}."
         )
 
     try:
@@ -239,7 +239,7 @@ def chroma_search(
             results=[],
             total=0,
             mode="chroma",
-            error=f"Missing dependency: {e}. Install with 'pip install chromadb openai'."
+            error=f"Missing dependency: {e}. Chroma search is not included in the default doctrail package."
         )
 
     # Initialize clients

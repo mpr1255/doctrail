@@ -16,7 +16,7 @@ from typing import Optional
 import click
 import html
 
-from .db_operations import ENRICHMENT_AUDIT_TABLE, ENRICHMENTS_TABLE
+from .db_operations import ENRICHMENT_AUDIT_TABLE, ENRICHMENTS_TABLE, _quote_identifier
 
 # Inline HTML - no templates needed
 HTML_TEMPLATE = """<!DOCTYPE html>
@@ -391,7 +391,8 @@ def save_human_audit(db_path: str, sha1: str, field_name: str, enrichment_id: st
 
 
 def get_review_items(db_path: str, field_name: str, sample_per_class: int = 50,
-                     table_name: str = 'articles', truncate_limit: int = 2000):
+                     table_name: str = 'articles', truncate_limit: int = 2000,
+                     key_column: str = 'sha1'):
     """Get stratified sample of items for review."""
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
@@ -408,12 +409,14 @@ def get_review_items(db_path: str, field_name: str, sample_per_class: int = 50,
         # Get sample for this value - try different table names
         for tbl in [table_name, 'articles', 'documents', 'literature']:
             try:
+                table_ref = _quote_identifier(tbl, "table name")
+                key_ref = _quote_identifier(key_column, "key column")
                 cursor = conn.execute(f"""
                     SELECT e.enrichment_id, e.key_value, e.value, a.title, a.filename,
                            substr(a.raw_content, 1, ?) as content,
                            a.raw_content as full_content
                     FROM {ENRICHMENTS_TABLE} e
-                    JOIN {tbl} a ON e.key_value = a.sha1
+                    JOIN {table_ref} a ON e.key_value = CAST(a.{key_ref} AS TEXT)
                     WHERE e.field_name = ? AND e.value = ?
                     ORDER BY RANDOM()
                     LIMIT ?
@@ -443,7 +446,7 @@ def get_review_items(db_path: str, field_name: str, sample_per_class: int = 50,
 
 def run_review_server(db_path: str, field_name: str, sample_per_class: int = 50,
                       port: int = 8765, table_name: str = 'articles',
-                      truncate_limit: int = 2000):
+                      truncate_limit: int = 2000, key_column: str = 'sha1'):
     """Run the review server (callable from CLI or directly)."""
     from http.server import HTTPServer, BaseHTTPRequestHandler
 
@@ -451,7 +454,14 @@ def run_review_server(db_path: str, field_name: str, sample_per_class: int = 50,
     ensure_human_audit_table(db_path)
 
     # Load items and prompt info at startup
-    items, trunc = get_review_items(db_path, field_name, sample_per_class, table_name, truncate_limit)
+    items, trunc = get_review_items(
+        db_path,
+        field_name,
+        sample_per_class,
+        table_name,
+        truncate_limit,
+        key_column,
+    )
     prompt_short, prompt_full, schema = get_prompt_info(db_path, field_name)
     results = []
 
@@ -532,8 +542,9 @@ def run_review_server(db_path: str, field_name: str, sample_per_class: int = 50,
 @click.option('--sample', default=50, help='Sample size per class (default: 50)')
 @click.option('--port', default=8765, help='Port to run server on')
 @click.option('--table', default='articles', help='Table name (default: articles)')
+@click.option('--key-column', default='sha1', help='Source table key column (default: sha1)')
 @click.option('--truncate', default=2000, help='Content truncation limit (default: 2000)')
-def main(db: str, field: str, sample: int, port: int, table: str, truncate: int):
+def main(db: str, field: str, sample: int, port: int, table: str, key_column: str, truncate: int):
     """Start review server for validating enrichment accuracy."""
     run_review_server(
         db_path=db,
@@ -541,6 +552,7 @@ def main(db: str, field: str, sample: int, port: int, table: str, truncate: int)
         sample_per_class=sample,
         port=port,
         table_name=table,
+        key_column=key_column,
         truncate_limit=truncate
     )
 

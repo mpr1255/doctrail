@@ -1,5 +1,6 @@
 import sqlite3
 import re
+import yaml
 from collections import Counter
 from pathlib import Path
 
@@ -38,6 +39,8 @@ def test_init_test_replay_pipeline_is_offline(mocker, tmp_path):
             ".html": 3,
         }
         assert Path("out/database.db").exists()
+        test_config = yaml.safe_load(Path(".doctrail/enrichments/test.yml").read_text())
+        assert "consensus_author" not in test_config["input"]["input_columns"]
 
         db_path = Path("out/database.db")
         with sqlite3.connect(db_path) as conn:
@@ -103,6 +106,19 @@ def test_init_test_replay_pipeline_is_offline(mocker, tmp_path):
         assert securitization_docs == 10
         assert gate_true_docs == 3
         assert gate_false_docs == 7
+
+        country_mentions_result = runner.invoke(cli, ["run", "country_mentions"])
+        assert country_mentions_result.exit_code == 0, country_mentions_result.output
+        country_view_result = runner.invoke(cli, ["view", "spec", "country_mentions"])
+        assert country_view_result.exit_code == 0, country_view_result.output
+        with sqlite3.connect(db_path) as conn:
+            country_view_columns = {
+                row[1]
+                for row in conn.execute("PRAGMA table_info(v_country_mentions)").fetchall()
+            }
+        assert "country" in country_view_columns
+        assert "mention_mentioned_country" in country_view_columns
+        assert "country:1" not in country_view_columns
 
         icr_result = runner.invoke(
             cli,

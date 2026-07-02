@@ -1,5 +1,3 @@
-"""LLM module for handling language model operations."""
+"""LLM utility package."""
 
-from .client import LLMClient
-
-__all__ = ['LLMClient']
+__all__: list[str] = []
