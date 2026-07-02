@@ -186,7 +186,7 @@ GOOGLE_API_KEY=...
 OPENROUTER_API_KEY=...
 ```
 
-You only need the line for the provider you plan to use. Doctrail also reads keys already exported in your shell environment, so a global key in `~/.zshenv` or `~/.bashrc` is fine if you want one default across projects. A project `.env` is better when different projects should use different providers or accounts. Do not commit `.env`; `doctrail init` adds it to `.gitignore`.
+You only need the line for the provider you plan to use. Doctrail reads the nearest project `.env` only after a Doctrail project has been initialized, which means the same directory or an ancestor has `.doctrail/`. That project `.env` overrides keys already exported in your shell environment. A bare `.env` in an unrelated current directory is ignored, and there is no package-global Doctrail `.env`. If you want one default across projects, export it from your shell startup file such as `~/.zshenv` or `~/.bashrc`; use a project `.env` when different projects should use different providers or accounts. Do not commit `.env`; `doctrail init` adds it to `.gitignore`.
 
 <!-- tutorial.md -->
 
@@ -286,7 +286,7 @@ However, the best way to use doctrail is with a terminal agent, like Claude Code
 
 You only need a pile of files you want the text out of, and questions you want answered about each one. Think in terms of the grid: your files are rows, and you are adding typed columns.
 
-One last practical point: the tutorial used replayed responses, so it did not need a provider key. Real enrichments do. Before you swap `model: replay` for OpenAI, Anthropic, Gemini, or OpenRouter, put the relevant key in your project `.env` file, or export it from your shell startup file such as `~/.zshenv` or `~/.bashrc`. The environment variable names are `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY` or `GOOGLE_API_KEY`, and `OPENROUTER_API_KEY`.
+One last practical point: the tutorial used replayed responses, so it did not need a provider key. Real enrichments do. Before you swap `model: replay` for OpenAI, Anthropic, Gemini, or OpenRouter, put the relevant key in your project `.env` file, or export it from your shell startup file such as `~/.zshenv` or `~/.bashrc`. A project `.env` is loaded only inside an initialized Doctrail project, and it overrides shell keys; a bare `.env` in an unrelated current directory is ignored. The environment variable names are `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY` or `GOOGLE_API_KEY`, and `OPENROUTER_API_KEY`.
 
 [^column]: Note that, under the hood, doctrail does *not* simply add a column to your document grid. It is easy to think of it that way, but this would be the wrong data model. The reason is that your schema may become complicated, and you may want to add lots of enrichments of many forms. Perhaps one document needs multiple sets of the same type of enrichment. For example, it deals with country1, country2, and country3; in that case, your unit of analysis is not a document, but a "country-document", and you have a many-to-one relationship between countries and documents. What doctrail actually does is explained in [the data model](data-model.md).
 
