@@ -72,6 +72,18 @@ def test_init_test_replay_pipeline_is_offline(mocker, tmp_path):
         assert test_rows == 54
         assert {"author", "fear_of_disunion", "consensus_author"}.issubset(view_columns)
 
+        rerun_result = runner.invoke(cli, ["run", "test", "--limit", "5"])
+        assert rerun_result.exit_code == 0, rerun_result.output
+        assert "All rows already processed!" in rerun_result.output
+        assert "Total results: 0" in rerun_result.output
+        assert "No enrichments found" not in rerun_result.output
+        assert "Run view:" not in rerun_result.output
+        with sqlite3.connect(db_path) as conn:
+            run_count = conn.execute(
+                "SELECT COUNT(*) FROM _enrichment_runs WHERE enrichment_name = 'test'"
+            ).fetchone()[0]
+        assert run_count == 1
+
         securitization_result = runner.invoke(cli, ["run", "securitization", "--limit", "100"])
         assert securitization_result.exit_code == 0, securitization_result.output
         with sqlite3.connect(db_path) as conn:

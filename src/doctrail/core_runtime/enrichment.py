@@ -297,6 +297,12 @@ async def run_enrichment(
                 where_clause=where_clause,
                 override_query=override_query
             )
+            identity_query = _build_enrichment_query(
+                enrichment_config, config_data, strategy,
+                rowid=rowid, sha1=sha1, limit=None, overwrite=overwrite,
+                where_clause=where_clause,
+                override_query=override_query,
+            )
 
             input_columns = enrichment_config.get('input', {}).get('input_columns', [])
 
@@ -361,7 +367,7 @@ async def run_enrichment(
                 output_columns = [output_columns]
             output_columns = [column for column in (output_columns or []) if column]
             prompt_id = compute_prompt_id(enrichment_name, prompt_text, system_prompt_text)
-            query_hash = create_query_hash(query)
+            query_hash = create_query_hash(identity_query)
             separate_output_db = actual_output_db_path != actual_db_path
 
             planning_skipped_rows: List[Dict[str, Any]] = []
