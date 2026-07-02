@@ -334,6 +334,52 @@ def test_run_and_pivot_views_cast_numeric_fields_and_break_timestamp_ties(temp_e
     assert run_row == (10, "integer")
     assert pivot_row == (10, "integer")
 
+
+def test_create_run_view_returns_none_when_run_has_no_enrichment_fields(temp_env):
+    from doctrail.db_operations import (
+        create_run_view,
+        ensure_enrichments_table,
+        ensure_run_tracking_tables,
+        materialize_run_inputs,
+        start_enrichment_run,
+    )
+
+    db_path = temp_env["db_path"]
+    ensure_enrichments_table(str(db_path))
+    ensure_run_tracking_tables(str(db_path))
+
+    run_id = "empty_run_12345678"
+    start_enrichment_run(
+        str(db_path),
+        run_id=run_id,
+        command_started_at=datetime.now().isoformat(),
+        enrichment_name="empty_review",
+        model="gpt-4o-mini",
+        prompt_id="empty_prompt",
+        query_sql="SELECT sha1 FROM documents",
+        query_hash="empty_query",
+        key_column="sha1",
+        source_name="documents",
+    )
+    materialize_run_inputs(
+        str(db_path),
+        run_id,
+        [{"sha1": "empty_doc_1", "title": "Empty doc"}],
+        "sha1",
+        enabled=True,
+    )
+
+    view_name = create_run_view(str(db_path), run_id=run_id)
+
+    assert view_name is None
+    conn = sqlite3.connect(db_path)
+    created = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='view' AND name LIKE 'v_run_empty_review_%'"
+    ).fetchall()
+    conn.close()
+    assert created == []
+
+
 def test_view_spec_explodes_array_objects_and_renders_html(temp_env):
     """A YAML view spec should explode array-of-object enrichments into repeated keyed rows."""
     from doctrail.db_operations import (

@@ -366,13 +366,13 @@ async def run_enrichment(
 
             planning_skipped_rows: List[Dict[str, Any]] = []
             # Enrichment scope is model-agnostic so it can always be planned
-            # once up front. Prompt scope is per-model: planning it here with
-            # models[0] would starve every later model in a multi-model run,
-            # so it is only pre-planned for single-model runs and otherwise
-            # left to process_enrichment's per-model planner.
+            # once up front. Prompt/query scope are per-model: planning them here
+            # with models[0] would starve every later model in a multi-model run,
+            # so they are only pre-planned for single-model runs and otherwise
+            # planned inside the per-model loop.
             outer_plannable = (
                 effective_dedupe_scope == "enrichment"
-                or (effective_dedupe_scope == "prompt" and len(planning_models) == 1)
+                or (effective_dedupe_scope in {"prompt", "query"} and len(planning_models) == 1)
             )
             if output_columns and not overwrite and outer_plannable:
                 planning_skipped_rows = plan_existing_enrichment_skips(
@@ -531,6 +531,51 @@ async def run_enrichment(
                     system_prompt_text,
                     current_model,
                 )
+
+                model_rows_to_process = rows_to_process
+                model_actual_total = actual_total
+                if (
+                    output_columns
+                    and not overwrite
+                    and not outer_plannable
+                    and effective_dedupe_scope in {"prompt", "query"}
+                ):
+                    model_skipped_rows = plan_existing_enrichment_skips(
+                        actual_output_db_path,
+                        rows=results,
+                        enrichment_name=enrichment_name,
+                        model=current_model,
+                        prompt_id=current_prompt_id,
+                        key_column=strategy.key_column,
+                        dedupe_scope=effective_dedupe_scope,
+                        query_hash=query_hash,
+                        output_table=strategy.output_table,
+                        output_cols=output_columns,
+                        separate_output_db=separate_output_db,
+                        source_table=strategy.input_table,
+                    )
+                    model_rows_to_process = filter_unskipped_input_rows(
+                        results,
+                        model_skipped_rows,
+                        key_column=strategy.key_column,
+                    )
+                    model_actual_total = len(model_rows_to_process)
+
+                if not overwrite and total_rows > 0 and model_actual_total == 0:
+                    if len(models) > 1:
+                        print(f"All rows already processed for {enrichment_name} [{current_model}]!")
+                    else:
+                        print("All rows already processed!")
+                    enrichments_run.append(enrichment_name)
+                    if progress_callback:
+                        progress_callback({
+                            'enrichment': enrichment_name,
+                            'model': current_model,
+                            'status': 'completed',
+                            'results': 0
+                        })
+                    continue
+
                 current_run_id = create_run_id(
                     enrichment_name=enrichment_name,
                     model=current_model,
@@ -544,9 +589,9 @@ async def run_enrichment(
                 if not skip_cost_check:
                     cost_info = _estimate_enrichment_cost(
                         enrichment_config,
-                        rows_to_process or results,
+                        model_rows_to_process,
                         current_model,
-                        actual_total,
+                        model_actual_total,
                         execution_mode=execution_mode,
                     )
 
@@ -590,7 +635,7 @@ async def run_enrichment(
                 materialize_run_inputs(
                     actual_output_db_path,
                     current_run_id,
-                    rows_to_process,
+                    model_rows_to_process,
                     strategy.key_column,
                     enabled=materialize_inputs,
                 )
@@ -606,7 +651,7 @@ async def run_enrichment(
                         batch_jobs = await _submit_batch_jobs(
                             db_path=actual_output_db_path,
                             run_id=current_run_id,
-                            rows_to_process=rows_to_process,
+                            rows_to_process=model_rows_to_process,
                             enrichment_config=enrichment_config,
                             config_data=config_data,
                             model=current_model,
@@ -618,22 +663,22 @@ async def run_enrichment(
                             provider=batch_provider,
                         )
                     except Exception:
-                        if rows_to_process:
+                        if model_rows_to_process:
                             update_run_item_statuses_by_row_order(
                                 actual_output_db_path,
                                 current_run_id,
-                                {row_order: "error" for row_order in range(len(rows_to_process))},
+                                {row_order: "error" for row_order in range(len(model_rows_to_process))},
                             )
                         finalize_enrichment_run(
                             actual_output_db_path,
                             current_run_id,
                             status='failed',
-                            total_rows=len(rows_to_process),
+                            total_rows=len(model_rows_to_process),
                             processed_rows=0,
                             skipped_rows=0,
                             insufficient_rows=0,
                             success_count=0,
-                            error_count=len(rows_to_process),
+                            error_count=len(model_rows_to_process),
                             input_tokens=0,
                             output_tokens=0,
                             estimated_cost=0.0,
@@ -659,7 +704,7 @@ async def run_enrichment(
                     continue
 
                 progress_bar = create_progress_bar(
-                    total=actual_total,
+                    total=model_actual_total,
                     desc=pbar_desc,
                     verbose=verbose
                 )
@@ -668,7 +713,7 @@ async def run_enrichment(
                 try:
                     with progress_bar as pbar:
                         model_results = await process_enrichment(
-                            results=rows_to_process,
+                            results=model_rows_to_process,
                             enrichment_config=enrichment_config,
                             model=current_model,
                             pbar=pbar,
@@ -741,7 +786,7 @@ async def run_enrichment(
                             actual_output_db_path,
                             current_run_id,
                             status='completed_with_errors' if error_count else 'completed',
-                            total_rows=len(rows_to_process),
+                            total_rows=len(model_rows_to_process),
                             processed_rows=processed_count,
                             skipped_rows=skipped_count,
                             insufficient_rows=insufficient_count,
@@ -767,12 +812,12 @@ async def run_enrichment(
                         actual_output_db_path,
                         current_run_id,
                         status='failed',
-                        total_rows=len(rows_to_process),
+                        total_rows=len(model_rows_to_process),
                         processed_rows=0,
                         skipped_rows=0,
                         insufficient_rows=0,
                         success_count=0,
-                        error_count=len(rows_to_process),
+                        error_count=len(model_rows_to_process),
                         input_tokens=0,
                         output_tokens=0,
                         estimated_cost=0.0,
@@ -892,7 +937,8 @@ async def run_enrichment(
                     priority_columns=priority_columns,
                     source_db_path=source_for_views,
                 )
-                artifact['view_name'] = view_name
+                if view_name:
+                    artifact['view_name'] = view_name
             except Exception as e:
                 logging.warning(f"Could not create run view for run {record['run_id'][:8]}: {e}")
 

@@ -1792,6 +1792,8 @@ explode:
                 documents_table=docs_table,
                 key_column=key_col,
             )
+            if not view_name:
+                _exit_error(f"No enrichment fields found for run '{run_id[:8]}'; no view was created.")
             click.echo(f"Created view: {view_name}")
             click.echo(f"\nQuery it:")
             click.echo(f"  doctrail query \"SELECT * FROM {view_name} LIMIT 20\"")
@@ -1882,6 +1884,8 @@ explode:
             documents_table=docs_table,
             key_column=key_col,
         )
+        if not view_name:
+            _exit_error(f"No enrichment fields found for '{name}'; no view was created.")
 
         # Show what was created
         with get_db_connection(db_path) as conn:

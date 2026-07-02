@@ -577,6 +577,95 @@ def test_run_enrichment_cost_threshold_aborts_without_tty(temp_env, monkeypatch)
     assert "--skip-cost-check" in str(exc_info.value)
 
 
+def test_query_scope_cost_estimate_counts_only_unprocessed_rows(temp_env, monkeypatch):
+    """Append-mode cost checks should ignore query-scope rows already answered."""
+    from doctrail.core import run_enrichment
+
+    db_path = temp_env["db_path"]
+    config_path = temp_env["temp_dir"] / "incremental_cost.yml"
+
+    conn = sqlite3.connect(db_path)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS documents (
+            sha1 TEXT PRIMARY KEY,
+            filename TEXT,
+            raw_content TEXT
+        )
+    """)
+    conn.execute("DELETE FROM documents")
+    conn.executemany(
+        "INSERT INTO documents (sha1, filename, raw_content) VALUES (?, ?, ?)",
+        [
+            ("doc1", "one.txt", "x" * 300),
+            ("doc2", "two.txt", "y" * 300),
+        ],
+    )
+    conn.commit()
+    conn.close()
+
+    config = {
+        "database": str(db_path),
+        "default_table": "documents",
+        "sql_queries": {
+            "all_docs": "SELECT rowid, sha1 FROM documents ORDER BY sha1",
+        },
+        "enrichments": [
+            {
+                "name": "incremental_summary",
+                "input": {
+                    "query": "all_docs",
+                    "input_columns": ["raw_content"],
+                },
+                "prompt": "Summarize this: {raw_content}",
+                "model": "gpt-4o-mini",
+                "output_column": "summary",
+            }
+        ],
+    }
+
+    with open(config_path, "w") as handle:
+        yaml.dump(config, handle)
+
+    first = asyncio.run(run_enrichment(
+        config_path=str(config_path),
+        enrichments=["incremental_summary"],
+        overwrite=False,
+        skip_cost_check=True,
+    ))
+    assert first["success_count"] == 2
+
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "INSERT INTO documents (sha1, filename, raw_content) VALUES (?, ?, ?)",
+        ("doc3", "three.txt", "z" * 300),
+    )
+    conn.commit()
+    conn.close()
+
+    observed = {}
+
+    def fake_estimate(_enrichment_config, rows, _model, actual_total, **_kwargs):
+        observed["row_keys"] = [row["sha1"] for row in rows]
+        observed["actual_total"] = actual_total
+        return {"total_cost": 0.0}
+
+    monkeypatch.setattr(
+        "doctrail.core_runtime.enrichment._estimate_enrichment_cost",
+        fake_estimate,
+    )
+
+    second = asyncio.run(run_enrichment(
+        config_path=str(config_path),
+        enrichments=["incremental_summary"],
+        overwrite=False,
+        skip_cost_check=False,
+        cost_threshold=1.0,
+    ))
+
+    assert second["success_count"] == 1
+    assert observed == {"row_keys": ["doc3"], "actual_total": 1}
+
+
 def test_run_enrichment_pack_selected_indexes_unpacks_row_level_results(temp_env, monkeypatch):
     """Packed boolean screening should persist one ordinary row result per source row."""
     from doctrail.core import run_enrichment
@@ -1281,7 +1370,7 @@ def test_multi_model_run_returns_default_view_collapse_notice(temp_env, monkeypa
     assert "doctrail view pivot <name> -e <enrichment> --by-model" in result["multi_model_view_notice"]
 
 def test_integer_key_column_skip_logic_handles_non_string_keys(temp_env):
-    """Re-running an enrichment with an integer key column should skip cleanly instead of crashing."""
+    """Re-running an enrichment with an integer key column should skip before creating a run."""
     from doctrail.core import run_enrichment
 
     db_path = temp_env["db_path"]
@@ -1344,24 +1433,21 @@ def test_integer_key_column_skip_logic_handles_non_string_keys(temp_env):
 
     assert first_run["status"] == "success"
     assert second_run["status"] == "success"
+    assert second_run["total_processed"] == 0
+    assert "run_artifacts" not in second_run
 
-    second_run_id = second_run["run_artifacts"][0]["run_id"]
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
-    run_row = conn.execute(
+    run_count = conn.execute(
         """
-        SELECT processed_rows, skipped_rows, error_count, status
+        SELECT COUNT(*)
         FROM _enrichment_runs
-        WHERE run_id = ?
+        WHERE enrichment_name = 'article_summary'
         """,
-        (second_run_id,),
     ).fetchone()
     conn.close()
 
-    assert run_row["status"] == "completed"
-    assert run_row["processed_rows"] == 0
-    assert run_row["skipped_rows"] == 2
-    assert run_row["error_count"] == 0
+    assert run_count[0] == 1
 
 
 def test_execute_query_optimized_uses_explicit_default_table(tmp_path):

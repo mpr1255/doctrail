@@ -53,7 +53,7 @@ def create_run_view(
     key_column: str = 'sha1',
     priority_columns: Optional[List[str]] = None,
     source_db_path: Optional[str] = None
-) -> str:
+) -> Optional[str]:
     """Create a view for a specific run, falling back to legacy prompt-scoped runs."""
     ensure_enrichments_table(db_path)
     ensure_run_tracking_tables(db_path)
@@ -114,8 +114,8 @@ def create_run_view(
             """, (run_id,))
             field_names = [row[0] for row in cursor.fetchall()]
             if not field_names:
-                logging.warning(f"No enrichments found for run '{run_id[:8]}'")
-                return view_name
+                logging.info(f"No enrichment fields found for run '{run_id[:8]}'; run view not created")
+                return None
 
             cursor.execute(f"""
                 SELECT row_json

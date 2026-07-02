@@ -449,6 +449,8 @@ def overrides_export(ctx, db_path: Optional[str], run_id: str, output: Optional[
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     view_name = create_run_view(str(resolved_db_path), run_id=run_id)
+    if not view_name:
+        raise click.UsageError(f"No enrichment fields found for run '{run_id[:8]}'; no override CSV was created.")
     with sqlite3.connect(str(resolved_db_path)) as conn:
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
