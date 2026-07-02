@@ -7,7 +7,7 @@
 - Changed `doctrail serve` to bind `127.0.0.1` by default instead of `0.0.0.0`.
 - Disabled legacy write-capable HTTP endpoints by default; `/enrich`, `/ingest`, and `/export` now require explicit `--enable-write-api`.
 - Required a bearer token when legacy write endpoints are enabled on a non-loopback server host.
-- Changed runtime `.env` discovery so a bare unrelated cwd `.env` is ignored; marked Doctrail project `.env` files still override inherited shell keys as the project-local source of truth.
+- Changed runtime `.env` discovery so only marked Doctrail project `.env` files are loaded. They override inherited shell keys as the project-local source of truth; bare unrelated cwd `.env` files and package/global `.env` files are ignored.
 
 ### Rerun, cost, and billing correctness
 
@@ -112,7 +112,7 @@
 
 ### Environment precedence
 
-- Doctrail now prefers the nearest project-local `.env` over inherited shell or global environment variables.
+- Doctrail now prefers the nearest marked project-local `.env` over inherited shell environment variables.
 - This applies to provider resolution and cost/model utilities, so a project can reliably use its own keys without depending on the caller's ambient shell state.
 
 ## 2026-01-15 - UX overhaul for social scientists

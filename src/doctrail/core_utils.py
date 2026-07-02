@@ -53,26 +53,6 @@ def find_doctrail_env_file(start_dir: Optional[str | Path] = None) -> Optional[P
     return None
 
 
-def find_doctrail_source_env_file() -> Optional[Path]:
-    """Find a .env at the root of the doctrail source tree, located relative to this
-    module rather than the current working directory.
-
-    This is what lets a single repo-root .env supply credentials for every invocation
-    of doctrail regardless of where you run it from, without exporting secrets into the
-    global shell environment. core_utils.py lives at ``<repo>/src/doctrail/core_utils.py``, so the
-    source root is three levels up. In an installed wheel this file won't exist, so this
-    returns None and the loader falls back to project .env / inherited env.
-
-    Set DOCTRAIL_NO_SOURCE_ENV=1 to skip this source (the test suite does, so a
-    developer's real repo-root .env cannot leak into tests).
-    """
-    if os.environ.get("DOCTRAIL_NO_SOURCE_ENV"):
-        return None
-    source_root = Path(__file__).resolve().parent.parent.parent
-    candidate = source_root / ".env"
-    return candidate if candidate.is_file() else None
-
-
 def _apply_env_file(env_path: Path, *, override: bool) -> None:
     """Read an .env file and inject its values into the current process environment.
 
@@ -91,31 +71,19 @@ def load_doctrail_environment(
 ) -> Optional[Path]:
     """Load .env settings into the process environment.
 
-    Two sources, applied lowest-precedence first:
-      1. The doctrail source-tree root .env (source-run convenience; absent once installed
-         as a wheel). Keeps a machine-wide key scoped to doctrail without a shell export.
-      2. The nearest project .env for the current working tree (cwd, or an ancestor that
-         also contains a .doctrail/ marker). A bare .env in an unrelated cwd is ignored.
+    The only file source is the nearest project .env for the current working
+    tree: cwd, or an ancestor, that also contains a .doctrail/ marker. A bare
+    .env in an unrelated cwd is ignored. With the default override=True, that
+    project .env overrides inherited shell env, which keeps project-specific
+    billing credentials local to the project.
 
-    The project .env is applied last, so a project can override the source-root default.
-    With the default override=True, a marked doctrail project's .env also overrides
-    inherited shell env, which keeps project-specific billing credentials local to the
-    project.
-    Returns the most specific .env that was applied, or None if neither was found.
+    Returns the project .env that was applied, or None if none was found.
     """
-    applied: Optional[Path] = None
-
-    source_env = find_doctrail_source_env_file()
-    if source_env is not None:
-        _apply_env_file(source_env, override=override)
-        applied = source_env
-
     project_env = find_doctrail_env_file(start_dir)
-    if project_env is not None and project_env != source_env:
+    if project_env is not None:
         _apply_env_file(project_env, override=override)
-        applied = project_env
 
-    return applied
+    return project_env
 
 
 def resolve_enrichment_prompt(enrichment_config: Dict[str, Any], config_data: Dict[str, Any]) -> str:
