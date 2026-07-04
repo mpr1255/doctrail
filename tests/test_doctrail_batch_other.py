@@ -511,7 +511,10 @@ def test_gemini_batch_submission_and_poll_success(temp_env, monkeypatch):
     assert batch_job["provider"] == "gemini"
     assert batch_job["input_file_id"].startswith("files/input-")
     assert backend.submitted_batches[0]["requests"][0]["key"] == "row_0"
-    assert backend.submitted_batches[0]["requests"][0]["request"]["generation_config"]["response_mime_type"] == "application/json"
+    generation_config = backend.submitted_batches[0]["requests"][0]["request"]["generation_config"]
+    assert generation_config["response_mime_type"] == "application/json"
+    assert generation_config["response_schema"]["properties"]["summary"]["type"] == "string"
+    assert "JSON Schema" not in backend.submitted_batches[0]["requests"][0]["request"]["contents"][0]["parts"][0]["text"]
 
     backend.set_batch_result(
         batch_id,

@@ -995,28 +995,38 @@ class TestAnthropicBatchHelpers:
 class TestGeminiBatchHelpers:
     """Gemini batch request, parsing, and pricing behavior."""
 
-    def test_build_batch_generate_content_request_uses_json_mode_prompt_injection(self):
+    def test_build_batch_generate_content_request_uses_response_schema(self):
         provider = GeminiProvider(api_key="test-key", model="gemini-2.5-flash")
         request = provider.build_batch_generate_content_request(
             messages=[{"role": "user", "content": "Return JSON"}],
-            pydantic_model=SimpleResult,
+            pydantic_model=EnumResult,
         )
 
         assert request["contents"][0]["role"] == "user"
         assert request["generationConfig"]["responseMimeType"] == "application/json"
-        assert "JSON Schema" in request["contents"][0]["parts"][0]["text"]
+        assert request["generationConfig"]["responseSchema"]["properties"]["decision"]["enum"] == [
+            "yes",
+            "no",
+            "unclear",
+        ]
+        assert "JSON Schema" not in request["contents"][0]["parts"][0]["text"]
 
     def test_build_batch_generate_content_file_request_uses_jsonl_shape(self):
         provider = GeminiProvider(api_key="test-key", model="gemini-2.5-flash")
         request = provider.build_batch_generate_content_file_request(
             key="row_7",
             messages=[{"role": "user", "content": "Return JSON"}],
-            pydantic_model=SimpleResult,
+            pydantic_model=EnumResult,
         )
 
         assert request["key"] == "row_7"
         assert request["request"]["generation_config"]["response_mime_type"] == "application/json"
-        assert "JSON Schema" in request["request"]["contents"][0]["parts"][0]["text"]
+        assert request["request"]["generation_config"]["response_schema"]["properties"]["decision"]["enum"] == [
+            "yes",
+            "no",
+            "unclear",
+        ]
+        assert "JSON Schema" not in request["request"]["contents"][0]["parts"][0]["text"]
 
     def test_create_batch_job_uses_file_name_input_config(self, monkeypatch):
         provider = GeminiProvider(api_key="test-key", model="gemini-2.5-flash")

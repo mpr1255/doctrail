@@ -270,29 +270,6 @@ class GeminiProvider:
             return state.replace("JOB_STATE_", "BATCH_STATE_", 1)
         return state
 
-    @staticmethod
-    def _augment_messages_for_json_mode(
-        messages: List[Dict[str, str]],
-        pydantic_model: Type[BaseModel],
-    ) -> List[Dict[str, str]]:
-        """Inject schema instructions into the prompt for batch JSON mode."""
-        schema = pydantic_model.model_json_schema()
-        schema_instruction = (
-            "You MUST respond with valid JSON matching this schema exactly. "
-            "Do NOT include any text outside the JSON object.\n"
-            f"JSON Schema:\n```json\n{json.dumps(schema, indent=2)}\n```"
-        )
-
-        augmented_messages = list(messages)
-        if augmented_messages and augmented_messages[0].get("role") == "system":
-            augmented_messages[0] = {
-                "role": "system",
-                "content": augmented_messages[0]["content"] + "\n\n" + schema_instruction,
-            }
-        else:
-            augmented_messages.insert(0, {"role": "system", "content": schema_instruction})
-        return augmented_messages
-
     def supports_batch(self) -> bool:
         """Return whether this provider can use Gemini's native batch API."""
         return True
@@ -305,14 +282,10 @@ class GeminiProvider:
         max_tokens: Optional[int] = None,
     ) -> Dict[str, Any]:
         """Build one raw GenerateContentRequest payload for Gemini batch submission."""
-        batch_messages = list(messages)
-        if pydantic_model is not None:
-            batch_messages = self._augment_messages_for_json_mode(batch_messages, pydantic_model)
-
         request_body: Dict[str, Any] = {
             "contents": [{
                 "role": "user",
-                "parts": [{"text": self._format_messages(batch_messages)}],
+                "parts": [{"text": self._format_messages(list(messages))}],
             }],
         }
 
@@ -321,6 +294,7 @@ class GeminiProvider:
             generation_config["maxOutputTokens"] = max_tokens
         if pydantic_model is not None:
             generation_config["responseMimeType"] = "application/json"
+            generation_config["responseSchema"] = self._clean_schema_for_gemini(pydantic_model)
         request_body["generationConfig"] = generation_config
         return request_body
 
