@@ -13,7 +13,7 @@ import pytest
 import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch, PropertyMock
 from pydantic import BaseModel, Field
-from typing import Optional
+from typing import Literal, Optional
 
 from doctrail.llm_providers.anthropic_provider import AnthropicProvider, TokenUsage as AnthropicTokenUsage
 from doctrail.llm_providers.gemini_provider import GeminiProvider, TokenUsage as GeminiTokenUsage
@@ -32,6 +32,11 @@ class ClassifyResult(BaseModel):
     category: str
     confidence: float
     tags: list[str]
+
+
+class EnumResult(BaseModel):
+    decision: Literal["yes", "no", "unclear"]
+    explanation: str
 
 
 class BatchIncidentItem(BaseModel):
@@ -870,6 +875,21 @@ class TestBatchParsing:
 
         assert request["reasoning_effort"] == "minimal"
         assert "max_tokens" not in request
+
+    def test_build_batch_chat_request_uses_strict_json_schema_for_pydantic_model(self):
+        provider = OpenAIProvider(api_key="test-key", model="gpt-5-mini")
+        request = provider.build_batch_chat_request(
+            messages=[{"role": "user", "content": "Return JSON"}],
+            pydantic_model=EnumResult,
+        )
+
+        response_format = request["response_format"]
+        assert response_format["type"] == "json_schema"
+        assert response_format["json_schema"]["strict"] is True
+        schema = response_format["json_schema"]["schema"]
+        assert schema["additionalProperties"] is False
+        assert schema["properties"]["decision"]["enum"] == ["yes", "no", "unclear"]
+        assert "JSON Schema" not in request["messages"][0]["content"]
 
     def test_build_batch_chat_request_uses_max_completion_tokens_for_gpt5(self):
         provider = OpenAIProvider(api_key="test-key", model="gpt-5-mini")

@@ -387,13 +387,52 @@ class OpenAIProvider:
         if resolved_reasoning_effort is not None:
             request_body["reasoning_effort"] = resolved_reasoning_effort
         if pydantic_model is not None:
-            request_body["messages"] = self._augment_messages_for_json_mode(
-                request_body["messages"],
-                pydantic_model,
+            request_body["response_format"] = self._json_schema_response_format(
+                pydantic_model
             )
-            request_body["response_format"] = {"type": "json_object"}
         request_body.update(self._max_tokens_kwargs(max_tokens))
         return request_body
+
+    @staticmethod
+    def _json_schema_response_format(pydantic_model: Type[BaseModel]) -> Dict[str, Any]:
+        """Build an OpenAI structured-output response_format for batch requests."""
+        schema = json.loads(json.dumps(pydantic_model.model_json_schema()))
+        OpenAIProvider._add_additional_properties_false(schema)
+        schema_name = re.sub(r"[^A-Za-z0-9_-]", "_", pydantic_model.__name__)[:64]
+        if not schema_name:
+            schema_name = "DoctrailStructuredOutput"
+        return {
+            "type": "json_schema",
+            "json_schema": {
+                "name": schema_name,
+                "schema": schema,
+                "strict": True,
+            },
+        }
+
+    @staticmethod
+    def _add_additional_properties_false(schema: Dict[str, Any]) -> None:
+        """Recursively close object schemas for OpenAI strict structured output."""
+        if not isinstance(schema, dict):
+            return
+
+        if schema.get("type") == "object":
+            schema["additionalProperties"] = False
+
+        for key in ("properties", "items", "$defs", "definitions"):
+            val = schema.get(key)
+            if isinstance(val, dict):
+                for sub_schema in val.values():
+                    OpenAIProvider._add_additional_properties_false(sub_schema)
+            elif isinstance(val, list):
+                for sub_schema in val:
+                    OpenAIProvider._add_additional_properties_false(sub_schema)
+
+        for key in ("anyOf", "oneOf", "allOf"):
+            val = schema.get(key)
+            if isinstance(val, list):
+                for sub_schema in val:
+                    OpenAIProvider._add_additional_properties_false(sub_schema)
 
     @staticmethod
     def _extract_json_from_text(text: str) -> dict:
