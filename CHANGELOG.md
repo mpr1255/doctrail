@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.3.4 - provider batch schema enforcement
+
+### Batch structured output enforcement
+
+- Fixed direct OpenAI batch requests so structured enrichments send provider-native strict JSON schema in `response_format` instead of JSON mode plus prompt-injected schema text.
+- Fixed direct Gemini batch requests so structured enrichments send provider-native `responseSchema` in `generationConfig` instead of prompt-injected schema text.
+- Fixed Gemini schema cleanup to inline Pydantic `$defs` / `$ref` definitions before submitting `responseSchema`; Google's `responseSchema` field accepts an OpenAPI-style schema object and rejects `$ref` in live batch JSONL requests.
+- Confirmed Anthropic batch already uses native `output_config.format.type = json_schema`; no code change was needed for Anthropic schema enforcement.
+- Added regression coverage asserting OpenAI and Gemini batch request bodies carry enum constraints in provider-native schema fields and do not paste schema text into batch prompts.
+- Added regression coverage for Gemini Pydantic enum schemas so request bodies contain inline enum values and no `$defs` / `$ref`.
+
+### Live endpoint verification
+
+- OpenAI batch endpoint: patched Doctrail 0.3.4 source completed run `c5f248dfcd0d28259ece2abcfcea60ff061b4c3dfd004d680d9b7701237e470a` against `batch_6a49196822648190877b2e31ccb920ab` with 1 success and 0 errors; the same OpenAI strict-schema path had also completed a 20-row installed 0.3.3 smoke run with 20 successes and 0 Doctrail errors.
+- Anthropic batch endpoint: patched Doctrail 0.3.4 source completed run `758ee999c6f4955d5a4fe3489cbc43ce3edb4b74a21ff4449d8bb49e33b54afb` against `msgbatch_01U8CyzqcHu4zHmmwE968VZZ` with 1 success and 0 errors.
+- Gemini batch endpoint: installed Doctrail 0.3.3 rejected the live enum-schema smoke request because the submitted schema still contained `$ref`; patched source then completed run `3ce1978f9a3577ff2ee29ee74baf54853daa09543c39cc62aa8993fac92c649a` against `batches/fdvvjqbu7o934ljidw7fy39e66d89itkymw2` with 1 success and 0 errors.
+
 ## 0.3.2 - security, rerun, and release polish
 
 ### Security and environment safety

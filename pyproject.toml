@@ -1,6 +1,6 @@
 [project]
 name = "doctrail"
-version = "0.3.3"
+version = "0.3.4"
 description = "SQLite database enrichment tool using LLMs"
 readme = "README.md"
 license = "MIT"

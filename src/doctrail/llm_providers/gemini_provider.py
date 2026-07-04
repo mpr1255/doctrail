@@ -214,12 +214,53 @@ class GeminiProvider:
             for item in obj:
                 GeminiProvider._strip_additional_properties(item)
 
+    @staticmethod
+    def _inline_schema_refs(obj: Any, defs: Dict[str, Any]) -> Any:
+        """Inline local $defs references for Gemini's OpenAPI-style Schema."""
+        if isinstance(obj, dict):
+            if "$ref" in obj:
+                ref = obj["$ref"]
+                prefix = "#/$defs/"
+                if ref.startswith(prefix):
+                    name = ref[len(prefix):]
+                    if name not in defs:
+                        raise ValueError(f"Gemini schema referenced missing definition: {ref}")
+                    resolved = GeminiProvider._inline_schema_refs(
+                        json.loads(json.dumps(defs[name])),
+                        defs,
+                    )
+                    siblings = {
+                        key: GeminiProvider._inline_schema_refs(value, defs)
+                        for key, value in obj.items()
+                        if key != "$ref"
+                    }
+                    if isinstance(resolved, dict):
+                        resolved.update(siblings)
+                        return resolved
+                    return resolved
+                raise ValueError(f"Gemini schema contains unsupported reference: {ref}")
+
+            return {
+                key: GeminiProvider._inline_schema_refs(value, defs)
+                for key, value in obj.items()
+                if key not in {"$defs", "definitions"}
+            }
+
+        if isinstance(obj, list):
+            return [GeminiProvider._inline_schema_refs(item, defs) for item in obj]
+
+        return obj
+
     def _clean_schema_for_gemini(self, pydantic_model: Type[BaseModel]) -> dict:
         """Convert Pydantic model to a Gemini-compatible JSON schema dict.
 
-        Strips ``additionalProperties`` which the Gemini API rejects.
+        Gemini's ``responseSchema`` field accepts an OpenAPI-style schema object,
+        not full JSON Schema. Strip ``additionalProperties`` and inline local
+        Pydantic references so enums and nested objects are submitted directly.
         """
-        schema = pydantic_model.model_json_schema()
+        schema = json.loads(json.dumps(pydantic_model.model_json_schema()))
+        defs = schema.get("$defs", {})
+        schema = self._inline_schema_refs(schema, defs)
         self._strip_additional_properties(schema)
         logger.debug(f"Cleaned Gemini schema: {list(schema.get('properties', {}).keys())}")
         return schema

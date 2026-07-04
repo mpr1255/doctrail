@@ -11,6 +11,7 @@ import os
 import urllib.error
 import pytest
 import asyncio
+from enum import Enum
 from unittest.mock import AsyncMock, MagicMock, patch, PropertyMock
 from pydantic import BaseModel, Field
 from typing import Literal, Optional
@@ -36,6 +37,17 @@ class ClassifyResult(BaseModel):
 
 class EnumResult(BaseModel):
     decision: Literal["yes", "no", "unclear"]
+    explanation: str
+
+
+class SchemaEnum(str, Enum):
+    yes = "yes"
+    no = "no"
+    unclear = "unclear"
+
+
+class EnumRefResult(BaseModel):
+    decision: SchemaEnum
     explanation: str
 
 
@@ -1010,6 +1022,22 @@ class TestGeminiBatchHelpers:
             "unclear",
         ]
         assert "JSON Schema" not in request["contents"][0]["parts"][0]["text"]
+
+    def test_build_batch_generate_content_request_inlines_schema_refs(self):
+        provider = GeminiProvider(api_key="test-key", model="gemini-2.5-flash")
+        request = provider.build_batch_generate_content_request(
+            messages=[{"role": "user", "content": "Return JSON"}],
+            pydantic_model=EnumRefResult,
+        )
+
+        serialized = json.dumps(request["generationConfig"]["responseSchema"])
+        assert "$defs" not in serialized
+        assert "$ref" not in serialized
+        assert request["generationConfig"]["responseSchema"]["properties"]["decision"]["enum"] == [
+            "yes",
+            "no",
+            "unclear",
+        ]
 
     def test_build_batch_generate_content_file_request_uses_jsonl_shape(self):
         provider = GeminiProvider(api_key="test-key", model="gemini-2.5-flash")
