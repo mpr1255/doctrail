@@ -323,3 +323,27 @@ async def test_process_ingest_expands_nested_zip_with_provenance(tmp_path, nativ
     metadata = [json.loads(row[2]) for row in rows]
     assert {item["archive_depth"] for item in metadata} == {"1", "2"}
     assert any("inner.zip!/nested/two.html" in item["archive_member_path"] for item in metadata)
+
+
+@pytest.mark.asyncio
+async def test_process_ingest_contains_corrupt_zip_failure(tmp_path, native_enabled):
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "good.txt").write_text("The valid document survives.", encoding="utf-8")
+    (source / "broken.zip").write_bytes(b"not a zip archive")
+
+    db_path = tmp_path / "archive.sqlite"
+    result = await process_ingest(
+        db_path=str(db_path),
+        input_dir=str(source),
+        table="documents",
+        extractor="rust",
+        workers=1,
+        yes=True,
+    )
+
+    assert result["successful"] == 1
+    assert result["failed"] == 1
+    with sqlite3.connect(db_path) as conn:
+        rows = conn.execute("SELECT filename, raw_content FROM documents").fetchall()
+    assert rows == [("good.txt", "The valid document survives.")]

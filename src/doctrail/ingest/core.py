@@ -46,7 +46,13 @@ console = Console()
 
 def _expand_zip_inputs(
     paths: List[Path],
-) -> tuple[List[Path], Dict[str, str], Dict[str, Dict[str, Any]], Optional[tempfile.TemporaryDirectory]]:
+) -> tuple[
+    List[Path],
+    Dict[str, str],
+    Dict[str, Dict[str, Any]],
+    Optional[tempfile.TemporaryDirectory],
+    List[tuple[str, str]],
+]:
     """Expand ZIP inputs through Rust and return leaf paths plus provenance.
 
     One temporary tree is owned by the caller for the duration of ingestion.
@@ -55,7 +61,7 @@ def _expand_zip_inputs(
     """
     zip_paths = [path for path in paths if path.suffix.lower() == ".zip"]
     if not zip_paths:
-        return paths, {}, {}, None
+        return paths, {}, {}, None, []
 
     from . import native_extractor
 
@@ -70,6 +76,7 @@ def _expand_zip_inputs(
     leaves: List[Path] = []
     logical_paths: Dict[str, str] = {}
     archive_metadata: Dict[str, Dict[str, Any]] = {}
+    archive_failures: List[tuple[str, str]] = []
     archive_index = 0
     total_entries = 0
     total_expanded_bytes = 0
@@ -89,7 +96,13 @@ def _expand_zip_inputs(
             )
         destination = staging_root / f"archive-{archive_index:06}"
         archive_index += 1
-        members = native_extractor.expand_zip(str(archive_path), str(destination))
+        try:
+            members = native_extractor.expand_zip(str(archive_path), str(destination))
+        except Exception as exc:
+            error = str(exc)
+            logger.warning(f"Skipping unreadable ZIP archive {logical_archive}: {error}")
+            archive_failures.append((logical_archive, error))
+            continue
         total_entries += len(members)
         total_expanded_bytes += sum(member["uncompressed_bytes"] for member in members)
         if total_entries > native_extractor.ZIP_MAX_ENTRIES:
@@ -129,7 +142,7 @@ def _expand_zip_inputs(
         f"Expanded {len(zip_paths)} ZIP input(s) into {len(logical_paths)} leaf file(s); "
         f"{total_expanded_bytes} bytes staged"
     )
-    return leaves, logical_paths, archive_metadata, staging
+    return leaves, logical_paths, archive_metadata, staging, archive_failures
 
 
 def _default_worker_count() -> int:
@@ -461,7 +474,13 @@ async def process_ingest(
             logger.info(f"Skipped {pre_hidden - len(all_files)} file(s) inside hidden directories")
         logger.info(f"Found {len(all_files)} total files in {input_dir}")
 
-    all_files, archive_filepaths, archive_metadata, archive_staging = _expand_zip_inputs(all_files)
+    (
+        all_files,
+        archive_filepaths,
+        archive_metadata,
+        archive_staging,
+        archive_failures,
+    ) = _expand_zip_inputs(all_files)
     effective_override_filepaths = dict(override_filepaths or {})
     effective_override_filepaths.update(archive_filepaths)
     
@@ -567,7 +586,7 @@ async def process_ingest(
             logger.info(f"Skipping {dup_removed} duplicate-content file(s) with an already-seen sha1")
         files_to_process = deduped
 
-    if not files_to_process and not existing_office_paths:
+    if not files_to_process and not existing_office_paths and not archive_failures:
         console.print("[yellow]No new files to process.[/yellow]")
         return {
             'status': 'success',
@@ -593,9 +612,12 @@ async def process_ingest(
     
     # Process files
     successful = 0
-    failed = 0
+    failed = len(archive_failures)
     warnings = 0
-    failed_files = []  # Track failed files for summary
+    failed_files = [
+        (archive_path, f"ZIP expansion failed: {error}")
+        for archive_path, error in archive_failures
+    ]
     successful_source_paths: set[str] = set(existing_office_paths)
     embedded_media_stats: Dict[str, Any] = {}
 
