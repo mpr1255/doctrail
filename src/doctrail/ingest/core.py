@@ -105,10 +105,10 @@ def _expand_zip_inputs(
             continue
         total_entries += len(members)
         total_expanded_bytes += sum(member["uncompressed_bytes"] for member in members)
-        if total_entries > native_extractor.ZIP_MAX_ENTRIES:
+        if total_entries > native_extractor.ZIP_MAX_TOTAL_ENTRIES:
             raise RuntimeError(
                 f"nested ZIPs expanded to {total_entries} entries, exceeding global limit "
-                f"{native_extractor.ZIP_MAX_ENTRIES}"
+                f"{native_extractor.ZIP_MAX_TOTAL_ENTRIES}"
             )
         if total_expanded_bytes > native_extractor.ZIP_MAX_TOTAL_BYTES:
             raise RuntimeError(

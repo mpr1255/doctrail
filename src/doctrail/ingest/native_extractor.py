@@ -40,7 +40,8 @@ from typing import Any, Dict, List, Optional
 _native_module = None
 _native_loaded = False
 _VALID_STATUSES = {"extracted", "fallback_required", "failed", "skipped_unsupported"}
-ZIP_MAX_ENTRIES = 10_000
+ZIP_MAX_ENTRIES = 50_000
+ZIP_MAX_TOTAL_ENTRIES = 100_000
 ZIP_MAX_MEMBER_BYTES = 512 * 1024 * 1024
 ZIP_MAX_TOTAL_BYTES = 2 * 1024 * 1024 * 1024
 ZIP_MAX_COMPRESSION_RATIO = 200
