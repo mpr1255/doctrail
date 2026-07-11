@@ -18,8 +18,9 @@ from typing import Literal, Optional
 
 from doctrail.llm_providers.anthropic_provider import AnthropicProvider, TokenUsage as AnthropicTokenUsage
 from doctrail.llm_providers.gemini_provider import GeminiProvider, TokenUsage as GeminiTokenUsage
-from doctrail.llm_providers.openai_provider import OpenAIProvider, TokenUsage
+from doctrail.llm_providers.openai_provider import OpenAIProvider, StructuredGenerationError, TokenUsage
 from doctrail.utils.model_pricing import get_openai_batch_model_info
+from doctrail.pydantic_schema import create_pydantic_model_from_schema
 
 
 # --- Test models ---
@@ -638,6 +639,31 @@ class TestProviderInit:
         )
         assert provider._is_third_party
 
+    def test_self_hosted_usage_is_free_without_model_pricing(self):
+        usage = TokenUsage(
+            input_tokens=1_000_000,
+            output_tokens=1_000_000,
+            model="local-model",
+            free_inference=True,
+        )
+
+        assert usage.estimate_cost() == 0.0
+
+
+def test_enum_list_conversions_remove_duplicates_preserving_order():
+    model = create_pydantic_model_from_schema({
+        "tags": {
+            "enum_list": ["urgent", "review", "archive"],
+            "min_items": 1,
+            "max_items": 3,
+        }
+    })
+    result = model(tags=["review", "review", "archive"])
+
+    result.apply_conversions(result)
+
+    assert [item.value for item in result.tags] == ["review", "archive"]
+
 
 # --- Capability-aware routing tests ---
 
@@ -744,6 +770,38 @@ class TestCapabilityRouting:
         )
 
         assert result.hostility_level == 5
+        provider.client.chat.completions.create.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_native_only_failure_preserves_raw_completion_and_usage(self):
+        provider = OpenAIProvider(
+            api_key="test-key",
+            model="local-model",
+            base_url="http://localhost:8000/v1",
+            capabilities={"structured_outputs": True, "response_format": False},
+            free_inference=True,
+        )
+        completion = MagicMock()
+        completion.model_dump_json.return_value = '{"partial":"response"}'
+        completion.usage.prompt_tokens = 20
+        completion.usage.completion_tokens = 32
+        error = Exception("length limit reached")
+        error.completion = completion
+        provider.client.beta.chat.completions.parse = AsyncMock(side_effect=error)
+        provider.client.chat.completions.create = AsyncMock()
+
+        with pytest.raises(StructuredGenerationError) as exc_info:
+            await provider.generate_structured(
+                messages=[{"role": "user", "content": "classify"}],
+                pydantic_model=SimpleResult,
+            )
+
+        assert json.loads(exc_info.value.raw_json) == {
+            "failed_responses": ['{"partial":"response"}']
+        }
+        assert exc_info.value.usage.input_tokens == 20
+        assert exc_info.value.usage.output_tokens == 32
+        assert exc_info.value.usage.estimate_cost() == 0.0
         provider.client.chat.completions.create.assert_not_called()
 
     @pytest.mark.asyncio
@@ -1218,9 +1276,10 @@ class TestFactoryCapabilities:
         assert provider.client.api_key == "secret"
         assert provider._is_third_party
         assert provider._capabilities == {
-            "structured_outputs": False,
-            "response_format": True,
+            "structured_outputs": True,
+            "response_format": False,
         }
+        assert provider._free_inference
 
     def test_factory_requires_self_hosted_base_url(self, monkeypatch):
         import doctrail.llm_providers.factory as factory_module

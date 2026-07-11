@@ -78,3 +78,30 @@ default_model: openai-compatible/Qwen/Qwen3-32B
 ```
 
 For a local Ollama server, the base URL is normally `http://localhost:11434/v1`. Self-hosted endpoints currently use synchronous execution; provider batch mode is not supported.
+
+Self-hosted enrichments default to four concurrent requests and 512 output tokens. Override those limits per enrichment when the server and schema justify it, and set the served context window so `--truncate` uses the server's real limit:
+
+```yaml
+model: openai-compatible/Qwen/Qwen3-32B
+concurrency: 8
+max_tokens: 768
+context_window: 32768
+```
+
+The endpoint may be a private URL, a local server, or a local SSH forward. For a university or HPC server bound to cluster loopback, keep vLLM private and open a local forward:
+
+```bash
+ssh -N -L 18000:127.0.0.1:8000 your-cluster
+```
+
+Then configure Doctrail normally:
+
+```dotenv
+OPENAI_COMPATIBLE_BASE_URL=http://127.0.0.1:18000/v1
+```
+
+The tunnel is only transport and access control. Doctrail still uses the standard OpenAI-compatible API, so the same configuration works with a directly reachable HTTPS endpoint.
+
+Doctrail sends provider-native JSON schemas to vLLM and Ollama. This supports enums, booleans, bounded numbers and strings, arrays, enum lists, multi-field objects, and packed structured enrichments. The server must implement OpenAI-compatible `/v1/chat/completions` with `response_format.type=json_schema`.
+
+Settings on an enrichment override project-level settings in `.doctrail/config.yml`. Provider batch mode remains unavailable for self-hosted endpoints; use ordinary synchronous execution, which still sends requests concurrently up to the configured limit.

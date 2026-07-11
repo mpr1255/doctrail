@@ -799,6 +799,9 @@ def test_run_enrichment_pack_selected_indexes_unpacks_row_level_results(temp_env
                 "schema": {"type": "boolean"},
                 "pack_size": 2,
                 "pack_response_mode": "selected_indexes",
+                "concurrency": 2,
+                "max_tokens": 123,
+                "context_window": 4096,
             }
         ],
     }
@@ -806,7 +809,10 @@ def test_run_enrichment_pack_selected_indexes_unpacks_row_level_results(temp_env
     with open(config_path, "w") as handle:
         yaml.dump(config, handle)
 
+    seen_kwargs = []
+
     async def mock_packed_llm(*args, **kwargs):
+        seen_kwargs.append(kwargs)
         packed_model = None
         for arg in args:
             if isinstance(arg, type) and hasattr(arg, "model_fields"):
@@ -828,6 +834,7 @@ def test_run_enrichment_pack_selected_indexes_unpacks_row_level_results(temp_env
         skip_cost_check=True,
     ))
     assert result["status"] == "success"
+    assert seen_kwargs[0]["max_tokens"] == 123
 
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row

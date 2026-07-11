@@ -74,13 +74,15 @@ def estimate_tokens(text: str) -> int:
     """Rough token estimation: ~4 chars per token for most languages."""
     return len(text) // 4
 
-def truncate_input_for_model(full_prompt: str, input_text: str, model: str, safety_margin: int = 2000) -> Tuple[str, bool]:
+def truncate_input_for_model(full_prompt: str, input_text: str, model: str, safety_margin: int = 2000, context_window: Optional[int] = None) -> Tuple[str, bool]:
     """
     Truncate input_text if the full message would exceed model's context limit.
     Returns (truncated_input_text, was_truncated)
     """
     # CLI backends (cli/claude/*, cli/codex/*, cli/gemini/*) all have large context windows
-    if model.startswith('cli/'):
+    if context_window is not None:
+        context_limit = context_window
+    elif model.startswith('cli/'):
         context_limit = 200000
     else:
         context_limit = MODEL_CONTEXT_LIMITS.get(model, 8192)
@@ -308,6 +310,7 @@ def _render_row_prompt_content(
     table: Optional[str] = None,
     include_schema_instructions: bool = False,
     verbose: bool = False,
+    context_window: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Render one row's effective prompt content and input text."""
     limited_data = apply_column_limits(row, parsed_input_cols)
@@ -352,7 +355,12 @@ def _render_row_prompt_content(
     final_input_text = input_text
     was_truncated = False
     if truncate:
-        final_input_text, was_truncated = truncate_input_for_model(full_prompt, input_text, model)
+        final_input_text, was_truncated = truncate_input_for_model(
+            full_prompt,
+            input_text,
+            model,
+            context_window=context_window,
+        )
 
     full_prompt_content = full_prompt
     if final_input_text:
@@ -622,6 +630,7 @@ async def call_llm(
     system_prompt: str = None,
     verbose: bool = False,
     reasoning_effort: Optional[str] = None,
+    max_tokens: Optional[int] = None,
 ) -> str:
     """
     Make a simple LLM API call using the appropriate provider.
@@ -642,6 +651,7 @@ async def call_llm(
         generate_kwargs = {
             "messages": messages,
             "temperature": 0.0,
+            "max_tokens": max_tokens,
         }
         if hasattr(provider, "supports_reasoning_effort") and provider.supports_reasoning_effort():
             generate_kwargs["reasoning_effort"] = reasoning_effort
@@ -668,7 +678,8 @@ async def call_llm(
 async def call_llm_structured(model: str, messages: List[Dict], pydantic_model: Type[BaseModel],
                              system_prompt: str = None, verbose: bool = False, provider=None,
                              return_usage: bool = False, reasoning_effort: Optional[str] = None,
-                             replay_key_value: Optional[Any] = None):
+                             replay_key_value: Optional[Any] = None,
+                             max_tokens: Optional[int] = None):
     """
     Make a structured LLM API call using provider-specific structured output APIs.
 
@@ -706,6 +717,7 @@ async def call_llm_structured(model: str, messages: List[Dict], pydantic_model: 
                 "pydantic_model": pydantic_model,
                 "temperature": 0.0,
                 "return_usage": True,
+                "max_tokens": max_tokens,
             }
             if getattr(provider, "uses_replay_fixtures", False):
                 generate_kwargs["replay_key_value"] = replay_key_value
@@ -729,6 +741,7 @@ async def call_llm_structured(model: str, messages: List[Dict], pydantic_model: 
                 "messages": messages,
                 "pydantic_model": pydantic_model,
                 "temperature": 0.0,
+                "max_tokens": max_tokens,
             }
             if getattr(provider, "uses_replay_fixtures", False):
                 generate_kwargs["replay_key_value"] = replay_key_value
@@ -915,10 +928,25 @@ async def process_batch(results, prompt, model, pbar, input_cols, parsed_input_c
         return skipped_rows + insufficient_rows
 
     # Set up concurrency limits for API and DB access
-    semaphore = asyncio.Semaphore(DEFAULT_API_SEMAPHORE_LIMIT)  # Allow concurrent API calls
+    default_concurrency = 4 if model.startswith("openai-compatible/") else DEFAULT_API_SEMAPHORE_LIMIT
+    concurrency = int(enrichment_config.get("concurrency", (config or {}).get("concurrency", default_concurrency)))
+    if concurrency < 1:
+        raise ValueError("concurrency must be at least 1")
+    semaphore = asyncio.Semaphore(concurrency)
     db_semaphore = asyncio.Semaphore(DEFAULT_DB_SEMAPHORE_LIMIT)  # Limit database writes to prevent locks
     processed_results = []
     reasoning_effort = enrichment_config.get("reasoning_effort")
+    default_max_tokens = 512 if model.startswith("openai-compatible/") else None
+    max_tokens = enrichment_config.get("max_tokens", (config or {}).get("max_tokens", default_max_tokens))
+    if max_tokens is not None:
+        max_tokens = int(max_tokens)
+        if max_tokens < 1:
+            raise ValueError("max_tokens must be at least 1")
+    context_window = enrichment_config.get("context_window", (config or {}).get("context_window"))
+    if context_window is not None:
+        context_window = int(context_window)
+        if context_window < 1:
+            raise ValueError("context_window must be at least 1")
     
     # Create provider once and reuse for all requests (much more efficient)
     llm_provider = None
@@ -983,6 +1011,8 @@ async def process_batch(results, prompt, model, pbar, input_cols, parsed_input_c
                     reasoning_effort=reasoning_effort,
                     config=config,
                     table=table,
+                    max_tokens=max_tokens,
+                    context_window=context_window,
                 )
 
             except Exception as e:
@@ -1038,6 +1068,8 @@ async def process_batch(results, prompt, model, pbar, input_cols, parsed_input_c
                 key_column=key_column,
                 reasoning_effort=reasoning_effort,
                 table=table,
+                max_tokens=max_tokens,
+                context_window=context_window,
             )
 
             # ALWAYS store to _enrichment_audit for audit trail, even for failures
@@ -1063,6 +1095,8 @@ async def process_batch(results, prompt, model, pbar, input_cols, parsed_input_c
                 key_column=key_column,
                 reasoning_effort=reasoning_effort,
                 table=table,
+                max_tokens=max_tokens,
+                context_window=context_window,
             )
 
             # ALWAYS store to _enrichment_audit for audit trail, even for failures
@@ -1089,6 +1123,8 @@ async def process_batch(results, prompt, model, pbar, input_cols, parsed_input_c
             config=config,
             table=table,
             pack_settings=pack_settings,
+            max_tokens=max_tokens,
+            context_window=context_window,
         )
         for result in result_rows:
             if result:
@@ -1103,7 +1139,7 @@ async def process_batch(results, prompt, model, pbar, input_cols, parsed_input_c
         task_inputs = rows_to_process
         tasks = [process_and_save(row) for row in rows_to_process]
     try:
-        print(f"Starting {len(tasks)} parallel API calls with semaphore limit of {DEFAULT_API_SEMAPHORE_LIMIT}")
+        print(f"Starting {len(tasks)} parallel API calls with semaphore limit of {concurrency}")
         start_time = asyncio.get_event_loop().time()
         processed_results = await asyncio.gather(*tasks)
         end_time = asyncio.get_event_loop().time()
@@ -1177,6 +1213,8 @@ async def process_rows_packed_structured(
     reasoning_effort: Optional[str] = None,
     config: Optional[Dict[str, Any]] = None,
     table: Optional[str] = None,
+    max_tokens: Optional[int] = None,
+    context_window: Optional[int] = None,
 ) -> List[Dict[str, Any]]:
     """Process several rows in one structured call, then unpack back to row-level results."""
     async with semaphore:
@@ -1192,6 +1230,7 @@ async def process_rows_packed_structured(
                 table=table,
                 include_schema_instructions=False,
                 verbose=verbose,
+                context_window=context_window,
             )
             for row in rows
         ]
@@ -1216,6 +1255,7 @@ async def process_rows_packed_structured(
                 provider,
                 return_usage=True,
                 reasoning_effort=reasoning_effort,
+                max_tokens=max_tokens,
             )
             result_dict = result.model_dump(mode="json")
             raw_json = result.model_dump_json()
@@ -1262,7 +1302,9 @@ async def process_row_structured(row: Dict, input_cols: List[str], parsed_input_
                                key_column: str = DEFAULT_KEY_COLUMN,
                                reasoning_effort: Optional[str] = None,
                                config: Optional[Dict[str, Any]] = None,
-                               table: Optional[str] = None):
+                               table: Optional[str] = None,
+                               max_tokens: Optional[int] = None,
+                               context_window: Optional[int] = None):
     """Process a single row using structured outputs (OpenAI only)."""
     async with semaphore:
         key_value = row.get(key_column, 'NO_KEY')
@@ -1283,6 +1325,7 @@ async def process_row_structured(row: Dict, input_cols: List[str], parsed_input_
                 table=table,
                 include_schema_instructions=False,
                 verbose=verbose,
+                context_window=context_window,
             )
             messages = [{"role": "user", "content": rendered["message_content"]}]
             full_prompt_content = rendered["full_prompt_content"]
@@ -1303,6 +1346,7 @@ async def process_row_structured(row: Dict, input_cols: List[str], parsed_input_
                         return_usage=True,
                         reasoning_effort=reasoning_effort,
                         replay_key_value=key_value,
+                        max_tokens=max_tokens,
                     )
 
                     # Apply field conversions if the model has them (BEFORE language validation)
@@ -1373,9 +1417,13 @@ async def process_row_structured(row: Dict, input_cols: List[str], parsed_input_
                 'original': {},
                 'updated': None,
                 'error': str(e),
-                'raw_json': json.dumps({'error': str(e)}, ensure_ascii=False),
+                'raw_json': getattr(e, 'raw_json', None) or json.dumps({'error': str(e)}, ensure_ascii=False),
                 'full_prompt': full_prompt_content if 'full_prompt_content' in locals() else None,
-                'usage': usage_dict if 'usage_dict' in locals() else None
+                'usage': (
+                    _token_usage_to_dict(e.usage)
+                    if getattr(e, 'usage', None)
+                    else (usage_dict if 'usage_dict' in locals() else None)
+                )
             }
 
 async def process_row(row: Dict, input_cols: List[str], parsed_input_cols: List[Tuple[str, Optional[int]]], prompt: str,
@@ -1384,7 +1432,9 @@ async def process_row(row: Dict, input_cols: List[str], parsed_input_cols: List[
                      system_prompt: str = None, config: Dict = None, truncate: bool = False, verbose: bool = False,
                      key_column: str = DEFAULT_KEY_COLUMN,
                      reasoning_effort: Optional[str] = None,
-                     table: Optional[str] = None):
+                     table: Optional[str] = None,
+                     max_tokens: Optional[int] = None,
+                     context_window: Optional[int] = None):
     async with semaphore:
         key_value = row.get(key_column, 'NO_KEY')
         # Generate a unique enrichment_id for this specific LLM call
@@ -1403,6 +1453,7 @@ async def process_row(row: Dict, input_cols: List[str], parsed_input_cols: List[
                 table=table,
                 include_schema_instructions=True,
                 verbose=verbose,
+                context_window=context_window,
             )
             messages = []
             if system_prompt:
@@ -1414,6 +1465,8 @@ async def process_row(row: Dict, input_cols: List[str], parsed_input_cols: List[
             call_kwargs = {}
             if reasoning_effort is not None:
                 call_kwargs["reasoning_effort"] = reasoning_effort
+            if max_tokens is not None:
+                call_kwargs["max_tokens"] = max_tokens
 
             result = await call_llm(
                 model,

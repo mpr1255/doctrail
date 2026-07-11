@@ -27,6 +27,7 @@ class TokenUsage:
     model: str
     cached_input_tokens: int = 0
     batch_pricing: bool = False
+    free_inference: bool = False
 
     @property
     def total_tokens(self) -> int:
@@ -34,6 +35,9 @@ class TokenUsage:
 
     def estimate_cost(self) -> float:
         """Estimate cost in USD based on model pricing."""
+        if self.free_inference:
+            return 0.0
+
         from ..utils.model_pricing import get_model_price, get_openai_batch_model_info
 
         if self.model == "replay" or self.model.startswith("replay/"):
@@ -60,12 +64,13 @@ class TokenUsage:
         return input_cost + output_cost
 
 
-class StructuredGenerationError(Exception):
+class StructuredGenerationError(ValueError):
     """Structured generation failure that may still carry billed token usage."""
 
-    def __init__(self, message: str, usage: Optional[TokenUsage] = None):
+    def __init__(self, message: str, usage: Optional[TokenUsage] = None, raw_json: Optional[str] = None):
         super().__init__(message)
         self.usage = usage
+        self.raw_json = raw_json
 
 
 def _combine_token_usage(usages: List[Optional[TokenUsage]]) -> Optional[TokenUsage]:
@@ -79,13 +84,14 @@ def _combine_token_usage(usages: List[Optional[TokenUsage]]) -> Optional[TokenUs
         cached_input_tokens=sum(usage.cached_input_tokens for usage in present),
         model=present[-1].model,
         batch_pricing=any(usage.batch_pricing for usage in present),
+        free_inference=all(usage.free_inference for usage in present),
     )
 
 
 class OpenAIProvider:
     """OpenAI LLM provider. Also used for OpenAI-compatible APIs (e.g. OpenRouter)."""
 
-    def __init__(self, api_key: str, model: str, base_url: Optional[str] = None, capabilities: Optional[Dict[str, bool]] = None):
+    def __init__(self, api_key: str, model: str, base_url: Optional[str] = None, capabilities: Optional[Dict[str, bool]] = None, free_inference: bool = False):
         client_kwargs = {"api_key": api_key}
         if base_url:
             client_kwargs["base_url"] = base_url
@@ -94,6 +100,7 @@ class OpenAIProvider:
         self.encoding = None
         self._is_third_party = base_url is not None  # OpenRouter, etc.
         self._capabilities = capabilities  # None = native OpenAI or API unavailable
+        self._free_inference = free_inference
 
         # Model context limits
         self.context_limits = {
@@ -169,6 +176,7 @@ class OpenAIProvider:
         caps = self._capabilities
         usage = None
         billed_usages: List[Optional[TokenUsage]] = []
+        failed_raw_responses: List[str] = []
         resolved_reasoning_effort = self._resolve_reasoning_effort(reasoning_effort)
 
         # Models with neither structured_outputs nor response_format: skip tiers 1&2,
@@ -202,7 +210,8 @@ class OpenAIProvider:
                     usage = TokenUsage(
                         input_tokens=response.usage.prompt_tokens,
                         output_tokens=response.usage.completion_tokens,
-                        model=self.model
+                        model=self.model,
+                        free_inference=self._free_inference,
                     )
                     billed_usages.append(usage)
                     logger.debug(f"Token usage: {usage.input_tokens} in, {usage.output_tokens} out, est. ${usage.estimate_cost():.4f}")
@@ -218,8 +227,17 @@ class OpenAIProvider:
                 return parsed_result
 
             except Exception as e:
+                completion = getattr(e, "completion", None)
+                if completion is not None:
+                    if hasattr(completion, "model_dump_json"):
+                        failed_raw_responses.append(completion.model_dump_json())
+                    completion_usage = self.build_token_usage(getattr(completion, "usage", None))
+                    if completion_usage:
+                        billed_usages.append(completion_usage)
                 if getattr(e, "usage", None):
                     billed_usages.append(e.usage)
+                if getattr(e, "raw_json", None):
+                    failed_raw_responses.append(e.raw_json)
                 logger.warning(f"Tier 1 (native structured output) failed: {e}")
         else:
             logger.debug(f"Tier 1 skipped: model '{self.model}' lacks structured_outputs support")
@@ -244,6 +262,8 @@ class OpenAIProvider:
             except Exception as e:
                 if getattr(e, "usage", None):
                     billed_usages.append(e.usage)
+                if getattr(e, "raw_json", None):
+                    failed_raw_responses.append(e.raw_json)
                 logger.warning(f"Tier 2 (JSON mode) failed: {e}")
         else:
             logger.debug(f"Tier 2 skipped: model '{self.model}' lacks response_format support")
@@ -255,9 +275,11 @@ class OpenAIProvider:
         # tiers 1&2 failed.
         if caps is not None and not no_structured_support:
             # Models that *should* support tiers 1 or 2 but both failed
-            raise ValueError(
+            raise StructuredGenerationError(
                 f"Structured output failed for model '{self.model}'. "
-                f"Capabilities: {caps}. Consider using a model with broader support."
+                f"Capabilities: {caps}. Consider using a model with broader support.",
+                usage=_combine_token_usage(billed_usages),
+                raw_json=json.dumps({"failed_responses": failed_raw_responses}, ensure_ascii=False),
             )
 
         try:
@@ -328,7 +350,8 @@ class OpenAIProvider:
             usage = TokenUsage(
                 input_tokens=response.usage.prompt_tokens,
                 output_tokens=response.usage.completion_tokens,
-                model=self.model
+                model=self.model,
+                free_inference=self._free_inference,
             )
 
         text = response.choices[0].message.content
@@ -339,7 +362,7 @@ class OpenAIProvider:
             data = json.loads(text)
             result = pydantic_model(**data)
         except Exception as exc:
-            raise StructuredGenerationError(str(exc), usage=usage) from exc
+            raise StructuredGenerationError(str(exc), usage=usage, raw_json=text) from exc
         return result, usage
 
     @staticmethod
@@ -542,6 +565,7 @@ class OpenAIProvider:
             model=self.model,
             cached_input_tokens=self._cached_input_tokens_from_usage(usage_payload),
             batch_pricing=batch_pricing,
+            free_inference=self._free_inference,
         )
 
     @staticmethod

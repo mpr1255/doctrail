@@ -140,7 +140,8 @@ def get_llm_provider(
             api_key=api_key,
             model=actual_model,
             base_url=base_url,
-            capabilities={"structured_outputs": False, "response_format": True},
+            capabilities={"structured_outputs": True, "response_format": False},
+            free_inference=True,
         )
 
     # Anthropic/Claude: claude-* prefix or anthropic/ prefix (direct API)

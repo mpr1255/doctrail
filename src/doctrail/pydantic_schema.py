@@ -270,6 +270,11 @@ def create_pydantic_model_from_schema(schema: Dict[str, Any], model_name: str = 
         conversion_requirements = {}
         array_language_requirements = {}  # field_name -> lang for array items
         array_conversion_requirements = {}  # field_name -> convert for array items
+        enum_list_fields = {
+            field_name
+            for field_name, field_def in schema.items()
+            if isinstance(field_def, dict) and "enum_list" in field_def
+        }
         
         for field_name, field_def in schema.items():
             if isinstance(field_def, dict):
@@ -291,6 +296,12 @@ def create_pydantic_model_from_schema(schema: Dict[str, Any], model_name: str = 
         # Add custom validation and conversion methods to the model
         def apply_conversions(instance):
             """Apply field conversions like chinese_to_pinyin."""
+            for field_name in enum_list_fields:
+                values = getattr(instance, field_name, None)
+                if isinstance(values, list):
+                    deduplicated = list(dict.fromkeys(values))
+                    setattr(instance, field_name, deduplicated)
+
             # Handle direct field conversions
             for field_name, conversion_type in conversion_requirements.items():
                 value = getattr(instance, field_name, None)

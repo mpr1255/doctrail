@@ -110,6 +110,19 @@ Write `prompt` as a codebook, not just a question. Define every enum value, anch
 
 Keep the prompt as static as possible. Doctrail renders the prompt first, adds schema instructions there for JSON-mode paths or sends provider-native schema payloads as constant request structure, and appends per-row `input_columns` content last. OpenAI automatic prompt caching and Gemini implicit caching on Gemini 2.5 and newer models can bill repeated prefix tokens at cached-input rates when the provider reports a cache hit, though Gemini does not guarantee savings on every request. Doctrail does not currently set Anthropic `cache_control` markers.
 
+## Self-hosted runtime limits
+
+For `openai-compatible/<model>` enrichments, Doctrail defaults to four concurrent requests and 512 output tokens. These conservative defaults prevent a small local model from creating 30 simultaneous uncapped generations. Set overrides at the project level or on one enrichment:
+
+```yaml
+default_model: openai-compatible/Qwen/Qwen3-32B
+concurrency: 4
+max_tokens: 512
+context_window: 32768
+```
+
+`concurrency` must be at least 1. `max_tokens` is a hard per-response limit. `context_window` should match the model server and is used when `doctrail enrich --truncate` calculates how much input can fit. Enrichment-level values take precedence over project-level values.
+
 Prefer `input_columns` with `:N` truncation, such as `raw_content:3000`, over `{column}` interpolation inside the prompt. Placeholders still work, but a row-specific token breaks the shared prompt prefix there, so everything after it re-bills at full input price per row. If one is truly needed, put it at the very end.
 
 ## Token economy pattern

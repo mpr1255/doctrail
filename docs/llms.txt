@@ -206,6 +206,33 @@ default_model: openai-compatible/Qwen/Qwen3-32B
 
 For a local Ollama server, the base URL is normally `http://localhost:11434/v1`. Self-hosted endpoints currently use synchronous execution; provider batch mode is not supported.
 
+Self-hosted enrichments default to four concurrent requests and 512 output tokens. Override those limits per enrichment when the server and schema justify it, and set the served context window so `--truncate` uses the server's real limit:
+
+```yaml
+model: openai-compatible/Qwen/Qwen3-32B
+concurrency: 8
+max_tokens: 768
+context_window: 32768
+```
+
+The endpoint may be a private URL, a local server, or a local SSH forward. For a university or HPC server bound to cluster loopback, keep vLLM private and open a local forward:
+
+```bash
+ssh -N -L 18000:127.0.0.1:8000 your-cluster
+```
+
+Then configure Doctrail normally:
+
+```dotenv
+OPENAI_COMPATIBLE_BASE_URL=http://127.0.0.1:18000/v1
+```
+
+The tunnel is only transport and access control. Doctrail still uses the standard OpenAI-compatible API, so the same configuration works with a directly reachable HTTPS endpoint.
+
+Doctrail sends provider-native JSON schemas to vLLM and Ollama. This supports enums, booleans, bounded numbers and strings, arrays, enum lists, multi-field objects, and packed structured enrichments. The server must implement OpenAI-compatible `/v1/chat/completions` with `response_format.type=json_schema`.
+
+Settings on an enrichment override project-level settings in `.doctrail/config.yml`. Provider batch mode remains unavailable for self-hosted endpoints; use ordinary synchronous execution, which still sends requests concurrently up to the configured limit.
+
 <!-- tutorial.md -->
 
 # Tutorial
@@ -421,6 +448,19 @@ enrichments:
 Write `prompt` as a codebook, not just a question. Define every enum value, anchor every numeric scale point, and state gate/null behavior for optional fields. For example, if `has_payment` is false, say which evidence fields must be null; if a score runs from 0 to 5, define 0, the middle, and 5.
 
 Keep the prompt as static as possible. Doctrail renders the prompt first, adds schema instructions there for JSON-mode paths or sends provider-native schema payloads as constant request structure, and appends per-row `input_columns` content last. OpenAI automatic prompt caching and Gemini implicit caching on Gemini 2.5 and newer models can bill repeated prefix tokens at cached-input rates when the provider reports a cache hit, though Gemini does not guarantee savings on every request. Doctrail does not currently set Anthropic `cache_control` markers.
+
+## Self-hosted runtime limits
+
+For `openai-compatible/<model>` enrichments, Doctrail defaults to four concurrent requests and 512 output tokens. These conservative defaults prevent a small local model from creating 30 simultaneous uncapped generations. Set overrides at the project level or on one enrichment:
+
+```yaml
+default_model: openai-compatible/Qwen/Qwen3-32B
+concurrency: 4
+max_tokens: 512
+context_window: 32768
+```
+
+`concurrency` must be at least 1. `max_tokens` is a hard per-response limit. `context_window` should match the model server and is used when `doctrail enrich --truncate` calculates how much input can fit. Enrichment-level values take precedence over project-level values.
 
 Prefer `input_columns` with `:N` truncation, such as `raw_content:3000`, over `{column}` interpolation inside the prompt. Placeholders still work, but a row-specific token breaks the shared prompt prefix there, so everything after it re-bills at full input price per row. If one is truly needed, put it at the very end.
 
