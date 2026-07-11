@@ -10,6 +10,7 @@ import json
 import logging
 import sqlite3
 import threading
+import time
 from pathlib import Path
 from datetime import datetime
 from typing import Any, Dict, Optional, List
@@ -17,6 +18,54 @@ import sqlite_utils
 from loguru import logger
 
 logger = logging.getLogger(__name__)
+
+DEFAULT_BUSY_TIMEOUT_MS = 30_000
+INSERT_LOCK_ATTEMPTS = 5
+
+
+def _busy_timeout_ms() -> int:
+    raw = os.environ.get("DOCTRAIL_SQLITE_BUSY_TIMEOUT_MS", str(DEFAULT_BUSY_TIMEOUT_MS))
+    try:
+        timeout_ms = int(raw)
+    except ValueError as exc:
+        raise ValueError("DOCTRAIL_SQLITE_BUSY_TIMEOUT_MS must be an integer") from exc
+    if timeout_ms < 1:
+        raise ValueError("DOCTRAIL_SQLITE_BUSY_TIMEOUT_MS must be positive")
+    return timeout_ms
+
+
+def configure_ingest_database(db):
+    """Configure one sqlite-utils connection for one writer and many readers."""
+    timeout_ms = _busy_timeout_ms()
+    db.execute(f"PRAGMA busy_timeout = {timeout_ms}")
+    current_mode = db.execute("PRAGMA journal_mode").fetchone()[0]
+    if str(current_mode).lower() != "wal":
+        current_mode = db.execute("PRAGMA journal_mode = WAL").fetchone()[0]
+    if str(current_mode).lower() != "wal":
+        raise RuntimeError(f"SQLite refused WAL mode; active mode is {current_mode!r}")
+    db.execute("PRAGMA synchronous = NORMAL")
+    db.execute("PRAGMA wal_autocheckpoint = 1000")
+    return db
+
+
+def ensure_ingest_timestamps(db, table_name: str) -> None:
+    """Add timestamp columns and preserve the best known time for legacy rows."""
+    if table_name not in db.table_names():
+        return
+    columns = {column.name for column in db[table_name].columns}
+    if "updated_at" not in columns:
+        db[table_name].add_column("updated_at", str)
+    if "added_at" not in columns:
+        db[table_name].add_column("added_at", str)
+    quoted_table = '"' + table_name.replace('"', '""') + '"'
+    now = datetime.now().isoformat()
+    with db.conn:
+        db.execute(
+            f"UPDATE {quoted_table} "
+            "SET added_at = COALESCE(updated_at, ?) "
+            "WHERE added_at IS NULL OR added_at = ''",
+            [now],
+        )
 
 
 def insert_document(
@@ -35,79 +84,93 @@ def insert_document(
 ):
     """Insert or replace one ingested document.
 
-    Concurrency is left to SQLite locking through sqlite-utils. The `sha1`
-    primary key gives replace semantics when overwrite is enabled.
+    WAL busy waits and bounded lock retries protect the single writer from
+    transient reader/checkpoint contention. The `sha1` primary key gives
+    replace semantics when overwrite is enabled.
 
     labels: optional list of labels to store as JSON array in 'labels' column
     json_metadata: optional dict to store as JSON in 'json_metadata' column
     extra_fields: optional flat dict of additional top-level columns to set (e.g., url, archive_url)
     """
-    try:
-        # Use a transaction for the insert
-        with db.conn:
-            # Check if document already exists
-            existing = list(db[table_name].rows_where("sha1 = ?", [sha1])) if table_name in db.table_names() else []
-            if existing and not overwrite:
-                logger.debug(f"Document with SHA1 {sha1} already exists in {table_name} (overwrite=False)")
-                return
-            
-            # Prepare document for insertion
-            stat_source = Path(file_stat_path) if file_stat_path else Path(file_path)
+    stat_source = Path(file_stat_path) if file_stat_path else Path(file_path)
+    important_fields = {
+        'original_url', 'source_url', 'url',
+        'extraction_method', 'processing_method',
+        'author', 'title', 'language',
+    }
+    stored_metadata = {
+        key: str(value) if value is not None else None
+        for key, value in metadata.items()
+    }
+    top_level_metadata = {
+        key: value
+        for key, value in stored_metadata.items()
+        if key in important_fields and value is not None
+    }
 
-            # Extract important metadata fields as top-level columns
-            # These are commonly queried and should be easily accessible
-            important_fields = {
-                'original_url', 'source_url', 'url',  # URLs
-                'extraction_method', 'processing_method',  # How it was extracted
-                'author', 'title',  # Document metadata
-                'language',  # Language
-            }
+    for attempt in range(1, INSERT_LOCK_ATTEMPTS + 1):
+        try:
+            with db.conn:
+                existing = (
+                    list(db[table_name].rows_where("sha1 = ?", [sha1]))
+                    if table_name in db.table_names()
+                    else []
+                )
+                if existing and not overwrite:
+                    logger.debug(
+                        f"Document with SHA1 {sha1} already exists in "
+                        f"{table_name} (overwrite=False)"
+                    )
+                    return
 
-            top_level_metadata = {}
-            stored_metadata = {}
+                now = datetime.now().isoformat()
+                existing_row = existing[0] if existing else {}
+                added_at = (
+                    existing_row.get("added_at")
+                    or existing_row.get("updated_at")
+                    or now
+                )
+                document = {
+                    "sha1": sha1,
+                    "filename": os.path.basename(file_path),
+                    "filepath": os.path.abspath(file_path),
+                    "raw_content": content,
+                    "file_created": datetime.fromtimestamp(stat_source.stat().st_ctime).isoformat(),
+                    "file_modified": datetime.fromtimestamp(stat_source.stat().st_mtime).isoformat(),
+                    "added_at": added_at,
+                    "updated_at": now,
+                    "metadata": json.dumps(stored_metadata) if stored_metadata else None,
+                    **top_level_metadata,
+                }
+                if labels:
+                    document["labels"] = json.dumps(list(labels))
+                if json_metadata is not None:
+                    document["json_metadata"] = json.dumps(json_metadata)
+                if extra_fields:
+                    document.update(extra_fields)
 
-            for key, value in metadata.items():
-                # Convert to string to handle BeautifulSoup NavigableString and other non-JSON types
-                str_value = str(value) if value is not None else None
-                stored_metadata[key] = str_value
-
-                if key in important_fields and str_value is not None:
-                    top_level_metadata[key] = str_value
-
-            now = datetime.now().isoformat()
-            existing_row = existing[0] if existing else {}
-            added_at = existing_row.get("added_at") or existing_row.get("updated_at") or now
-
-            document = {
-                "sha1": sha1,
-                "filename": os.path.basename(file_path),
-                "filepath": os.path.abspath(file_path),  # Store absolute path
-                "raw_content": content,  # Single content field
-                "file_created": datetime.fromtimestamp(stat_source.stat().st_ctime).isoformat(),
-                "file_modified": datetime.fromtimestamp(stat_source.stat().st_mtime).isoformat(),
-                "added_at": added_at,
-                "updated_at": now,
-                "metadata": json.dumps(stored_metadata) if stored_metadata else None,  # Full metadata record
-                **top_level_metadata,  # Spread important fields as columns
-            }
-
-            # Add first-class fields if provided
-            if labels:
-                # Store as JSON array
-                document["labels"] = json.dumps(list(labels))
-            if json_metadata is not None:
-                # Store full JSON sidecar
-                document["json_metadata"] = json.dumps(json_metadata)
-            if extra_fields:
-                for k, v in extra_fields.items():
-                    document[k] = v
-            
-            # Use upsert with alter=True to handle schema changes
-            db[table_name].insert(document, alter=True, pk="sha1", replace=True)
-            logger.debug(f"Successfully inserted document {sha1} into {table_name}")
-    except Exception as e:
-        logger.error(f"Error inserting document {sha1}: {str(e)}")
-        raise
+                db[table_name].insert(document, alter=True, pk="sha1", replace=True)
+                logger.debug(f"Successfully inserted document {sha1} into {table_name}")
+            return
+        except sqlite3.OperationalError as exc:
+            message = str(exc).lower()
+            is_lock_error = "locked" in message or "busy" in message
+            if not is_lock_error or attempt == INSERT_LOCK_ATTEMPTS:
+                logger.error(f"Error inserting document {sha1}: {exc}")
+                raise
+            try:
+                db.conn.rollback()
+            except sqlite3.Error:
+                pass
+            delay = 0.05 * (2 ** (attempt - 1))
+            logger.warning(
+                f"SQLite was busy inserting {sha1}; retrying "
+                f"({attempt}/{INSERT_LOCK_ATTEMPTS}) in {delay:.2f}s"
+            )
+            time.sleep(delay)
+        except Exception as exc:
+            logger.error(f"Error inserting document {sha1}: {exc}")
+            raise
 
 
 def check_db_schema(db_path: str, table_name: str) -> bool:
@@ -159,7 +222,7 @@ def check_db_schema(db_path: str, table_name: str) -> bool:
 def setup_fts(db_path: str, table_name: str):
     """Set up full-text search for the given table if requested"""
     try:
-        db = sqlite_utils.Database(db_path)
+        db = configure_ingest_database(sqlite_utils.Database(db_path))
         
         # Check if table exists
         if table_name not in db.table_names():

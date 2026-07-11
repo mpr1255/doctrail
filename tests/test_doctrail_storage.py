@@ -14,6 +14,8 @@ from pathlib import Path
 import logging
 import sys
 import os
+import threading
+import time
 from types import SimpleNamespace
 from typing import Optional, get_args
 
@@ -160,6 +162,100 @@ def test_ingest_fts_refuses_to_claim_legacy_index_has_filepath(tmp_path):
 
     with pytest.raises(RuntimeError, match="does not index.*filepath"):
         setup_fts(str(db_path), "documents")
+
+
+def test_ingest_wal_allows_writer_while_reader_holds_snapshot(tmp_path):
+    from doctrail.ingest.database import configure_ingest_database, insert_document
+
+    db_path = tmp_path / "wal-readers.db"
+    source = tmp_path / "second.txt"
+    source.write_text("second", encoding="utf-8")
+    writer = configure_ingest_database(sqlite_utils.Database(db_path))
+    writer["documents"].insert(
+        {"sha1": "first", "raw_content": "first"},
+        pk="sha1",
+    )
+
+    reader = sqlite3.connect(db_path)
+    reader.execute("BEGIN")
+    assert reader.execute("SELECT COUNT(*) FROM documents").fetchone()[0] == 1
+
+    insert_document(
+        writer,
+        "documents",
+        "second",
+        str(source),
+        "second",
+        {},
+    )
+    assert reader.execute("SELECT COUNT(*) FROM documents").fetchone()[0] == 1
+    reader.close()
+
+    with sqlite3.connect(db_path) as fresh_reader:
+        assert fresh_reader.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+        assert fresh_reader.execute("SELECT COUNT(*) FROM documents").fetchone()[0] == 2
+
+
+def test_ingest_retries_transient_writer_lock(tmp_path, monkeypatch):
+    from doctrail.ingest.database import configure_ingest_database, insert_document
+
+    monkeypatch.setenv("DOCTRAIL_SQLITE_BUSY_TIMEOUT_MS", "20")
+    db_path = tmp_path / "writer-retry.db"
+    source = tmp_path / "retry.txt"
+    source.write_text("retry", encoding="utf-8")
+    setup = configure_ingest_database(sqlite_utils.Database(db_path))
+    setup["documents"].insert({"sha1": "seed"}, pk="sha1")
+    holder = sqlite3.connect(db_path)
+    holder.execute("PRAGMA busy_timeout = 1000")
+    holder.execute("BEGIN IMMEDIATE")
+
+    started = threading.Event()
+    errors = []
+
+    def write_after_lock():
+        try:
+            db = configure_ingest_database(sqlite_utils.Database(db_path))
+            started.set()
+            insert_document(
+                db,
+                "documents",
+                "retried",
+                str(source),
+                "written after retry",
+                {},
+            )
+        except Exception as exc:
+            errors.append(exc)
+
+    worker = threading.Thread(target=write_after_lock)
+    worker.start()
+    assert started.wait(timeout=2)
+    time.sleep(0.15)
+    holder.rollback()
+    holder.close()
+    worker.join(timeout=5)
+
+    assert not worker.is_alive()
+    assert errors == []
+    with sqlite3.connect(db_path) as connection:
+        assert connection.execute(
+            "SELECT raw_content FROM documents WHERE sha1 = 'retried'"
+        ).fetchone()[0] == "written after retry"
+
+
+def test_ensure_ingest_timestamps_backfills_legacy_rows(tmp_path):
+    from doctrail.ingest.database import ensure_ingest_timestamps
+
+    db = sqlite_utils.Database(tmp_path / "legacy-timestamps.db")
+    db["documents"].insert(
+        {"sha1": "legacy", "updated_at": "2018-04-05T06:07:08"},
+        pk="sha1",
+    )
+
+    ensure_ingest_timestamps(db, "documents")
+
+    row = db["documents"].get("legacy")
+    assert row["added_at"] == "2018-04-05T06:07:08"
 
 
 def test_output_db_separation(temp_env, caplog):

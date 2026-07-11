@@ -27,7 +27,14 @@ from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn, TimeRe
 from loguru import logger
 
 # Import from sibling modules
-from .database import insert_document, check_db_schema, setup_fts, clean_metadata
+from .database import (
+    check_db_schema,
+    clean_metadata,
+    configure_ingest_database,
+    ensure_ingest_timestamps,
+    insert_document,
+    setup_fts,
+)
 from .document_processor import process_document, SkippedFileException
 from ..db_operations import _quote_identifier
 from ..file_filters import should_skip_file, apply_file_patterns, check_for_manual_override
@@ -410,7 +417,8 @@ async def process_ingest(
 
     # Initialize database connection
     try:
-        db = sqlite_utils.Database(db_path)
+        db = configure_ingest_database(sqlite_utils.Database(db_path))
+        ensure_ingest_timestamps(db, table)
     except Exception as e:
         raise RuntimeError(f"Could not open database file '{db_path}': {e}") from e
     
@@ -704,13 +712,6 @@ async def process_ingest(
             if line_delay > 0 and result['success'] is not None:
                 time.sleep(line_delay)
 
-            if successful > 0 and (successful % 100) == 0:
-                try:
-                    db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-                    logger.debug("Performed WAL checkpoint")
-                except Exception as exc:
-                    logger.warning(f"WAL checkpoint failed: {exc}")
-
         # Native (Rust) is authoritative for auto/rust mode. Python extraction is
         # available only through the explicit --extractor python backup switch.
         from . import native_extractor
@@ -917,12 +918,13 @@ async def process_ingest(
                 "but contained no readable text[/yellow]"
             )
 
-    # Final WAL checkpoint
+    # A passive checkpoint never waits for readers and leaves any reader-pinned
+    # WAL frames for SQLite's normal autocheckpoint machinery.
     try:
-        db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-        logger.debug("Performed final WAL checkpoint")
+        checkpoint = db.execute("PRAGMA wal_checkpoint(PASSIVE)").fetchone()
+        logger.debug(f"Final passive WAL checkpoint: {checkpoint}")
     except Exception as e:
-        logger.warning(f"Final WAL checkpoint failed: {e}")
+        logger.warning(f"Final passive WAL checkpoint failed: {e}")
     
     # Create FTS index if requested
     if fulltext and successful > 0:

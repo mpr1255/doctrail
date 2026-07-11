@@ -408,7 +408,7 @@ def run_media_ingest(
     """
     from concurrent.futures import ThreadPoolExecutor, as_completed
     import sqlite_utils
-    from .database import insert_document, setup_fts
+    from .database import configure_ingest_database, insert_document, setup_fts
 
     if ocr_engine == "none":
         ocr_fn, ocr_label = (lambda p: ""), "none"
@@ -422,7 +422,7 @@ def run_media_ingest(
         files = files[:limit]
     logger.info(f"Scanning {len(files)} Office file(s) for embedded images")
 
-    db = sqlite_utils.Database(db_path)
+    db = configure_ingest_database(sqlite_utils.Database(db_path))
     seen_row_sha1: set = set()
     if table_name in db.table_names() and not overwrite:
         try:
