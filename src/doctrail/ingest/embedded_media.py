@@ -30,6 +30,8 @@ from __future__ import annotations
 import hashlib
 import io
 import logging
+import os
+import signal
 import subprocess
 import tempfile
 import zipfile
@@ -48,6 +50,11 @@ _OOXML_SUFFIXES = {".docx", ".xlsx", ".pptx"}
 
 # OCR-able raster formats (the farm / textra path). EMF/WMF are vector and skipped.
 _OCRABLE_SUFFIXES = {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".tif", ".tiff"}
+MAX_MEDIA_ENTRIES = 5_000
+MAX_MEDIA_MEMBER_BYTES = 100 * 1024 * 1024
+MAX_MEDIA_TOTAL_BYTES = 500 * 1024 * 1024
+MAX_MEDIA_COMPRESSION_RATIO = 200
+MEDIA_RATIO_CHECK_MIN_BYTES = 1024 * 1024
 
 
 def sha1_bytes(data: bytes) -> str:
@@ -80,16 +87,52 @@ def scan_has_embedded_image(path: Path) -> bool:
 def _zip_media(data: bytes) -> List[Tuple[str, bytes]]:
     """Return (media_name, image_bytes) for every embedded image in an OOXML zip."""
     out: List[Tuple[str, bytes]] = []
+    total_bytes = 0
     try:
         with zipfile.ZipFile(io.BytesIO(data)) as zf:
-            for name in zf.namelist():
+            if len(zf.infolist()) > MAX_MEDIA_ENTRIES:
+                raise ValueError(
+                    f"Office container has {len(zf.infolist())} entries; "
+                    f"limit is {MAX_MEDIA_ENTRIES}"
+                )
+            for info in zf.infolist():
+                name = info.filename
                 lower = name.lower()
                 if not lower.startswith(_OOXML_MEDIA_PREFIXES):
                     continue
                 if Path(lower).suffix not in _IMAGE_SUFFIXES:
                     continue
+                if info.flag_bits & 0x1:
+                    raise ValueError(f"Embedded media entry is encrypted: {name}")
+                if info.file_size > MAX_MEDIA_MEMBER_BYTES:
+                    raise ValueError(
+                        f"Embedded media entry {name} is {info.file_size} bytes; "
+                        f"limit is {MAX_MEDIA_MEMBER_BYTES}"
+                    )
+                total_bytes += info.file_size
+                if total_bytes > MAX_MEDIA_TOTAL_BYTES:
+                    raise ValueError(
+                        f"Embedded media total is {total_bytes} bytes; "
+                        f"limit is {MAX_MEDIA_TOTAL_BYTES}"
+                    )
+                if (
+                    info.file_size >= MEDIA_RATIO_CHECK_MIN_BYTES
+                    and (
+                        info.compress_size == 0
+                        or info.file_size > info.compress_size * MAX_MEDIA_COMPRESSION_RATIO
+                    )
+                ):
+                    raise ValueError(
+                        f"Embedded media entry {name} exceeds compression ratio "
+                        f"limit {MAX_MEDIA_COMPRESSION_RATIO}"
+                    )
                 try:
-                    out.append((name, zf.read(name)))
+                    extracted = zf.read(info)
+                    if len(extracted) != info.file_size:
+                        raise ValueError(
+                            f"Embedded media entry {name} size changed while reading"
+                        )
+                    out.append((name, extracted))
                 except Exception as exc:  # corrupt entry: skip, keep the rest
                     logger.warning(f"Could not read zip media {name}: {exc}")
     except zipfile.BadZipFile:
@@ -112,17 +155,26 @@ def _libreoffice_to_ooxml(path: Path, target: str, workdir: Path,
         "--convert-to", target, "--outdir", str(workdir), str(path),
     ]
     try:
-        proc = subprocess.run(cmd, capture_output=True, timeout=timeout)
-    except subprocess.TimeoutExpired:
-        logger.warning(f"LibreOffice timed out converting {path.name}")
-        return None
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            start_new_session=True,
+        )
+        try:
+            _stdout, stderr = proc.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            os.killpg(proc.pid, signal.SIGKILL)
+            proc.communicate()
+            logger.warning(f"LibreOffice timed out converting {path.name}")
+            return None
     except FileNotFoundError:
         raise RuntimeError(
             "LibreOffice (soffice) not found; install it to extract images from "
             "legacy .doc/.xls/.ppt files, or restrict to OOXML."
         )
     if proc.returncode != 0:
-        logger.warning(f"LibreOffice failed on {path.name}: {proc.stderr.decode('utf-8', 'replace')[:200]}")
+        logger.warning(f"LibreOffice failed on {path.name}: {stderr.decode('utf-8', 'replace')[:200]}")
         return None
     converted = workdir / f"{path.stem}.{target}"
     return converted if converted.exists() else None
@@ -213,11 +265,19 @@ def _office_files(input_dirs: List[str]) -> List[Path]:
 # cannot read (verified: 120-180px inline pictures return no text at any
 # upscale). We still store the row (linked to its parent, with EXIF) but skip
 # the wasted OCR call.
-DEFAULT_MIN_OCR_DIM = 200
+DEFAULT_MIN_OCR_DIM = 1
 
 
-def _extract_rows_for_file(path: Path, *, soffice: str, ocr_fn: Callable[[Path], str],
-                           ocr_engine: str, min_ocr_dim: int = DEFAULT_MIN_OCR_DIM) -> List[Dict[str, object]]:
+def _extract_rows_for_file(
+    path: Path,
+    *,
+    soffice: str,
+    ocr_fn: Callable[[Path], str],
+    ocr_engine: str,
+    min_ocr_dim: int = DEFAULT_MIN_OCR_DIM,
+    logical_parent_path: Optional[str] = None,
+    skip_row_sha1s: Optional[set[str]] = None,
+) -> List[Dict[str, object]]:
     """Extract, EXIF, and OCR every embedded image in one Office file.
 
     Returns child-row payloads (one per image) ready for insert_document. The
@@ -230,18 +290,23 @@ def _extract_rows_for_file(path: Path, *, soffice: str, ocr_fn: Callable[[Path],
         logger.warning(f"Could not read {path}: {exc}")
         return []
     parent_sha1 = sha1_bytes(parent_bytes)
+    parent_path = logical_parent_path or str(path)
     images = office_images(path, soffice=soffice)
     rows: List[Dict[str, object]] = []
     for index, (media_name, data) in enumerate(images):
         img_sha1 = sha1_bytes(data)
         row_sha1 = embedded_occurrence_sha1(parent_sha1, index, media_name, img_sha1)
+        if skip_row_sha1s and row_sha1 in skip_row_sha1s:
+            continue
         exif = image_exif(data)
         w = int(exif.get("image_width") or 0)
         h = int(exif.get("image_height") or 0)
         min_dim = min(w, h) if (w and h) else 0
         ocr_text = ""
         ocr_skipped = None
-        if is_ocrable(media_name) and min_dim >= min_ocr_dim:
+        ocr_attempted = False
+        if is_ocrable(media_name) and (min_dim == 0 or min_dim >= min_ocr_dim):
+            ocr_attempted = True
             try:
                 ocr_text = ocr_fn_for_bytes(data, media_name, ocr_fn)
             except Exception as exc:
@@ -254,21 +319,28 @@ def _extract_rows_for_file(path: Path, *, soffice: str, ocr_fn: Callable[[Path],
             "processing_method": "embedded-media-ocr",
             "embedded_media_name": media_name,
             "Content-Type": f"image/{Path(media_name).suffix.lower().lstrip('.')}",
+            "ocr_attempted": ocr_attempted,
+            "ocr_status": (
+                "success" if ocr_text else "no_text" if ocr_attempted
+                else "skipped" if ocr_skipped else "unsupported_image_format"
+            ),
         }
         if ocr_skipped:
             metadata["ocr_skipped"] = ocr_skipped
         metadata.update(exif)
         rows.append({
             "sha1": row_sha1,
-            "synthetic_path": f"{path}#{media_name}",
+            "synthetic_path": f"{parent_path}#{media_name}",
             "content": ocr_text,
             "metadata": metadata,
-            "parent_path": str(path),
+            "parent_path": parent_path,
+            "file_stat_path": str(path),
             "extra_fields": {
                 "parent_sha1": parent_sha1,
-                "parent_path": str(path),
+                "parent_path": parent_path,
                 "image_index": str(index),
                 "image_sha1": img_sha1,
+                "image_bytes": data,
                 "source_format": "embedded-image",
                 "ocr_engine": ocr_engine if ocr_text else "",
             },
@@ -285,17 +357,32 @@ def ocr_fn_for_bytes(data: bytes, media_name: str, ocr_fn: Callable[[Path], str]
         return ocr_fn(Path(tf.name)) or ""
 
 
-def _mac_ocr_callable():
-    """Return an ocr(path)->text callable backed by the local mac-ocr farm."""
-    from .document_processor import _load_mac_ocr_module
+def _ocr_callable(ocr_engine: str):
+    """Return a bounded OCR cascade for an extracted image file."""
+    from .document_processor import (
+        _load_mac_ocr_module,
+        _try_ocr_image_with_tesseract,
+        _try_ocr_image_with_textra,
+    )
     import asyncio
 
-    module = _load_mac_ocr_module()
+    module = _load_mac_ocr_module() if ocr_engine == "mac-ocr" else None
 
     def _ocr(path: Path) -> str:
-        return asyncio.run(module.ocr_async(str(path))) or ""
+        if module is not None:
+            try:
+                text = asyncio.run(module.ocr_async(str(path))) or ""
+                if text.strip():
+                    return text
+            except Exception as exc:
+                logger.warning(f"mac-ocr failed for {path.name}; trying local OCR: {exc}")
+        if ocr_engine in {"auto", "mac-ocr", "textra"}:
+            text = _try_ocr_image_with_textra(str(path), sha1_bytes(path.read_bytes()))
+            if text and text.strip():
+                return text
+        return _try_ocr_image_with_tesseract(str(path)) or ""
 
-    return _ocr, "mac-ocr/apple-vision"
+    return _ocr, ocr_engine
 
 
 def run_media_ingest(
@@ -309,7 +396,9 @@ def run_media_ingest(
     limit: Optional[int] = None,
     soffice: str = "soffice",
     min_ocr_dim: int = DEFAULT_MIN_OCR_DIM,
-) -> Dict[str, int]:
+    fulltext: bool = True,
+    path_overrides: Optional[Dict[str, str]] = None,
+) -> Dict[str, object]:
     """Extract + OCR embedded Office images into ``table_name`` as child rows.
 
     Each image occurrence becomes a stable row linked to its parent via
@@ -321,10 +410,10 @@ def run_media_ingest(
     import sqlite_utils
     from .database import insert_document, setup_fts
 
-    if ocr_engine == "mac-ocr":
-        ocr_fn, ocr_label = _mac_ocr_callable()
-    elif ocr_engine == "none":
+    if ocr_engine == "none":
         ocr_fn, ocr_label = (lambda p: ""), "none"
+    elif ocr_engine in {"auto", "mac-ocr", "textra", "ocrmypdf"}:
+        ocr_fn, ocr_label = _ocr_callable(ocr_engine)
     else:
         raise ValueError(f"Unsupported ocr_engine for media ingest: {ocr_engine}")
 
@@ -343,11 +432,27 @@ def run_media_ingest(
         except Exception:
             seen_row_sha1 = set()
 
-    stats = {"files_with_images": 0, "images": 0, "ocr_chars": 0, "inserted": 0, "skipped_dupe": 0}
+    stats: Dict[str, object] = {
+        "files_with_images": 0,
+        "images": 0,
+        "ocr_chars": 0,
+        "ocr_empty": 0,
+        "inserted": 0,
+        "skipped_dupe": 0,
+        "failed_files": [],
+    }
 
     def worker(path: Path):
-        return _extract_rows_for_file(path, soffice=soffice, ocr_fn=ocr_fn,
-                                      ocr_engine=ocr_label, min_ocr_dim=min_ocr_dim)
+        logical_path = (path_overrides or {}).get(str(path), str(path))
+        return _extract_rows_for_file(
+            path,
+            soffice=soffice,
+            ocr_fn=ocr_fn,
+            ocr_engine=ocr_label,
+            min_ocr_dim=min_ocr_dim,
+            logical_parent_path=logical_path,
+            skip_row_sha1s=seen_row_sha1,
+        )
 
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futures = {pool.submit(worker, f): f for f in files}
@@ -359,11 +464,14 @@ def run_media_ingest(
                 rows = fut.result()
             except Exception as exc:
                 logger.warning(f"Embedded-media worker failed for {src.name}: {exc}")
+                stats["failed_files"].append(f"{src}: {exc}")
                 continue
             if rows:
                 stats["files_with_images"] += 1
             for row in rows:
                 stats["images"] += 1
+                if row["metadata"].get("ocr_attempted") and not row["content"]:
+                    stats["ocr_empty"] += 1
                 row_sha1 = row["sha1"]
                 if row_sha1 in seen_row_sha1 and not overwrite:
                     stats["skipped_dupe"] += 1
@@ -379,16 +487,17 @@ def run_media_ingest(
                     row["metadata"],
                     extra_fields=row["extra_fields"],
                     overwrite=overwrite,
-                    file_stat_path=row["parent_path"],
+                    file_stat_path=row["file_stat_path"],
                 )
                 stats["inserted"] += 1
             if done % 50 == 0:
                 logger.info(f"media ingest {done}/{len(files)} files, {stats['inserted']} images stored")
 
     # Refresh FTS so the new OCR text is searchable.
-    try:
-        setup_fts(db_path, table_name)
-        db[f"{table_name}_fts"].populate()  # type: ignore[attr-defined]
-    except Exception as exc:
-        logger.debug(f"FTS refresh after media ingest: {exc}")
+    if fulltext:
+        try:
+            setup_fts(db_path, table_name)
+            db[f"{table_name}_fts"].populate()  # type: ignore[attr-defined]
+        except Exception as exc:
+            logger.debug(f"FTS refresh after media ingest: {exc}")
     return stats

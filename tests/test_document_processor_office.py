@@ -1,5 +1,10 @@
 import hashlib
+import io
+import json
 import shutil
+import sqlite3
+import subprocess
+import zipfile
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -13,6 +18,7 @@ from doctrail.ingest.document_processor import (
     process_document,
 )
 from doctrail.ingest import embedded_media
+from doctrail.ingest.core import process_ingest
 from doctrail.ingest.text_processing import clean_extracted_text
 from doctrail.extractors import spreadsheet_extractor
 
@@ -192,6 +198,129 @@ def test_embedded_image_rows_preserve_each_parent_relationship(monkeypatch, tmp_
     assert first_row["extra_fields"]["image_sha1"] == second_row["extra_fields"]["image_sha1"]
     assert first_row["extra_fields"]["parent_sha1"] == _sha1_for(first)
     assert second_row["extra_fields"]["parent_sha1"] == _sha1_for(second)
+
+
+def test_ooxml_embedded_media_rejects_zip_bomb_ratio():
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("word/media/image1.png", b"0" * (2 * 1024 * 1024))
+
+    with pytest.raises(ValueError, match="compression ratio"):
+        embedded_media._zip_media(buffer.getvalue())
+
+
+def test_legacy_media_conversion_kills_process_group_on_timeout(monkeypatch, tmp_path):
+    source = tmp_path / "legacy.doc"
+    source.write_bytes(b"legacy")
+    calls = {"communicate": 0}
+    kill_calls = []
+
+    class FakeProcess:
+        pid = 12345
+        returncode = None
+
+        def communicate(self, timeout=None):
+            calls["communicate"] += 1
+            if calls["communicate"] == 1:
+                raise subprocess.TimeoutExpired("soffice", timeout)
+            return b"", b""
+
+    def fake_popen(command, **kwargs):
+        assert kwargs["start_new_session"] is True
+        return FakeProcess()
+
+    monkeypatch.setattr(embedded_media.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(
+        embedded_media.os,
+        "killpg",
+        lambda pid, sig: kill_calls.append((pid, sig)),
+    )
+
+    result = embedded_media._libreoffice_to_ooxml(
+        source,
+        "docx",
+        tmp_path / "work",
+        timeout=1,
+    )
+
+    assert result is None
+    assert kill_calls == [(12345, embedded_media.signal.SIGKILL)]
+    assert calls["communicate"] == 2
+
+
+@pytest.mark.asyncio
+async def test_native_ingest_extracts_stores_and_ocrs_embedded_docx_image(
+    monkeypatch, tmp_path
+):
+    from docx import Document
+
+    monkeypatch.delenv("DOCTRAIL_DISABLE_NATIVE", raising=False)
+    source = tmp_path / "source"
+    source.mkdir()
+    image_path = ASSET_DIR / "federalist_fixture.png"
+    image_bytes = image_path.read_bytes()
+    docx_path = source / "with-image.docx"
+    document = Document()
+    document.add_paragraph("Parent document text for native extraction.")
+    document.add_picture(str(image_path))
+    document.save(docx_path)
+
+    ocr_calls = []
+
+    def fake_ocr(path):
+        ocr_calls.append(path)
+        return "Embedded image OCR fixture text"
+
+    monkeypatch.setattr(
+        embedded_media,
+        "_ocr_callable",
+        lambda engine: (fake_ocr, "test-ocr"),
+    )
+    db_path = tmp_path / "embedded.sqlite"
+    result = await process_ingest(
+        db_path=str(db_path),
+        input_dir=str(source),
+        table="documents",
+        extractor="rust",
+        ocr_engine="auto",
+        workers=1,
+        yes=True,
+    )
+
+    assert result["successful"] == 1
+    assert result["failed"] == 0
+    assert result["embedded_media"]["inserted"] == 1
+    with sqlite3.connect(db_path) as connection:
+        parent = connection.execute(
+            "SELECT sha1, added_at FROM documents WHERE filename = 'with-image.docx'"
+        ).fetchone()
+        child = connection.execute(
+            """SELECT parent_sha1, raw_content, image_bytes, metadata, added_at
+               FROM documents WHERE source_format = 'embedded-image'"""
+        ).fetchone()
+
+    assert parent is not None
+    assert child is not None
+    assert child[0] == parent[0]
+    assert child[1] == "Embedded image OCR fixture text"
+    assert child[2] == image_bytes
+    assert json.loads(child[3])["ocr_status"] == "success"
+    assert parent[1]
+    assert child[4]
+    assert len(ocr_calls) == 1
+
+    repeated = await process_ingest(
+        db_path=str(db_path),
+        input_dir=str(source),
+        table="documents",
+        extractor="rust",
+        ocr_engine="auto",
+        workers=1,
+        yes=True,
+    )
+    assert repeated["successful"] == 0
+    assert repeated["embedded_media"]["inserted"] == 0
+    assert len(ocr_calls) == 1
 
 
 @pytest.mark.asyncio

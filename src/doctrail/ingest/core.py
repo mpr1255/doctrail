@@ -496,7 +496,9 @@ async def process_ingest(
 
     # Filter out already-processed files
     files_to_process = []
+    existing_office_paths: set[str] = set()
     skipped_count = 0
+    from .embedded_media import OFFICE_SUFFIXES
     
     with Progress(
         SpinnerColumn(),
@@ -531,6 +533,8 @@ async def process_ingest(
                 # Skip if already processed (unless overwriting)
                 if not overwrite and file_sha1 in existing_sha1s:
                     logger.debug(f"Skipping already processed file: {file_path}")
+                    if file_path.suffix.lower() in OFFICE_SUFFIXES:
+                        existing_office_paths.add(str(file_path))
                     continue
                 
                 files_to_process.append((file_path, file_sha1))
@@ -555,7 +559,7 @@ async def process_ingest(
             logger.info(f"Skipping {dup_removed} duplicate-content file(s) with an already-seen sha1")
         files_to_process = deduped
 
-    if not files_to_process:
+    if not files_to_process and not existing_office_paths:
         console.print("[yellow]No new files to process.[/yellow]")
         return {
             'status': 'success',
@@ -584,6 +588,8 @@ async def process_ingest(
     failed = 0
     warnings = 0
     failed_files = []  # Track failed files for summary
+    successful_source_paths: set[str] = set(existing_office_paths)
+    embedded_media_stats: Dict[str, Any] = {}
 
     # Seconds to pause after each per-file status line; used by screen
     # recordings (scripts/build_demo_gif.sh) so the output stays readable.
@@ -681,6 +687,7 @@ async def process_ingest(
                     url_hint = " [dim](sidecar)[/dim]"
 
                 successful += 1
+                successful_source_paths.add(str(file_path))
                 time_color = "yellow" if elapsed > 5 else "dim"
                 progress.console.print(f"[green]✓[/green] {display_name}[{time_color}]{elapsed_str}[/{time_color}]{url_hint}")
                 file_timings.append({'file': display_name, 'status': 'success', 'elapsed': elapsed})
@@ -704,61 +711,88 @@ async def process_ingest(
                 except Exception as exc:
                     logger.warning(f"WAL checkpoint failed: {exc}")
 
-        # Native (Rust) extractor: Rust does the multicore extraction in-process,
-        # this loop only writes rows and routes OCR/fallback files to the Python
-        # path below. When active, it consumes the direct-extractable files and
-        # narrows files_to_process to the ones that still need Python (OCR etc.).
+        # Native (Rust) is authoritative for auto/rust mode. Python extraction is
+        # available only through the explicit --extractor python backup switch.
         from . import native_extractor
-        native_active = extractor in ('auto', 'rust') and native_extractor.available()
-        if extractor == 'rust' and not native_active:
+        if extractor == 'auto' and os.environ.get('DOCTRAIL_DISABLE_NATIVE'):
+            extractor = 'python'
+        native_active = extractor in ('auto', 'rust')
+        if native_active and not native_extractor.available():
             raise RuntimeError(
-                "--extractor rust requested but the native extension "
-                "(doctrail._ingest_native) is not installed"
+                "Native extraction is required for --extractor auto/rust, but "
+                "doctrail._ingest_native is not installed. Run `make native`, or "
+                "use `--extractor python` for the explicit backup path."
             )
         if native_active:
             console.print("[cyan]Using native Rust extractor[/cyan] (multicore in-process)")
             path_to_sha = {str(fp): sha for fp, sha in files_to_process}
-            fallback_items: List = []
-            # Files with a manual-override sidecar (--good/--ocr/--manual.txt) must go
-            # through the Python path: the Rust core has no knowledge of these sidecars,
-            # so extracting them natively would silently write the inferior auto
-            # extraction and defeat the override.
             native_paths: List[str] = []
             for fp, sha in files_to_process:
                 p = str(fp)
-                if check_for_manual_override(p):
-                    fallback_items.append((fp, sha))
-                else:
+                override_path = check_for_manual_override(p)
+                if not override_path:
                     native_paths.append(p)
+                    continue
+                try:
+                    override_content = Path(override_path).read_text(encoding="utf-8").strip()
+                    if not override_content:
+                        raise ValueError("manual override is empty")
+                    handle_result({
+                        "success": True,
+                        "file_path": p,
+                        "sha1": sha,
+                        "content": override_content,
+                        "metadata": {
+                            "extraction_method": "manual_override",
+                            "processing_method": f"manual_override_{Path(override_path).stem.split('--')[-1]}",
+                            "original_file_path": p,
+                            "original_file_type": fp.suffix.lower().lstrip("."),
+                        },
+                        "elapsed": 0,
+                    })
+                except Exception as exc:
+                    handle_result({
+                        "success": False,
+                        "file_path": p,
+                        "error": f"Manual override failed: {exc}",
+                        "elapsed": 0,
+                    })
             native_chunk = 512
             for start in range(0, len(native_paths), native_chunk):
                 if shutdown_requested:
                     break
                 batch_paths = native_paths[start:start + native_chunk]
-                # Per-file Rust panics come back as status=failed. Recoverable
-                # batch-level failures, including an invalid FFI response, route the
-                # entire chunk through Python so no input can disappear. Native
-                # process aborts and segfaults cannot be caught in-process.
+                # Per-file Rust panics come back as status=failed. A recoverable
+                # batch-level failure is recorded against every input in the chunk;
+                # native process aborts and segfaults cannot be caught in-process.
                 try:
                     docs = native_extractor.extract_batch(batch_paths, workers)
                 except Exception as exc:
-                    logger.warning(
-                        f"Native extract_batch failed for {len(batch_paths)} file(s); "
-                        f"routing chunk to the Python extractor: {exc}"
-                    )
-                    fallback_items.extend((Path(p), path_to_sha[p]) for p in batch_paths)
+                    logger.error(f"Native extract_batch failed for {len(batch_paths)} file(s): {exc}")
+                    for p in batch_paths:
+                        handle_result({
+                            "success": False,
+                            "file_path": p,
+                            "error": f"Native batch failed: {exc}",
+                            "elapsed": 0,
+                        })
                     continue
                 for p, doc in zip(batch_paths, docs):
-                    if native_extractor.needs_python_fallback(doc, p):
-                        fallback_items.append((Path(p), path_to_sha[p]))
-                    else:
+                    if native_extractor.is_complete_extraction(doc, p):
                         handle_result(native_extractor.to_result(p, path_to_sha[p], doc))
-            files_to_process = fallback_items
-            if fallback_items:
-                console.print(
-                    f"[cyan]Routing {len(fallback_items)} file(s) to the Python extractor "
-                    "(OCR / fallback).[/cyan]"
-                )
+                        continue
+                    reason = (
+                        doc.get("error")
+                        or doc.get("ocr_reason")
+                        or f"native status={doc.get('status')!r}"
+                    )
+                    handle_result({
+                        "success": False,
+                        "file_path": p,
+                        "error": f"Native extraction incomplete: {reason}",
+                        "elapsed": (doc.get("extraction_ms") or 0) / 1000.0,
+                    })
+            files_to_process = []
 
         submission_batch_size = max(worker_count * 4, 1)
         loop = asyncio.get_running_loop()
@@ -846,6 +880,43 @@ async def process_ingest(
                         if not shutdown_requested:
                             submit_next()
     
+    # Extract each embedded Office image as a linked child row and OCR it. This
+    # runs after parent rows are durable so every child can point to an existing
+    # parent sha1. ZIP-expanded Office files still exist until archive cleanup.
+    from .embedded_media import run_media_ingest
+    office_paths = [
+        str(path)
+        for path in all_files
+        if str(path) in successful_source_paths and path.suffix.lower() in OFFICE_SUFFIXES
+    ]
+    if office_paths:
+        console.print(f"\n[cyan]Extracting embedded images from {len(office_paths)} Office file(s)...[/cyan]")
+        embedded_media_stats = await asyncio.to_thread(
+            run_media_ingest,
+            office_paths,
+            db_path,
+            table,
+            ocr_engine=ocr_engine,
+            workers=worker_count,
+            overwrite=overwrite,
+            fulltext=fulltext,
+            path_overrides=effective_override_filepaths,
+        )
+        media_failures = embedded_media_stats.get("failed_files", [])
+        for media_error in media_failures:
+            failed += 1
+            failed_files.append(("embedded media", media_error))
+        console.print(
+            "  Embedded images: "
+            f"[green]{embedded_media_stats.get('inserted', 0)} stored[/green], "
+            f"{embedded_media_stats.get('ocr_chars', 0)} OCR characters"
+        )
+        if embedded_media_stats.get("ocr_empty"):
+            console.print(
+                f"  [yellow]{embedded_media_stats['ocr_empty']} image(s) were OCR-attempted "
+                "but contained no readable text[/yellow]"
+            )
+
     # Final WAL checkpoint
     try:
         db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
@@ -908,4 +979,5 @@ async def process_ingest(
         'successful': successful,
         'skipped': warnings,
         'failed': failed,
+        'embedded_media': embedded_media_stats,
     }
