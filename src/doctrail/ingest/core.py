@@ -724,6 +724,7 @@ async def process_ingest(
             elif result['success'] is False:
                 failed += 1
                 failed_files.append((file_path.name, result['error']))
+                logger.warning(f"Failed to ingest {file_path}: {result['error']}")
                 progress.console.print(f"[red]✗[/red] {display_name}[dim]{elapsed_str}[/dim]: {result['error']}")
                 file_timings.append({'file': display_name, 'status': 'failed', 'elapsed': elapsed, 'error': result['error']})
             else:
