@@ -12,7 +12,7 @@ import sqlite3
 import threading
 from pathlib import Path
 from datetime import datetime
-from typing import Dict, Optional, List
+from typing import Any, Dict, Optional, List
 import sqlite_utils
 from loguru import logger
 
@@ -29,7 +29,7 @@ def insert_document(
     *,
     labels: Optional[List[str]] = None,
     json_metadata: Optional[dict] = None,
-    extra_fields: Optional[Dict[str, str]] = None,
+    extra_fields: Optional[Dict[str, Any]] = None,
     overwrite: bool = False,
     file_stat_path: Optional[str] = None,
 ):
@@ -127,6 +127,14 @@ def check_db_schema(db_path: str, table_name: str) -> bool:
         # Get existing columns
         table = db[table_name]
         columns = {col.name for col in table.columns}
+
+        # A wrong primary key is not an additive schema difference. Check it
+        # before missing columns, which sqlite-utils can safely add later.
+        pkey_cols = [col.name for col in table.columns if col.is_pk]
+        if pkey_cols and 'sha1' not in pkey_cols:
+            logger.error(f"Table '{table_name}' has wrong primary key: {pkey_cols}")
+            logger.error("Expected 'sha1' as primary key")
+            return False
         
         # Required columns (updated schema - no more 'content', only 'raw_content')
         required_columns = {
@@ -140,13 +148,6 @@ def check_db_schema(db_path: str, table_name: str) -> bool:
             logger.warning(f"Missing required columns in table '{table_name}': {missing_columns}")
             logger.info("The table will be automatically updated with missing columns")
             return True  # sqlite-utils can handle adding columns with alter=True
-        
-        # Check primary key
-        pkey_cols = [col.name for col in table.columns if col.is_pk]
-        if pkey_cols and 'sha1' not in pkey_cols:
-            logger.error(f"Table '{table_name}' has wrong primary key: {pkey_cols}")
-            logger.error("Expected 'sha1' as primary key")
-            return False
         
         return True
         
@@ -164,17 +165,34 @@ def setup_fts(db_path: str, table_name: str):
         if table_name not in db.table_names():
             logger.warning(f"Table '{table_name}' does not exist, cannot create FTS")
             return
+
+        columns = {column.name for column in db[table_name].columns}
+        if 'filepath' not in columns:
+            db[table_name].add_column('filepath', str)
         
         # Check if FTS already exists
         fts_table_name = f"{table_name}_fts"
         if fts_table_name in db.table_names():
+            indexed_columns = {column.name for column in db[fts_table_name].columns}
+            required_fts_columns = {'raw_content', 'filename', 'filepath'}
+            missing_columns = required_fts_columns - indexed_columns
+            if missing_columns:
+                raise RuntimeError(
+                    f"Existing FTS index '{fts_table_name}' does not index "
+                    f"{sorted(missing_columns)}. Rebuild that derived FTS index "
+                    "before relying on filepath search."
+                )
             logger.info(f"FTS table '{fts_table_name}' already exists")
             return
         
         logger.info(f"Creating full-text search index for table '{table_name}'...")
 
-        # Enable FTS5 on raw_content and filename columns
-        db[table_name].enable_fts(['raw_content', 'filename'], create_triggers=True)
+        # File paths are evidence too: agents need to find documents by folder
+        # and path components even when those words are absent from the content.
+        db[table_name].enable_fts(
+            ['raw_content', 'filename', 'filepath'],
+            create_triggers=True,
+        )
         
         logger.info(f"Successfully created FTS index '{fts_table_name}'")
         

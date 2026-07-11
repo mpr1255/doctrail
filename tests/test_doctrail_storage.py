@@ -101,6 +101,67 @@ def test_ingest_backfills_added_at_from_existing_updated_at(tmp_path):
     assert row["raw_content"] == "refreshed"
 
 
+def test_ingest_fts_indexes_and_tracks_filepath_tokens(tmp_path):
+    from doctrail.ingest.database import setup_fts
+
+    db_path = tmp_path / "filepath-search.db"
+    db = sqlite_utils.Database(db_path)
+    db["documents"].insert(
+        {
+            "sha1": "path-search-sha1",
+            "filename": "report.pdf",
+            "filepath": "/Volumes/archive/casefiles/report.pdf",
+            "raw_content": "content without the folder term",
+        },
+        pk="sha1",
+    )
+    setup_fts(str(db_path), "documents")
+
+    hit = db.execute(
+        "SELECT filepath FROM documents_fts WHERE documents_fts MATCH ?",
+        ["casefiles"],
+    ).fetchone()
+    assert hit[0] == "/Volumes/archive/casefiles/report.pdf"
+
+    db["documents"].update(
+        "path-search-sha1",
+        {"filepath": "/Volumes/review/agentsearch/report.pdf"},
+    )
+    old_hit = db.execute(
+        "SELECT COUNT(*) FROM documents_fts WHERE documents_fts MATCH ?",
+        ["casefiles"],
+    ).fetchone()[0]
+    new_hit = db.execute(
+        "SELECT filepath FROM documents_fts WHERE documents_fts MATCH ?",
+        ["agentsearch"],
+    ).fetchone()
+    assert old_hit == 0
+    assert new_hit[0] == "/Volumes/review/agentsearch/report.pdf"
+
+
+def test_ingest_fts_refuses_to_claim_legacy_index_has_filepath(tmp_path):
+    from doctrail.ingest.database import setup_fts
+
+    db_path = tmp_path / "legacy-fts.db"
+    db = sqlite_utils.Database(db_path)
+    db["documents"].insert(
+        {
+            "sha1": "legacy-fts-sha1",
+            "filename": "report.pdf",
+            "filepath": "/Volumes/archive/casefiles/report.pdf",
+            "raw_content": "legacy",
+        },
+        pk="sha1",
+    )
+    db["documents"].enable_fts(
+        ["raw_content", "filename"],
+        create_triggers=True,
+    )
+
+    with pytest.raises(RuntimeError, match="does not index.*filepath"):
+        setup_fts(str(db_path), "documents")
+
+
 def test_output_db_separation(temp_env, caplog):
     """
     Test that --output-db writes enrichments to a separate database
