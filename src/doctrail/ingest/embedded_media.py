@@ -18,11 +18,11 @@ Extraction paths
 
 Row model
 ---------
-Each embedded image becomes a ``documents`` row keyed by the image's own content
-sha1, so an identical screenshot reused across many dossiers is OCR'd once and
-stored once. ``parent_sha1`` / ``parent_path`` / ``image_index`` record where it
-was found; ``raw_content`` is the OCR text (so FTS indexes it); EXIF and the
-original media name land in ``metadata``.
+Each embedded-image occurrence becomes a ``documents`` row keyed by its parent,
+position, media name, and image hash. ``parent_sha1`` / ``parent_path`` /
+``image_index`` record where it was found, while ``image_sha1`` preserves the
+content identity shared by duplicate screenshots. ``raw_content`` is the OCR
+text (so FTS indexes it); EXIF and the original media name land in ``metadata``.
 """
 
 from __future__ import annotations
@@ -54,13 +54,21 @@ def sha1_bytes(data: bytes) -> str:
     return hashlib.sha1(data).hexdigest()
 
 
+def embedded_occurrence_sha1(
+    parent_sha1: str, image_index: int, media_name: str, image_sha1: str
+) -> str:
+    """Stable row key for one image occurrence inside one parent document."""
+    identity = f"embedded-media-v1\0{parent_sha1}\0{image_index}\0{media_name}\0{image_sha1}"
+    return sha1_bytes(identity.encode("utf-8", "surrogatepass"))
+
+
 def scan_has_embedded_image(path: Path) -> bool:
     """Cheap yes/no: do the raw bytes contain a JPEG or PNG signature?
 
-    Used to skip LibreOffice conversion for legacy files with no pictures. Can
-    false-positive (the marker may appear inside other data) but never
-    false-negatives a real embedded JPEG/PNG, so at worst we convert a file that
-    turns out to have nothing extractable.
+    Used to skip LibreOffice conversion for legacy files with no JPEG or PNG.
+    Other image formats are not safely recognizable from the compound file's
+    raw bytes, so callers must still treat this as a performance hint rather
+    than proof that a document contains no media.
     """
     try:
         data = path.read_bytes()
@@ -226,6 +234,7 @@ def _extract_rows_for_file(path: Path, *, soffice: str, ocr_fn: Callable[[Path],
     rows: List[Dict[str, object]] = []
     for index, (media_name, data) in enumerate(images):
         img_sha1 = sha1_bytes(data)
+        row_sha1 = embedded_occurrence_sha1(parent_sha1, index, media_name, img_sha1)
         exif = image_exif(data)
         w = int(exif.get("image_width") or 0)
         h = int(exif.get("image_height") or 0)
@@ -250,7 +259,7 @@ def _extract_rows_for_file(path: Path, *, soffice: str, ocr_fn: Callable[[Path],
             metadata["ocr_skipped"] = ocr_skipped
         metadata.update(exif)
         rows.append({
-            "sha1": img_sha1,
+            "sha1": row_sha1,
             "synthetic_path": f"{path}#{media_name}",
             "content": ocr_text,
             "metadata": metadata,
@@ -303,10 +312,10 @@ def run_media_ingest(
 ) -> Dict[str, int]:
     """Extract + OCR embedded Office images into ``table_name`` as child rows.
 
-    Each image becomes a row keyed by the image content sha1 (identical images
-    across dossiers collapse to one OCR job / one row), linked to its parent via
-    ``parent_sha1`` / ``image_index``. FTS on ``raw_content`` makes the OCR text
-    searchable next to the source text.
+    Each image occurrence becomes a stable row linked to its parent via
+    ``parent_sha1`` / ``image_index``. The separate ``image_sha1`` field records
+    duplicate image content across parents. FTS on ``raw_content`` makes the OCR
+    text searchable next to the source text.
     """
     from concurrent.futures import ThreadPoolExecutor, as_completed
     import sqlite_utils
@@ -325,14 +334,14 @@ def run_media_ingest(
     logger.info(f"Scanning {len(files)} Office file(s) for embedded images")
 
     db = sqlite_utils.Database(db_path)
-    seen_image_sha1: set = set()
+    seen_row_sha1: set = set()
     if table_name in db.table_names() and not overwrite:
         try:
-            seen_image_sha1 = {
+            seen_row_sha1 = {
                 r["sha1"] for r in db[table_name].rows_where("source_format = ?", ["embedded-image"])
             }
         except Exception:
-            seen_image_sha1 = set()
+            seen_row_sha1 = set()
 
     stats = {"files_with_images": 0, "images": 0, "ocr_chars": 0, "inserted": 0, "skipped_dupe": 0}
 
@@ -355,16 +364,16 @@ def run_media_ingest(
                 stats["files_with_images"] += 1
             for row in rows:
                 stats["images"] += 1
-                img_sha1 = row["sha1"]
-                if img_sha1 in seen_image_sha1 and not overwrite:
+                row_sha1 = row["sha1"]
+                if row_sha1 in seen_row_sha1 and not overwrite:
                     stats["skipped_dupe"] += 1
                     continue
-                seen_image_sha1.add(img_sha1)
+                seen_row_sha1.add(row_sha1)
                 stats["ocr_chars"] += len(row["content"])
                 insert_document(
                     db,
                     table_name,
-                    img_sha1,
+                    row_sha1,
                     row["synthetic_path"],
                     row["content"],
                     row["metadata"],

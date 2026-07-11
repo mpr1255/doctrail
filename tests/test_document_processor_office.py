@@ -12,6 +12,7 @@ from doctrail.ingest.document_processor import (
     format_supported_extensions_for_help,
     process_document,
 )
+from doctrail.ingest import embedded_media
 from doctrail.ingest.text_processing import clean_extracted_text
 from doctrail.extractors import spreadsheet_extractor
 
@@ -165,6 +166,32 @@ async def test_process_document_handles_docx_real(tmp_path):
 def test_clean_extracted_text_rejects_non_string_input():
     with pytest.raises(TypeError):
         clean_extracted_text(("content", "title"))
+
+
+def test_embedded_image_rows_preserve_each_parent_relationship(monkeypatch, tmp_path):
+    first = tmp_path / "first.docx"
+    second = tmp_path / "second.docx"
+    first.write_bytes(b"first parent")
+    second.write_bytes(b"second parent")
+    shared_image = b"same screenshot bytes"
+
+    monkeypatch.setattr(
+        embedded_media,
+        "office_images",
+        lambda path, soffice="soffice": [("word/media/image1.png", shared_image)],
+    )
+
+    first_row = embedded_media._extract_rows_for_file(
+        first, soffice="soffice", ocr_fn=lambda path: "", ocr_engine="none"
+    )[0]
+    second_row = embedded_media._extract_rows_for_file(
+        second, soffice="soffice", ocr_fn=lambda path: "", ocr_engine="none"
+    )[0]
+
+    assert first_row["sha1"] != second_row["sha1"]
+    assert first_row["extra_fields"]["image_sha1"] == second_row["extra_fields"]["image_sha1"]
+    assert first_row["extra_fields"]["parent_sha1"] == _sha1_for(first)
+    assert second_row["extra_fields"]["parent_sha1"] == _sha1_for(second)
 
 
 @pytest.mark.asyncio

@@ -11,6 +11,10 @@ bash scripts/build_native.sh
 
 Alternatively, run `make native` from the repository root.
 
+The native crate retains its original AGPL-3.0 license marker. Keep it on the
+local-development path until its distribution terms are reconciled with the
+MIT-licensed top-level package.
+
 The optional local safety limits are:
 
 - `DOCTRAIL_INGEST_TIMEOUT_MS` (default `20000`)

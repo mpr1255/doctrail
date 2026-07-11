@@ -38,6 +38,7 @@ from typing import Any, Dict, List, Optional
 
 _native_module = None
 _native_loaded = False
+_VALID_STATUSES = {"extracted", "fallback_required", "failed", "skipped_unsupported"}
 
 
 def _native():
@@ -74,8 +75,40 @@ def extract_batch(paths: List[str], threads: Optional[int] = None) -> List[Dict[
     native = _native()
     if native is None:
         raise RuntimeError("native extension doctrail._ingest_native is not available")
-    raw = native.extract_batch([str(p) for p in paths], threads)
-    return [json.loads(r) for r in raw]
+    normalized_paths = [str(path) for path in paths]
+    raw = native.extract_batch(normalized_paths, threads)
+    docs = [json.loads(item) for item in raw]
+    _validate_batch_contract(normalized_paths, docs)
+    return docs
+
+
+def _validate_batch_contract(paths: List[str], docs: List[Dict[str, Any]]) -> None:
+    """Reject a malformed native batch before any rows are written.
+
+    The ingest loop relies on one order-preserving result per input path. A
+    truncated or reordered FFI response must fail the whole chunk so the caller
+    can route every input through the Python fallback instead of silently
+    dropping or misattributing documents.
+    """
+    if len(docs) != len(paths):
+        raise RuntimeError(
+            f"native extractor returned {len(docs)} result(s) for {len(paths)} path(s)"
+        )
+
+    for index, (expected_path, doc) in enumerate(zip(paths, docs)):
+        if not isinstance(doc, dict):
+            raise RuntimeError(f"native extractor result {index} is not an object")
+        if doc.get("path") != expected_path:
+            raise RuntimeError(
+                f"native extractor result {index} path mismatch: "
+                f"expected {expected_path!r}, got {doc.get('path')!r}"
+            )
+        if doc.get("status") not in _VALID_STATUSES:
+            raise RuntimeError(
+                f"native extractor result {index} has invalid status {doc.get('status')!r}"
+            )
+        if not isinstance(doc.get("content"), str):
+            raise RuntimeError(f"native extractor result {index} has non-string content")
 
 
 # Below this many bytes we treat empty Rust output as legitimately empty

@@ -6,9 +6,13 @@ native build). The rest of the suite runs the Python path via the
 Rust path is active.
 """
 
+import json
+import sqlite3
+
 import pytest
 
 from doctrail.ingest import native_extractor
+from doctrail.ingest.core import process_ingest
 
 
 pytestmark = pytest.mark.skipif(
@@ -67,6 +71,34 @@ def test_extract_batch_preserves_order_and_count(tmp_path, native_enabled):
         assert f"number {i}" in doc["content"]
 
 
+@pytest.mark.parametrize(
+    "payload, error",
+    [
+        ([], "returned 0 result"),
+        ([{"path": "wrong", "status": "extracted", "content": "ok"}], "path mismatch"),
+        ([{"path": "PATH", "status": "mystery", "content": "ok"}], "invalid status"),
+        ([{"path": "PATH", "status": "extracted", "content": None}], "non-string content"),
+    ],
+)
+def test_extract_batch_rejects_malformed_native_contract(tmp_path, monkeypatch, payload, error):
+    path = str(tmp_path / "input.txt")
+    adjusted = [
+        {key: path if value == "PATH" else value for key, value in item.items()}
+        for item in payload
+    ]
+
+    class FakeNative:
+        @staticmethod
+        def extract_batch(paths, threads):
+            return [json.dumps(item) for item in adjusted]
+
+    monkeypatch.setattr(native_extractor, "_native_module", FakeNative())
+    monkeypatch.setattr(native_extractor, "_native_loaded", True)
+
+    with pytest.raises(RuntimeError, match=error):
+        native_extractor.extract_batch([path])
+
+
 def test_spreadsheet_routes_to_python_fallback(tmp_path, native_enabled):
     """Rust extracts CSV cleanly, but spreadsheets must fall back to Python so
     doctrail's structured json_metadata payload is preserved."""
@@ -100,3 +132,71 @@ def test_disable_native_env_forces_python_path(tmp_path, monkeypatch):
     assert native_extractor.available() is False
     monkeypatch.delenv("DOCTRAIL_DISABLE_NATIVE", raising=False)
     assert native_extractor.available() is True
+
+
+@pytest.mark.asyncio
+async def test_process_ingest_writes_native_rows_to_sqlite(tmp_path, native_enabled):
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "one.txt").write_text("First document from the native extractor.", encoding="utf-8")
+    (source / "two.html").write_text(
+        "<html><body><article><h1>Second</h1><p>Native HTML body.</p></article></body></html>",
+        encoding="utf-8",
+    )
+    db_path = tmp_path / "native.sqlite"
+
+    result = await process_ingest(
+        db_path=str(db_path),
+        input_dir=str(source),
+        table="documents",
+        extractor="rust",
+        workers=2,
+        yes=True,
+    )
+
+    assert result["successful"] == 2
+    assert result["failed"] == 0
+    with sqlite3.connect(db_path) as conn:
+        rows = conn.execute(
+            "SELECT filename, processing_method, raw_content FROM documents ORDER BY filename"
+        ).fetchall()
+    assert [row[0] for row in rows] == ["one.txt", "two.html"]
+    assert all(row[1] == "rust-ingestor" for row in rows)
+    assert "First document" in rows[0][2]
+    assert "Native HTML body" in rows[1][2]
+
+
+@pytest.mark.asyncio
+async def test_process_ingest_falls_back_whole_chunk_on_native_contract_error(
+    tmp_path, monkeypatch
+):
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "one.txt").write_text("First fallback document.", encoding="utf-8")
+    (source / "two.txt").write_text("Second fallback document.", encoding="utf-8")
+    db_path = tmp_path / "fallback.sqlite"
+
+    monkeypatch.setattr(native_extractor, "available", lambda: True)
+    monkeypatch.setattr(
+        native_extractor,
+        "extract_batch",
+        lambda paths, threads: (_ for _ in ()).throw(RuntimeError("bad batch contract")),
+    )
+
+    result = await process_ingest(
+        db_path=str(db_path),
+        input_dir=str(source),
+        table="documents",
+        extractor="rust",
+        workers=2,
+        yes=True,
+    )
+
+    assert result["successful"] == 2
+    assert result["failed"] == 0
+    with sqlite3.connect(db_path) as conn:
+        rows = conn.execute(
+            "SELECT filename, extraction_method FROM documents ORDER BY filename"
+        ).fetchall()
+    assert [row[0] for row in rows] == ["one.txt", "two.txt"]
+    assert all(row[1] == "direct_text_read" for row in rows)

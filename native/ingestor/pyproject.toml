@@ -10,7 +10,7 @@ name = "doctrail-ingest-native"
 version = "0.1.0"
 description = "doctrail native document extraction core"
 requires-python = ">=3.12"
-license = { text = "MIT" }
+license = { text = "AGPL-3.0" }
 
 [tool.maturin]
 module-name = "_ingest_native"

@@ -637,16 +637,13 @@ async def process_ingest(
                 if shutdown_requested:
                     break
                 batch_paths = native_paths[start:start + native_chunk]
-                # The Rust binding contains per-file panics (each bad file comes back
-                # status=failed), but a batch-level failure — an ABI/import error, OOM,
-                # or a C-level abort inside a native lib — can still take down the whole
-                # call. Never let that abort the ingest: propagate Ctrl+C, otherwise
-                # route the chunk to the Python extractor so those files still get a try.
+                # Per-file Rust panics come back as status=failed. Recoverable
+                # batch-level failures, including an invalid FFI response, route the
+                # entire chunk through Python so no input can disappear. Native
+                # process aborts and segfaults cannot be caught in-process.
                 try:
                     docs = native_extractor.extract_batch(batch_paths, workers)
-                except KeyboardInterrupt:
-                    raise
-                except BaseException as exc:
+                except Exception as exc:
                     logger.warning(
                         f"Native extract_batch failed for {len(batch_paths)} file(s); "
                         f"routing chunk to the Python extractor: {exc}"
