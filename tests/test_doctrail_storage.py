@@ -28,6 +28,79 @@ from doctrail.utils.model_pricing import get_openai_batch_model_info
 from tests.doctrail_support import *
 
 
+def test_ingest_added_at_is_set_once_and_preserved_on_overwrite(tmp_path):
+    from doctrail.ingest.database import insert_document
+
+    source = tmp_path / "document.txt"
+    source.write_text("first version", encoding="utf-8")
+    db = sqlite_utils.Database(tmp_path / "documents.db")
+
+    insert_document(
+        db,
+        "documents",
+        "test-sha1",
+        str(source),
+        "first version",
+        {},
+    )
+    inserted = db["documents"].get("test-sha1")
+    assert inserted["added_at"]
+    assert inserted["updated_at"]
+
+    original_added_at = "2020-01-02T03:04:05"
+    original_updated_at = "2020-01-02T04:05:06"
+    db.execute(
+        "UPDATE documents SET added_at = ?, updated_at = ? WHERE sha1 = ?",
+        [original_added_at, original_updated_at, "test-sha1"],
+    )
+    insert_document(
+        db,
+        "documents",
+        "test-sha1",
+        str(source),
+        "second version",
+        {},
+        overwrite=True,
+    )
+
+    overwritten = db["documents"].get("test-sha1")
+    assert overwritten["added_at"] == original_added_at
+    assert overwritten["updated_at"] != original_updated_at
+    assert overwritten["raw_content"] == "second version"
+
+
+def test_ingest_backfills_added_at_from_existing_updated_at(tmp_path):
+    from doctrail.ingest.database import insert_document
+
+    source = tmp_path / "legacy.txt"
+    source.write_text("legacy", encoding="utf-8")
+    db = sqlite_utils.Database(tmp_path / "legacy.db")
+    db["documents"].insert(
+        {
+            "sha1": "legacy-sha1",
+            "filename": source.name,
+            "filepath": str(source),
+            "raw_content": "legacy",
+            "updated_at": "2019-02-03T04:05:06",
+        },
+        pk="sha1",
+    )
+
+    insert_document(
+        db,
+        "documents",
+        "legacy-sha1",
+        str(source),
+        "refreshed",
+        {},
+        overwrite=True,
+    )
+
+    row = db["documents"].get("legacy-sha1")
+    assert row["added_at"] == "2019-02-03T04:05:06"
+    assert row["raw_content"] == "refreshed"
+
+
 def test_output_db_separation(temp_env, caplog):
     """
     Test that --output-db writes enrichments to a separate database

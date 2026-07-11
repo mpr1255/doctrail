@@ -74,6 +74,10 @@ def insert_document(
                 if key in important_fields and str_value is not None:
                     top_level_metadata[key] = str_value
 
+            now = datetime.now().isoformat()
+            existing_row = existing[0] if existing else {}
+            added_at = existing_row.get("added_at") or existing_row.get("updated_at") or now
+
             document = {
                 "sha1": sha1,
                 "filename": os.path.basename(file_path),
@@ -81,7 +85,8 @@ def insert_document(
                 "raw_content": content,  # Single content field
                 "file_created": datetime.fromtimestamp(stat_source.stat().st_ctime).isoformat(),
                 "file_modified": datetime.fromtimestamp(stat_source.stat().st_mtime).isoformat(),
-                "updated_at": datetime.now().isoformat(),
+                "added_at": added_at,
+                "updated_at": now,
                 "metadata": json.dumps(stored_metadata) if stored_metadata else None,  # Full metadata record
                 **top_level_metadata,  # Spread important fields as columns
             }
@@ -124,7 +129,10 @@ def check_db_schema(db_path: str, table_name: str) -> bool:
         columns = {col.name for col in table.columns}
         
         # Required columns (updated schema - no more 'content', only 'raw_content')
-        required_columns = {'sha1', 'filename', 'filepath', 'raw_content', 'file_created', 'file_modified'}
+        required_columns = {
+            'sha1', 'filename', 'filepath', 'raw_content', 'file_created',
+            'file_modified', 'added_at', 'updated_at',
+        }
         
         # Check if all required columns exist
         missing_columns = required_columns - columns
