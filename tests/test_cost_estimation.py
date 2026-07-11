@@ -491,6 +491,21 @@ def test_validate_model_accepts_known_openai_model():
     assert validate_model("gpt-5-mini")
 
 
+def test_validate_model_accepts_openai_compatible_model_for_sync_only():
+    model = "openai-compatible/Qwen/Qwen3-32B"
+
+    assert validate_model(model)
+    assert get_model_validation_error(model, execution_mode="batch") == (
+        "OpenAI-compatible endpoints currently support execution_mode=sync only."
+    )
+
+
+def test_validate_model_rejects_empty_openai_compatible_model():
+    assert get_model_validation_error("openai-compatible/") == (
+        "An openai-compatible model ID is required after 'openai-compatible/'."
+    )
+
+
 def test_validate_model_accepts_openai_batch_snapshot(monkeypatch):
     """OpenAI batch validation should accept documented snapshot IDs."""
     import doctrail.utils.cost_estimation as cost_utils

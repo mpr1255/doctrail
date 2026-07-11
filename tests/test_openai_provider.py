@@ -1203,6 +1203,33 @@ class TestFactoryCapabilities:
 
         assert provider.client.api_key == "sk-inherited-shell"
 
+    def test_factory_creates_self_hosted_openai_compatible_provider(self, monkeypatch):
+        import doctrail.llm_providers.factory as factory_module
+
+        monkeypatch.setenv("OPENAI_COMPATIBLE_BASE_URL", "http://h100:8000/v1")
+        monkeypatch.setenv("OPENAI_COMPATIBLE_API_KEY", "secret")
+
+        provider = factory_module.get_llm_provider(
+            "openai-compatible/Qwen/Qwen3-32B"
+        )
+
+        assert provider.model == "Qwen/Qwen3-32B"
+        assert str(provider.client.base_url) == "http://h100:8000/v1/"
+        assert provider.client.api_key == "secret"
+        assert provider._is_third_party
+        assert provider._capabilities == {
+            "structured_outputs": False,
+            "response_format": True,
+        }
+
+    def test_factory_requires_self_hosted_base_url(self, monkeypatch):
+        import doctrail.llm_providers.factory as factory_module
+
+        monkeypatch.delenv("OPENAI_COMPATIBLE_BASE_URL", raising=False)
+
+        with pytest.raises(ValueError, match="OPENAI_COMPATIBLE_BASE_URL"):
+            factory_module.get_llm_provider("openai-compatible/llama3.3")
+
     @pytest.mark.asyncio
     async def test_factory_fetches_openrouter_capabilities(self):
         """Factory should query OpenRouter API and pass capabilities to provider."""

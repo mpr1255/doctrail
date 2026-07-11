@@ -120,6 +120,29 @@ def get_llm_provider(
             capabilities=capabilities,
         )
 
+    # Self-hosted OpenAI-compatible servers such as vLLM and Ollama.
+    if model.startswith('openai-compatible/'):
+        actual_model = model.removeprefix('openai-compatible/')
+        base_url = os.environ.get('OPENAI_COMPATIBLE_BASE_URL')
+        if not base_url:
+            raise ValueError(
+                "OPENAI_COMPATIBLE_BASE_URL environment variable is required "
+                "for openai-compatible models"
+            )
+        api_key = os.environ.get('OPENAI_COMPATIBLE_API_KEY', 'not-required')
+
+        logger.debug(
+            "Creating OpenAI-compatible provider for model %s at %s",
+            actual_model,
+            base_url,
+        )
+        return OpenAIProvider(
+            api_key=api_key,
+            model=actual_model,
+            base_url=base_url,
+            capabilities={"structured_outputs": False, "response_format": True},
+        )
+
     # Anthropic/Claude: claude-* prefix or anthropic/ prefix (direct API)
     if model.startswith('claude') or model.startswith('anthropic/'):
         actual_model = model.removeprefix('anthropic/')

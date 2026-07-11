@@ -60,3 +60,21 @@ OPENROUTER_API_KEY=...
 ```
 
 You only need the line for the provider you plan to use. Doctrail reads the nearest project `.env` only after a Doctrail project has been initialized, which means the same directory or an ancestor has `.doctrail/`. That project `.env` overrides keys already exported in your shell environment. A bare `.env` in an unrelated current directory is ignored, and there is no package-global Doctrail `.env`. If you want one default across projects, export it from your shell startup file such as `~/.zshenv` or `~/.bashrc`; use a project `.env` when different projects should use different providers or accounts. Do not commit `.env`; `doctrail init` adds it to `.gitignore`.
+
+### Self-hosted models
+
+Doctrail can use a vLLM, Ollama, or other server that exposes the OpenAI-compatible chat completions API. Point Doctrail at the server's `/v1` base URL:
+
+```dotenv
+OPENAI_COMPATIBLE_BASE_URL=http://h100:8000/v1
+# Optional when the server requires authentication:
+OPENAI_COMPATIBLE_API_KEY=...
+```
+
+Prefix the exact model ID exposed by the server with `openai-compatible/`:
+
+```yaml
+default_model: openai-compatible/Qwen/Qwen3-32B
+```
+
+For a local Ollama server, the base URL is normally `http://localhost:11434/v1`. Self-hosted endpoints currently use synchronous execution; provider batch mode is not supported.

@@ -7,7 +7,7 @@
 
 Doctrail turns document collections into auditable, structured research data with LLMs.
 
-It ingests files into an SQLite database, applies structured codebooks and prompts to selected rows, runs them through an LLM (OpenAI, Gemini, Anthropic, or OpenRouter models), and returns ordinary tables and views for iteration and analysis.
+It ingests files into an SQLite database, applies structured codebooks and prompts to selected rows, runs them through an LLM (OpenAI, Gemini, Anthropic, OpenRouter, or a self-hosted OpenAI-compatible server), and returns ordinary tables and views for iteration and analysis.
 
 Doctrail is meant to be driven by both researchers and coding agents.
 

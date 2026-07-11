@@ -520,6 +520,14 @@ def get_model_validation_error(model: str, execution_mode: str = "sync") -> Opti
     if normalized.startswith("openrouter/"):
         return _validate_openrouter_model(normalized)
 
+    if normalized.startswith("openai-compatible/"):
+        actual_model = normalized.removeprefix("openai-compatible/")
+        if not actual_model:
+            return "An openai-compatible model ID is required after 'openai-compatible/'."
+        if execution_mode in {"batch", "openai-batch"}:
+            return "OpenAI-compatible endpoints currently support execution_mode=sync only."
+        return None
+
     if normalized.startswith("anthropic/") or normalized.startswith("claude"):
         return _validate_anthropic_model(normalized)
 
