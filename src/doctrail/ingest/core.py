@@ -780,7 +780,10 @@ async def process_ingest(
                         "error": f"Manual override failed: {exc}",
                         "elapsed": 0,
                     })
-            native_chunk = 512
+            # Keep extraction batches small enough that OCR-heavy corpora make
+            # regular durable progress instead of holding hundreds of completed
+            # documents behind one slow scanned file.
+            native_chunk = max(worker_count * 4, 32)
             for start in range(0, len(native_paths), native_chunk):
                 if shutdown_requested:
                     break
