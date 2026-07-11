@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 
-use anyhow::{anyhow, Result};
 use _ingest_native::{content_quality_rejection, extract_bytes, ExtractOptions, HtmlKind};
+use anyhow::{anyhow, Result};
 
 const THRESHOLD: f64 = 0.8;
 

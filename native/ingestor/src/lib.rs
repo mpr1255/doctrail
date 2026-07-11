@@ -624,12 +624,6 @@ fn extract_html_bytes(bytes: &[u8], source_path: Option<&str>) -> Result<Extract
 /// attribute de-duplication. These are DEPTH/attribute pathologies and are the
 /// only ones separable by a cheap pre-parse scan.
 ///
-/// The depth ceiling is from real-corpus evidence: over a 1500-doc sample the
-/// deepest page nested 67 levels counting only elements that require an explicit
-/// close tag (p99=17, p999=40), so 512 is a ~7.6x margin over anything real
-/// while sitting far below the overflow depth. Attribute counts on real tags are
-/// a handful, so 2000 is likewise far from legitimate content.
-///
 /// BREADTH pathologies (e.g. ~20k unclosed table rows) are NOT gated here: real
 /// pages legitimately reach ~33k tags / ~33k table cells in the same sample, so
 /// any element/cell cap would false-reject real content. Breadth hangs are
@@ -639,16 +633,20 @@ fn extract_html_bytes(bytes: &[u8], source_path: Option<&str>) -> Result<Extract
 /// hundreds of unclosed `<span>`; the deepest real page seen at 100k scale nests
 /// a few hundred) — while staying far below the depth that overflows the 64 MB
 /// extraction-thread stack (empirically many tens of thousands). Override with
-/// WORKER__MAX_NESTING_DEPTH.
+/// DOCTRAIL_INGEST_MAX_NESTING_DEPTH.
 const DEFAULT_MAX_NESTING_DEPTH: i64 = 8_192;
 const MAX_ATTRS_PER_TAG: usize = 2_000;
 
-fn max_nesting_depth() -> i64 {
-    std::env::var("WORKER__MAX_NESTING_DEPTH")
-        .ok()
+fn positive_i64(value: Option<&str>, default: i64) -> i64 {
+    value
         .and_then(|value| value.trim().parse::<i64>().ok())
-        .filter(|depth| *depth > 0)
-        .unwrap_or(DEFAULT_MAX_NESTING_DEPTH)
+        .filter(|value| *value > 0)
+        .unwrap_or(default)
+}
+
+fn max_nesting_depth() -> i64 {
+    let value = std::env::var("DOCTRAIL_INGEST_MAX_NESTING_DEPTH").ok();
+    positive_i64(value.as_deref(), DEFAULT_MAX_NESTING_DEPTH)
 }
 
 /// Ceiling on extracted-content length before insert. Real articles are tiny
@@ -657,15 +655,19 @@ fn max_nesting_depth() -> i64 {
 /// the whole page (observed 14–18 MB whole-page ad/nav dumps). Storing those
 /// pollutes the dedup graph, so they are rejected as terminal errors rather than
 /// inserted. Two orders of magnitude above real content, so it cannot false-reject
-/// an article. Override with WORKER__MAX_CONTENT_CHARS.
+/// an article. Override with DOCTRAIL_INGEST_MAX_CONTENT_CHARS.
 const DEFAULT_MAX_CONTENT_CHARS: usize = 2_000_000;
 
-pub fn max_content_chars() -> usize {
-    std::env::var("WORKER__MAX_CONTENT_CHARS")
-        .ok()
+fn positive_usize(value: Option<&str>, default: usize) -> usize {
+    value
         .and_then(|value| value.trim().parse::<usize>().ok())
-        .filter(|chars| *chars > 0)
-        .unwrap_or(DEFAULT_MAX_CONTENT_CHARS)
+        .filter(|value| *value > 0)
+        .unwrap_or(default)
+}
+
+pub fn max_content_chars() -> usize {
+    let value = std::env::var("DOCTRAIL_INGEST_MAX_CONTENT_CHARS").ok();
+    positive_usize(value.as_deref(), DEFAULT_MAX_CONTENT_CHARS)
 }
 
 pub fn content_quality_rejection(content: &str, title: &str) -> Option<String> {
@@ -703,16 +705,19 @@ const EXTRACT_THREAD_STACK: usize = 64 * 1024 * 1024;
 /// Default wall-clock deadline for a single document's parsing stages. Legitimate
 /// pages finish in well under this (worst observed ~6 s on a 12 MB page);
 /// super-linear hangs are cut here and logged as a terminal failure. Override
-/// with WORKER__EXTRACT_TIMEOUT_MS.
+/// with DOCTRAIL_INGEST_TIMEOUT_MS.
 const DEFAULT_EXTRACT_TIMEOUT_MS: u64 = 20_000;
 
-fn extract_timeout() -> Duration {
-    std::env::var("WORKER__EXTRACT_TIMEOUT_MS")
-        .ok()
+fn positive_u64(value: Option<&str>, default: u64) -> u64 {
+    value
         .and_then(|value| value.trim().parse::<u64>().ok())
-        .filter(|ms| *ms > 0)
-        .map(Duration::from_millis)
-        .unwrap_or(Duration::from_millis(DEFAULT_EXTRACT_TIMEOUT_MS))
+        .filter(|value| *value > 0)
+        .unwrap_or(default)
+}
+
+fn extract_timeout() -> Duration {
+    let value = std::env::var("DOCTRAIL_INGEST_TIMEOUT_MS").ok();
+    Duration::from_millis(positive_u64(value.as_deref(), DEFAULT_EXTRACT_TIMEOUT_MS))
 }
 
 /// Optional-close / structural-container elements (per the HTML spec's optional
@@ -1280,7 +1285,7 @@ fn extract_html_string_inner(
     let defer_small_dom_for_html2text = should_use_dom_density
         && should_probe_html2text
         && dom_density_fallback_candidate
-            .map(|candidate| should_defer_small_dom_candidate_for_html2text(candidate))
+            .map(should_defer_small_dom_candidate_for_html2text)
             .unwrap_or(false);
     if should_use_dom_density && !defer_small_dom_for_html2text {
         if let Some(candidate) = dom_density_fallback_candidate {
@@ -2054,8 +2059,8 @@ fn decoded_text_badness(text: &str) -> usize {
 /// bare forms are substrings of the specific sequences below, which would double
 /// count every real marker. The specific two-char forms retain full detection.
 const STRONG_MOJIBAKE_MARKERS: [&str; 20] = [
-    "Ã©", "Ã¨", "Ã¤", "Ã¶", "Ã¼", "Ã±", "Ã ", "Ã¡", "Ã³", "Ãº", "Ã­", "Ã§", "â€™", "â€œ", "â€“",
-    "â€”", "Â«", "Â»", "Â·", "Â ",
+    "Ã©", "Ã¨", "Ã¤", "Ã¶", "Ã¼", "Ã±", "Ã ", "Ã¡", "Ã³", "Ãº", "Ã\u{ad}", "Ã§", "â€™", "â€œ",
+    "â€“", "â€”", "Â«", "Â»", "Â·", "Â ",
 ];
 
 /// Decide whether extracted text is genuine mojibake that should be rejected
@@ -3162,21 +3167,25 @@ mod tests {
     const OVER_MAX_DEPTH: usize = DEFAULT_MAX_NESTING_DEPTH as usize + 200;
 
     #[test]
-    fn max_content_chars_defaults_high_above_real_articles_and_honors_env() {
-        // Unset: the default must sit far above real content (p99.99 ≈ 510k across a
-        // 100k-doc corpus) so it can only ever catch whole-page extraction dumps.
-        std::env::remove_var("WORKER__MAX_CONTENT_CHARS");
-        assert_eq!(max_content_chars(), DEFAULT_MAX_CONTENT_CHARS);
-        assert!(DEFAULT_MAX_CONTENT_CHARS >= 1_000_000);
-
-        // Configurable; blank/zero/garbage falls back to the default.
-        std::env::set_var("WORKER__MAX_CONTENT_CHARS", "5000");
-        assert_eq!(max_content_chars(), 5000);
-        std::env::set_var("WORKER__MAX_CONTENT_CHARS", "0");
-        assert_eq!(max_content_chars(), DEFAULT_MAX_CONTENT_CHARS);
-        std::env::set_var("WORKER__MAX_CONTENT_CHARS", "notanumber");
-        assert_eq!(max_content_chars(), DEFAULT_MAX_CONTENT_CHARS);
-        std::env::remove_var("WORKER__MAX_CONTENT_CHARS");
+    fn positive_runtime_limits_reject_blank_zero_and_garbage() {
+        assert_eq!(
+            positive_usize(None, DEFAULT_MAX_CONTENT_CHARS),
+            DEFAULT_MAX_CONTENT_CHARS
+        );
+        assert_eq!(
+            positive_usize(Some("5000"), DEFAULT_MAX_CONTENT_CHARS),
+            5000
+        );
+        assert_eq!(
+            positive_usize(Some("0"), DEFAULT_MAX_CONTENT_CHARS),
+            DEFAULT_MAX_CONTENT_CHARS
+        );
+        assert_eq!(
+            positive_usize(Some("bad"), DEFAULT_MAX_CONTENT_CHARS),
+            DEFAULT_MAX_CONTENT_CHARS
+        );
+        assert_eq!(positive_i64(Some("64"), DEFAULT_MAX_NESTING_DEPTH), 64);
+        assert_eq!(positive_u64(Some("250"), DEFAULT_EXTRACT_TIMEOUT_MS), 250);
     }
 
     #[test]
@@ -4591,5 +4600,4 @@ Content-Location: http://example.test/xml
         js.push_str("</script><p>ok</p>");
         assert!(pathological_markup_reason(&js).is_none());
     }
-
 }

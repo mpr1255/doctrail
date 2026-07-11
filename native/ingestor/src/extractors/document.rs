@@ -921,12 +921,8 @@ mod tests {
     #[test]
     fn extracts_docx_paragraphs_and_tables_from_sample() {
         let sample = sample_docx();
-        let result = extract_document_bytes(
-            &sample,
-            Some("content/sample.docx"),
-            Some(DOCX_MIME),
-        )
-        .unwrap();
+        let result =
+            extract_document_bytes(&sample, Some("content/sample.docx"), Some(DOCX_MIME)).unwrap();
 
         assert_eq!(result.source_format, "docx");
         assert_eq!(result.title, "Sample Document");
@@ -948,12 +944,8 @@ mod tests {
     #[test]
     fn extracts_docm_with_docx_parser_and_docm_source_format() {
         let sample = sample_docx();
-        let result = extract_document_bytes(
-            &sample,
-            Some("content/sample.docm"),
-            Some(DOCM_MIME),
-        )
-        .unwrap();
+        let result =
+            extract_document_bytes(&sample, Some("content/sample.docm"), Some(DOCM_MIME)).unwrap();
 
         assert_eq!(result.source_format, "docm");
         assert!(result.content.contains("Sample Document"));

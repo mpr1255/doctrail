@@ -44,7 +44,7 @@ fn guarded(bytes: Vec<u8>, kind: &str, mime: Option<&str>, ext: Option<&str>) ->
         std::panic::set_hook(Box::new(|_| {}));
         // Keep the wall-clock deadline short so the full-scale hang shapes below
         // return a terminal error quickly instead of spending the default 20 s.
-        std::env::set_var("WORKER__EXTRACT_TIMEOUT_MS", "5000");
+        std::env::set_var("DOCTRAIL_INGEST_TIMEOUT_MS", "5000");
     });
     let kind = kind_of(kind);
     let mime = mime.map(str::to_string);
@@ -273,7 +273,7 @@ fn malformed_pdf_inputs_are_safe() {
 fn pdf_parallel_stress_is_safe() {
     SILENCE_PANICS.call_once(|| {
         std::panic::set_hook(Box::new(|_| {}));
-        std::env::set_var("WORKER__EXTRACT_TIMEOUT_MS", "5000");
+        std::env::set_var("DOCTRAIL_INGEST_TIMEOUT_MS", "5000");
     });
 
     let mut cases = adversarial_pdf_cases();
@@ -450,7 +450,7 @@ fn unicode_escape_floods_are_safe() {
 fn invalid_utf8_and_nul_bytes_are_safe() {
     for byte in [0x80u8, 0xff, 0xc0] {
         let mut b = Vec::from(&b"<html><body><article><p>"[..]);
-        b.extend(std::iter::repeat(byte).take(50_000));
+        b.extend(std::iter::repeat_n(byte, 50_000));
         b.extend_from_slice(b"</p></article></body></html>");
         assert_safe("invalid-utf8", html(b));
     }
@@ -459,7 +459,7 @@ fn invalid_utf8_and_nul_bytes_are_safe() {
         html(b"<h\0tml><bo\0dy><art\0icle><p>content\0with\0nuls that is long enough to reach the extraction threshold used by the pipeline.</p></article></body></html>".to_vec()),
     );
     let mut nulflood = Vec::from(&b"<html><body><article><p>"[..]);
-    nulflood.extend(std::iter::repeat(0u8).take(200_000));
+    nulflood.extend(std::iter::repeat_n(0u8, 200_000));
     nulflood.extend_from_slice(b"tail</p></article></body></html>");
     assert_safe("nul-flood", html(nulflood));
 }
