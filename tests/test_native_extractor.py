@@ -14,6 +14,7 @@ import zipfile
 from pathlib import Path
 
 import pytest
+from openpyxl import Workbook
 
 from doctrail.ingest import native_extractor
 from doctrail.ingest.core import process_ingest
@@ -116,6 +117,32 @@ def test_spreadsheet_is_a_complete_native_extraction(tmp_path, native_enabled):
     sheets = result["metadata"]["_spreadsheet_sheets"]
     assert sheets[0]["rows"] == [["Name", "Count"], ["Alice", "3"], ["Bob", "4"]]
     assert sheets[0]["delimiter"] == ","
+
+
+def test_sparse_xlsx_with_bounded_dimension_stays_native(tmp_path, native_enabled):
+    ordinary = tmp_path / "ordinary.xlsx"
+    workbook = Workbook()
+    workbook.active["A1"] = "bounded spreadsheet fallback"
+    workbook.save(ordinary)
+
+    sparse = tmp_path / "sparse.xlsx"
+    with zipfile.ZipFile(ordinary) as source, zipfile.ZipFile(sparse, "w") as target:
+        for member in source.infolist():
+            content = source.read(member.filename)
+            if member.filename == "xl/worksheets/sheet1.xml":
+                updated = content.replace(
+                    b'<dimension ref="A1:A1"/>',
+                    b'<dimension ref="A1:XFD332"/>',
+                )
+                assert updated != content
+                content = updated
+            target.writestr(member, content)
+
+    doc = native_extractor.extract_batch([str(sparse)], 1)[0]
+
+    assert doc["status"] == "extracted"
+    assert doc["source_format"] == "xlsx"
+    assert "bounded spreadsheet fallback" in doc["content"]
 
 
 @pytest.mark.parametrize(
