@@ -148,21 +148,20 @@ def _extract_text_from_ppt_with_strings(file_path: str) -> str:
 
 def extract_text_from_ppt(file_path: str) -> tuple[str, str]:
     """
-    Extract text from a legacy .ppt presentation via LibreOffice conversion.
+    Extract text from a legacy .ppt presentation.
 
     Returns:
         (content, extraction_method)
     """
+    content = _extract_text_from_ppt_with_strings(file_path)
+    if content:
+        return content, "strings"
+
     converted_path = None
     try:
         converted_path = _convert_with_soffice(file_path, "pptx")
         content, _ = extract_text_from_pptx(converted_path)
         return content, "soffice_to_pptx_python_pptx"
-    except RuntimeError:
-        content = _extract_text_from_ppt_with_strings(file_path)
-        if content:
-            return content, "strings"
-        raise
     finally:
         if converted_path:
             converted = Path(converted_path)

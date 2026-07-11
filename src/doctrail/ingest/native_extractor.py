@@ -1,10 +1,10 @@
 """Native (Rust) extraction path.
 
 Thin Python glue around the vendored `doctrail._ingest_native` PyO3 extension
-(the vendored extraction crate). Rust does all multicore extraction under the
-hood; this module only adapts its output to doctrail's ingest result-dict
-contract and decides which files must fall back to the Python extractors (OCR
-and other cases Rust cannot fully handle).
+(the vendored extraction crate). Rust does all multicore document extraction
+under the hood; this module validates and adapts its output to doctrail's ingest
+result-dict contract. The legacy Python extractor is reached only through the
+explicit backup switch or the ``DOCTRAIL_DISABLE_NATIVE`` kill-switch.
 
 Interface contract with the Rust binding
 ----------------------------------------
@@ -21,6 +21,7 @@ list (order-preserving, one per input path) of dicts with these keys:
     language_confidence: float | None
     mime_type: str | None         # detected MIME (e.g. "application/pdf")
     extraction_method: str | None # e.g. "mupdf_smart_paragraphs"
+    extraction_metadata: dict | None
     ocr_needed: bool              # Rust flagged this as needing OCR (scanned / mojibake)
     ocr_reason: str | None
     error: str | None
@@ -121,9 +122,8 @@ def _validate_batch_contract(paths: List[str], docs: List[Dict[str, Any]]) -> No
     """Reject a malformed native batch before any rows are written.
 
     The ingest loop relies on one order-preserving result per input path. A
-    truncated or reordered FFI response must fail the whole chunk so the caller
-    can route every input through the Python fallback instead of silently
-    dropping or misattributing documents.
+    truncated or reordered FFI response must fail the whole chunk instead of
+    silently dropping or misattributing documents.
     """
     if len(docs) != len(paths):
         raise RuntimeError(
@@ -146,44 +146,20 @@ def _validate_batch_contract(paths: List[str], docs: List[Dict[str, Any]]) -> No
             raise RuntimeError(f"native extractor result {index} has non-string content")
 
 
-# Below this many bytes we treat empty Rust output as legitimately empty
-# (e.g. a truncated stub) rather than something the Python fallback could rescue.
-_MIN_FALLBACK_SOURCE_BYTES = 64
-
-# Spreadsheet formats route to the Python extractor even when Rust extracts them
-# cleanly: doctrail's Python spreadsheet path emits a structured ``json_metadata``
-# payload (per-sheet rows plus a CSV rendering) and ``Sheet:`` markers in
-# raw_content that downstream review and enrichment rely on. The Rust path only
-# produces flat text for these, so we prefer Python to preserve the contract.
-#
-# Only formats the Python extractor actually supports belong here. xlsm/xlsb/ods
-# are NOT Python-supported (they would raise "unsupported"), so we let Rust's
-# calamine handle them as flat text rather than routing them to a failure.
-_PYTHON_ONLY_SOURCE_FORMATS = {"csv", "tsv", "xls", "xlsx"}
-
-
-def needs_python_fallback(doc: Dict[str, Any], file_path: str) -> bool:
-    """Should this file be re-run through the Python extractors (OCR + fallbacks)?
-
-    True when Rust flagged OCR (scanned or mojibake PDFs / images), when the
-    Rust status is not a clean extraction, when the source is a spreadsheet
-    format doctrail parses structurally in Python, or when Rust produced no text
-    for a non-trivial source (let antiword / w3m / textra try).
-    """
+def is_complete_extraction(doc: Dict[str, Any], file_path: str) -> bool:
+    """Return whether a native result is safe to write without intervention."""
     if doc.get("ocr_needed"):
-        return True
+        return False
     if doc.get("status") != "extracted":
-        return True
-    if doc.get("source_format") in _PYTHON_ONLY_SOURCE_FORMATS:
-        return True
+        return False
     content = doc.get("content") or ""
     if not content.strip():
         try:
-            if Path(file_path).stat().st_size >= _MIN_FALLBACK_SOURCE_BYTES:
-                return True
+            if Path(file_path).stat().st_size > 0:
+                return False
         except OSError:
-            pass
-    return False
+            return False
+    return True
 
 
 def to_result(file_path: str, sha1: str, doc: Dict[str, Any]) -> Dict[str, Any]:
@@ -205,6 +181,13 @@ def to_result(file_path: str, sha1: str, doc: Dict[str, Any]) -> Dict[str, Any]:
         "language": doc.get("language"),
         "language_confidence": doc.get("language_confidence"),
     }
+    extraction_metadata = doc.get("extraction_metadata")
+    if isinstance(extraction_metadata, dict):
+        structured_sheets = extraction_metadata.get("content_extraction", {}).get(
+            "structured_sheets"
+        )
+        if isinstance(structured_sheets, list):
+            metadata["_spreadsheet_sheets"] = structured_sheets
     metadata = {k: v for k, v in metadata.items() if v is not None}
 
     return {

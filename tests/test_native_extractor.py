@@ -9,6 +9,7 @@ Rust path is active.
 import json
 import io
 import sqlite3
+import shutil
 import zipfile
 from pathlib import Path
 
@@ -42,7 +43,7 @@ def test_extract_batch_plain_text(tmp_path, native_enabled):
     assert doc["status"] == "extracted"
     assert doc["source_format"] == "text"
     assert "Hello doctrail" in doc["content"]
-    assert not native_extractor.needs_python_fallback(doc, str(f))
+    assert native_extractor.is_complete_extraction(doc, str(f))
 
 
 def test_extract_batch_html_uses_readability(tmp_path, native_enabled):
@@ -102,9 +103,7 @@ def test_extract_batch_rejects_malformed_native_contract(tmp_path, monkeypatch, 
         native_extractor.extract_batch([path])
 
 
-def test_spreadsheet_routes_to_python_fallback(tmp_path, native_enabled):
-    """Rust extracts CSV cleanly, but spreadsheets must fall back to Python so
-    doctrail's structured json_metadata payload is preserved."""
+def test_spreadsheet_is_a_complete_native_extraction(tmp_path, native_enabled):
     f = tmp_path / "data.csv"
     f.write_text("Name,Count\nAlice,3\nBob,4\n", encoding="utf-8")
 
@@ -112,7 +111,57 @@ def test_spreadsheet_routes_to_python_fallback(tmp_path, native_enabled):
 
     assert doc["status"] == "extracted"
     assert doc["source_format"] == "csv"
-    assert native_extractor.needs_python_fallback(doc, str(f))
+    assert native_extractor.is_complete_extraction(doc, str(f))
+    result = native_extractor.to_result(str(f), "spreadsheet-sha1", doc)
+    sheets = result["metadata"]["_spreadsheet_sheets"]
+    assert sheets[0]["rows"] == [["Name", "Count"], ["Alice", "3"], ["Bob", "4"]]
+    assert sheets[0]["delimiter"] == ","
+
+
+@pytest.mark.parametrize(
+    ("filename", "required_tool", "expected_format", "expected_method"),
+    [
+        ("federalist_fixture.mobi", "ebook-convert", "mobi", "ebook-convert"),
+        ("federalist_fixture.djvu", "djvutxt", "djvu", "djvutxt"),
+        ("federalist_fixture.rtf", "textutil", "rtf", "textutil"),
+        ("federalist_fixture.ppt", "strings", "ppt", "strings"),
+        ("federalist_fixture.png", "tesseract", "png", None),
+    ],
+)
+def test_native_external_lanes_cover_python_only_fixtures(
+    native_enabled, filename, required_tool, expected_format, expected_method
+):
+    if shutil.which(required_tool) is None:
+        pytest.skip(f"{required_tool} is not installed")
+    path = Path(__file__).parent / "assets" / "files" / filename
+
+    doc = native_extractor.extract_batch([str(path)], 1)[0]
+
+    assert doc["status"] == "extracted", doc
+    assert doc["source_format"] == expected_format
+    assert "Federalist fixture" in doc["content"]
+    assert doc["ocr_needed"] is False
+    if expected_method:
+        assert doc["extraction_method"] == expected_method
+
+
+def test_native_scanned_pdf_runs_bounded_ocr_lane(tmp_path, native_enabled):
+    if shutil.which("ocrmypdf") is None or shutil.which("tesseract") is None:
+        pytest.skip("ocrmypdf and tesseract are required")
+    from PIL import Image
+
+    image_path = Path(__file__).parent / "assets" / "files" / "federalist_fixture.png"
+    pdf_path = tmp_path / "scanned.pdf"
+    with Image.open(image_path) as image:
+        image.convert("RGB").save(pdf_path, "PDF", resolution=150)
+
+    doc = native_extractor.extract_batch([str(pdf_path)], 1)[0]
+
+    assert doc["status"] == "extracted", doc
+    assert doc["source_format"] == "pdf"
+    assert doc["ocr_needed"] is False
+    assert doc["extraction_method"] == "ocrmypdf"
+    assert "Federalist fixture" in doc["content"]
 
 
 def test_to_result_maps_to_ingest_contract(tmp_path, native_enabled):
@@ -170,7 +219,7 @@ async def test_process_ingest_writes_native_rows_to_sqlite(tmp_path, native_enab
 
 
 @pytest.mark.asyncio
-async def test_process_ingest_falls_back_whole_chunk_on_native_contract_error(
+async def test_process_ingest_records_whole_chunk_failure_without_python_fallback(
     tmp_path, monkeypatch
 ):
     source = tmp_path / "source"
@@ -195,14 +244,13 @@ async def test_process_ingest_falls_back_whole_chunk_on_native_contract_error(
         yes=True,
     )
 
-    assert result["successful"] == 2
-    assert result["failed"] == 0
+    assert result["successful"] == 0
+    assert result["failed"] == 2
     with sqlite3.connect(db_path) as conn:
-        rows = conn.execute(
-            "SELECT filename, extraction_method FROM documents ORDER BY filename"
-        ).fetchall()
-    assert [row[0] for row in rows] == ["one.txt", "two.txt"]
-    assert all(row[1] == "direct_text_read" for row in rows)
+        table_exists = conn.execute(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='documents'"
+        ).fetchone()[0]
+    assert table_exists == 0
 
 
 def test_expand_zip_materializes_safe_members(tmp_path, native_enabled):

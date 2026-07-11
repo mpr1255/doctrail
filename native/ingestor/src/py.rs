@@ -7,21 +7,29 @@
 
 #![allow(clippy::useless_conversion)] // PyO3 wrapper expansion around PyResult.
 
-use crate::{classify_extraction_failure, extract_file, ExtractOptions, HtmlKind};
-use anyhow::{bail, Context};
+use crate::{
+    classify_extraction_failure, extract_bytes, extract_file, ExtractOptions, ExtractedDocument,
+    HtmlKind,
+};
+use anyhow::{anyhow, bail, Context, Result};
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 use rayon::prelude::*;
 use serde::Serialize;
 use serde_json::Value;
+use std::ffi::OsString;
 use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::Path;
-use std::time::Instant;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
+use tempfile::{tempdir, NamedTempFile};
+use wait_timeout::ChildExt;
 use zip::ZipArchive;
 
 const ZIP_RATIO_CHECK_MIN_BYTES: u64 = 1024 * 1024;
+const MAX_EXTERNAL_OUTPUT_BYTES: u64 = 64 * 1024 * 1024;
 
 /// One extraction result. Field names are the contract with
 /// `doctrail.ingest.native_extractor` (see its module docstring).
@@ -37,6 +45,7 @@ struct DocOut {
     language_confidence: Option<f64>,
     mime_type: Option<String>,
     extraction_method: Option<String>,
+    extraction_metadata: Option<Value>,
     ocr_needed: bool,
     ocr_reason: Option<String>,
     fallback_kind: Option<String>,
@@ -67,6 +76,37 @@ fn meta_f64(meta: &Value, section: &str, key: &str) -> Option<f64> {
     meta.get(section)?.get(key)?.as_f64()
 }
 
+fn doc_out_from_extracted(path: &str, doc: ExtractedDocument, started: Instant) -> DocOut {
+    let meta = &doc.extraction_metadata;
+    let ocr_needed = meta_bool(meta, "content_extraction", "ocr_needed")
+        || meta_bool(meta, "content_extraction", "requires_full_pdf_ocr");
+    let language = doc
+        .language
+        .clone()
+        .or_else(|| meta_str(meta, "language_detection", "final_language"))
+        .or_else(|| meta_str(meta, "language_detection", "detected_language"));
+    let content_chars = doc.content.chars().count();
+    let extraction_metadata = doc.extraction_metadata.clone();
+    DocOut {
+        path: path.to_string(),
+        status: "extracted".to_string(),
+        source_format: Some(doc.source_format),
+        title: Some(doc.title),
+        content: doc.content,
+        content_chars,
+        language,
+        language_confidence: meta_f64(meta, "language_detection", "confidence"),
+        mime_type: meta_str(meta, "content_extraction", "detected_mime_type"),
+        extraction_method: meta_str(meta, "content_extraction", "extraction_method"),
+        extraction_metadata: Some(extraction_metadata),
+        ocr_needed,
+        ocr_reason: meta_str(meta, "content_extraction", "ocr_reason"),
+        fallback_kind: None,
+        error: None,
+        extraction_ms: started.elapsed().as_millis() as u64,
+    }
+}
+
 fn extract_one(path: &str) -> DocOut {
     let started = Instant::now();
     let opts = ExtractOptions {
@@ -76,34 +116,24 @@ fn extract_one(path: &str) -> DocOut {
     };
     match extract_file(Path::new(path), opts) {
         Ok(doc) => {
-            let meta = &doc.extraction_metadata;
-            let ocr_needed = meta_bool(meta, "content_extraction", "ocr_needed")
-                || meta_bool(meta, "content_extraction", "requires_full_pdf_ocr");
-            let language = doc
-                .language
-                .clone()
-                .or_else(|| meta_str(meta, "language_detection", "final_language"))
-                .or_else(|| meta_str(meta, "language_detection", "detected_language"));
-            let content_chars = doc.content.chars().count();
-            DocOut {
-                path: path.to_string(),
-                status: "extracted".to_string(),
-                source_format: Some(doc.source_format),
-                title: Some(doc.title),
-                content: doc.content,
-                content_chars,
-                language,
-                language_confidence: meta_f64(meta, "language_detection", "confidence"),
-                mime_type: meta_str(meta, "content_extraction", "detected_mime_type"),
-                extraction_method: meta_str(meta, "content_extraction", "extraction_method"),
-                ocr_needed,
-                ocr_reason: meta_str(meta, "content_extraction", "ocr_reason"),
-                fallback_kind: None,
-                error: None,
-                extraction_ms: started.elapsed().as_millis() as u64,
+            let ocr_needed =
+                meta_bool(&doc.extraction_metadata, "content_extraction", "ocr_needed")
+                    || meta_bool(
+                        &doc.extraction_metadata,
+                        "content_extraction",
+                        "requires_full_pdf_ocr",
+                    );
+            if ocr_needed && Path::new(path).extension().is_some_and(|ext| ext == "pdf") {
+                if let Ok(ocr_doc) = external_pdf_ocr(Path::new(path)) {
+                    return doc_out_from_extracted(path, ocr_doc, started);
+                }
             }
+            doc_out_from_extracted(path, doc, started)
         }
         Err(e) => {
+            if let Ok(doc) = external_extract(Path::new(path)) {
+                return doc_out_from_extracted(path, doc, started);
+            }
             let failure = classify_extraction_failure(&e);
             let ocr_needed = failure
                 .fallback_kind
@@ -121,6 +151,7 @@ fn extract_one(path: &str) -> DocOut {
                 language_confidence: None,
                 mime_type: None,
                 extraction_method: None,
+                extraction_metadata: None,
                 ocr_needed,
                 ocr_reason: None,
                 fallback_kind: failure.fallback_kind,
@@ -129,6 +160,259 @@ fn extract_one(path: &str) -> DocOut {
             }
         }
     }
+}
+
+fn external_extract(path: &Path) -> Result<ExtractedDocument> {
+    let extension = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    match extension.as_str() {
+        "mobi" | "azw" | "azw3" => external_ebook_convert(path, &extension),
+        "djvu" | "djv" => external_djvu(path),
+        "rtf" => external_rtf(path),
+        "ppt" => external_ppt(path),
+        "png" | "jpg" | "jpeg" | "gif" | "bmp" | "tif" | "tiff" => {
+            external_image_ocr(path, &extension)
+        }
+        "pdf" => external_pdf_ocr(path),
+        _ => bail!("no bounded native external lane for extension {extension:?}"),
+    }
+}
+
+fn external_text_document(
+    path: &Path,
+    content: String,
+    source_format: &str,
+    extraction_method: &str,
+) -> Result<ExtractedDocument> {
+    if content.trim().is_empty() {
+        bail!(
+            "{extraction_method} produced no text for {}",
+            path.display()
+        );
+    }
+    let mut document = extract_bytes(
+        content.as_bytes(),
+        ExtractOptions {
+            mime_type: Some("text/plain"),
+            source_path: Some("external.txt"),
+            kind: HtmlKind::Auto,
+        },
+    )?;
+    document.source_format = source_format.to_string();
+    document.title = path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default()
+        .to_string();
+    document.extraction_metadata["content_extraction"]["source_format"] =
+        Value::String(source_format.to_string());
+    document.extraction_metadata["content_extraction"]["extraction_method"] =
+        Value::String(extraction_method.to_string());
+    document.extraction_metadata["content_extraction"]["external_command_bounded"] =
+        Value::Bool(true);
+    document.extraction_metadata["content_extraction"]["original_bucket_path"] =
+        Value::String(path.display().to_string());
+    Ok(document)
+}
+
+fn external_ebook_convert(path: &Path, source_format: &str) -> Result<ExtractedDocument> {
+    let temp = tempdir().context("creating ebook conversion directory")?;
+    let output = temp.path().join("output.txt");
+    run_program(
+        "ebook-convert",
+        vec![
+            path.as_os_str().to_owned(),
+            output.as_os_str().to_owned(),
+            OsString::from("--txt-output-encoding=utf-8"),
+        ],
+        Duration::from_secs(180),
+    )?;
+    external_text_document(
+        path,
+        read_file_limited(&output)?,
+        source_format,
+        "ebook-convert",
+    )
+}
+
+fn external_djvu(path: &Path) -> Result<ExtractedDocument> {
+    match run_program(
+        "djvutxt",
+        vec![path.as_os_str().to_owned()],
+        Duration::from_secs(180),
+    ) {
+        Ok(output) if !output.trim().is_empty() => {
+            external_text_document(path, output, "djvu", "djvutxt")
+        }
+        _ => external_ebook_convert(path, "djvu"),
+    }
+}
+
+fn external_rtf(path: &Path) -> Result<ExtractedDocument> {
+    let textutil = run_program(
+        "textutil",
+        vec![
+            OsString::from("-convert"),
+            OsString::from("txt"),
+            OsString::from("-stdout"),
+            path.as_os_str().to_owned(),
+        ],
+        Duration::from_secs(120),
+    );
+    let (content, method) = match textutil {
+        Ok(content) if !content.trim().is_empty() => (content, "textutil"),
+        _ => (
+            run_program(
+                "unrtf",
+                vec![OsString::from("--text"), path.as_os_str().to_owned()],
+                Duration::from_secs(120),
+            )?,
+            "unrtf",
+        ),
+    };
+    external_text_document(path, content, "rtf", method)
+}
+
+fn external_ppt(path: &Path) -> Result<ExtractedDocument> {
+    let content = run_program(
+        "strings",
+        vec![
+            OsString::from("-a"),
+            OsString::from("-n"),
+            OsString::from("4"),
+            path.as_os_str().to_owned(),
+        ],
+        Duration::from_secs(120),
+    )?;
+    external_text_document(path, content, "ppt", "strings")
+}
+
+fn external_image_ocr(path: &Path, source_format: &str) -> Result<ExtractedDocument> {
+    let temp = tempdir().context("creating image OCR directory")?;
+    let output = temp.path().join("output.txt");
+    let textra = run_program(
+        "textra",
+        vec![
+            path.as_os_str().to_owned(),
+            OsString::from("-o"),
+            output.as_os_str().to_owned(),
+        ],
+        Duration::from_secs(180),
+    );
+    if textra.is_ok() && output.is_file() {
+        let content = read_file_limited(&output)?;
+        if !content.trim().is_empty() {
+            return external_text_document(path, content, source_format, "textra_ocr");
+        }
+    }
+    let content = run_program(
+        "tesseract",
+        vec![
+            path.as_os_str().to_owned(),
+            OsString::from("stdout"),
+            OsString::from("-l"),
+            OsString::from("eng"),
+            OsString::from("--psm"),
+            OsString::from("6"),
+        ],
+        Duration::from_secs(180),
+    )?;
+    external_text_document(path, content, source_format, "tesseract_ocr")
+}
+
+fn external_pdf_ocr(path: &Path) -> Result<ExtractedDocument> {
+    let temp = tempdir().context("creating PDF OCR directory")?;
+    let mut last_error = None;
+    for (index, language) in ["chi_sim+eng", "eng"].into_iter().enumerate() {
+        let output = temp.path().join(format!("ocr-{index}.pdf"));
+        match run_program(
+            "ocrmypdf",
+            vec![
+                OsString::from("-l"),
+                OsString::from(language),
+                OsString::from("--force-ocr"),
+                OsString::from("--output-type"),
+                OsString::from("pdf"),
+                path.as_os_str().to_owned(),
+                output.as_os_str().to_owned(),
+            ],
+            Duration::from_secs(1800),
+        ) {
+            Ok(_) if output.is_file() => {
+                let mut document = extract_file(
+                    &output,
+                    ExtractOptions {
+                        mime_type: Some("application/pdf"),
+                        source_path: output.to_str(),
+                        kind: HtmlKind::Auto,
+                    },
+                )?;
+                document.source_format = "pdf".to_string();
+                document.extraction_metadata["content_extraction"]["extraction_method"] =
+                    Value::String("ocrmypdf".to_string());
+                document.extraction_metadata["content_extraction"]["ocr_applied"] =
+                    Value::Bool(true);
+                document.extraction_metadata["content_extraction"]["ocr_needed"] =
+                    Value::Bool(false);
+                document.extraction_metadata["content_extraction"]["requires_full_pdf_ocr"] =
+                    Value::Bool(false);
+                document.extraction_metadata["content_extraction"]["external_command_bounded"] =
+                    Value::Bool(true);
+                return Ok(document);
+            }
+            Ok(_) => last_error = Some(anyhow!("ocrmypdf produced no output")),
+            Err(error) => last_error = Some(error),
+        }
+    }
+    Err(last_error.unwrap_or_else(|| anyhow!("ocrmypdf failed")))
+}
+
+fn run_program(program: &str, args: Vec<OsString>, timeout: Duration) -> Result<String> {
+    let stdout = NamedTempFile::new().context("creating external stdout file")?;
+    let stderr = NamedTempFile::new().context("creating external stderr file")?;
+    let mut child = Command::new(program)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(stdout.reopen()?))
+        .stderr(Stdio::from(stderr.reopen()?))
+        .spawn()
+        .with_context(|| format!("starting external extractor {program}"))?;
+    let status = match child.wait_timeout(timeout)? {
+        Some(status) => status,
+        None => {
+            let _ = child.kill();
+            let _ = child.wait();
+            bail!("external extractor {program} timed out after {timeout:?}");
+        }
+    };
+    let stderr_text = read_file_limited(stderr.path()).unwrap_or_default();
+    if !status.success() {
+        bail!(
+            "external extractor {program} exited with {status}: {}",
+            stderr_text.trim()
+        );
+    }
+    read_file_limited(stdout.path())
+}
+
+fn read_file_limited(path: &Path) -> Result<String> {
+    let size = fs::metadata(path)
+        .with_context(|| format!("reading external output metadata {}", path.display()))?
+        .len();
+    if size > MAX_EXTERNAL_OUTPUT_BYTES {
+        bail!(
+            "external output {} is {} bytes; limit is {}",
+            path.display(),
+            size,
+            MAX_EXTERNAL_OUTPUT_BYTES
+        );
+    }
+    let bytes =
+        fs::read(path).with_context(|| format!("reading external output {}", path.display()))?;
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 
 /// Build a `status=failed` result for a path (used when extraction panics).
@@ -144,6 +428,7 @@ fn failed_doc(path: &str, error: String) -> DocOut {
         language_confidence: None,
         mime_type: None,
         extraction_method: None,
+        extraction_metadata: None,
         ocr_needed: false,
         ocr_reason: None,
         fallback_kind: None,

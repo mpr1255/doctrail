@@ -159,7 +159,7 @@ def get_unsupported_file_error(file_path: str) -> str:
         '.mobi': 'MOBI files are not supported. Please convert to PDF or TXT first.',
         '.azw': 'AZW files are not supported. Please convert to PDF or TXT first.',
         '.azw3': 'AZW3 files are not supported. Please convert to PDF or TXT first.',
-        '.ppt': 'Legacy PowerPoint extraction failed. Install LibreOffice (`soffice`) to ingest .ppt files.',
+        '.ppt': 'Legacy PowerPoint extraction failed. Install the `strings` command to ingest .ppt files.',
         '.pptx': 'PowerPoint extraction failed. The file may be corrupted or missing python-pptx.',
         '.xls': 'Legacy Excel extraction failed. Install xlrd or LibreOffice (`soffice`) to ingest .xls files.',
         '.xlsx': 'Excel extraction failed. The file may be corrupted or missing openpyxl.',

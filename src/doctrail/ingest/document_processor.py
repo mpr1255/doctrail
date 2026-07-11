@@ -763,7 +763,12 @@ def _try_ocr_image_with_textra(file_path: str, file_sha1: str) -> Optional[str]:
     try:
         out_dir.mkdir(exist_ok=True, parents=True)
         out_txt = out_dir / "output.txt"
-        res = subprocess.run(['textra', str(file_path), '-o', str(out_txt)], capture_output=True, text=True)
+        res = subprocess.run(
+            ['textra', str(file_path), '-o', str(out_txt)],
+            capture_output=True,
+            text=True,
+            timeout=180,
+        )
         if res.returncode != 0:
             logger.warning(f"Textra failed on image: {res.stderr}")
             return None

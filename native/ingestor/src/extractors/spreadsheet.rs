@@ -84,6 +84,7 @@ fn extract_workbook_bytes(
     let sheet_names = workbook.sheet_names();
     let mut content = String::new();
     let mut sheets = Map::new();
+    let mut structured_sheets = Vec::new();
     let mut total_rows = 0usize;
     let mut max_columns = 0usize;
 
@@ -92,9 +93,9 @@ fn extract_workbook_bytes(
             .worksheet_range(sheet_name)
             .with_context(|| format!("reading worksheet {sheet_name:?}"))?;
         let table = table_from_range(&range);
-        let rendered_table = format_table(&table.headers, &table.rows);
+        let rendered_table = render_structured_sheet(sheet_name, &table.headers, &table.rows);
+        let normalized_rows = table.all_rows();
 
-        content.push_str(&format!("--- Sheet: {sheet_name} ---\n"));
         if !rendered_table.is_empty() {
             content.push_str(&rendered_table);
             content.push('\n');
@@ -111,6 +112,12 @@ fn extract_workbook_bytes(
                 "column_names": table.headers,
             }),
         );
+        structured_sheets.push(json!({
+            "sheet_name": sheet_name,
+            "rows": normalized_rows,
+            "csv": rows_to_csv(&table.all_rows()),
+            "text": render_structured_sheet(sheet_name, &table.headers, &table.rows),
+        }));
     }
     let sheet_duration = sheet_started_at.elapsed();
 
@@ -137,6 +144,10 @@ fn extract_workbook_bytes(
     metadata.insert("row_count".to_string(), json!(total_rows));
     metadata.insert("column_count".to_string(), json!(max_columns));
     metadata.insert("sheets".to_string(), Value::Object(sheets));
+    metadata.insert(
+        "structured_sheets".to_string(),
+        Value::Array(structured_sheets),
+    );
     metadata.insert("timing_ms".to_string(), Value::Object(timing_ms.clone()));
     if openxml_preflight.scanned_sheets > 0 {
         metadata.insert(
@@ -171,8 +182,12 @@ fn extract_csv_bytes(
     let decode_started_at = Instant::now();
     let decoded = decode_csv_bytes(bytes);
     let decode_duration = decode_started_at.elapsed();
+    let delimiter = detect_delimiter(&decoded.text, source_format);
+    let rows = parse_delimited_rows(&decoded.text, delimiter)?;
+    let sheet_name = title_from_source_path(source_path).unwrap_or_else(|| "Sheet1".to_string());
+    let structured_text = render_rows_as_sheet(&sheet_name, &rows);
     let content_truncated =
-        decoded.input_truncated || decoded.text.chars().count() > MAX_CONTENT_CHARS;
+        decoded.input_truncated || structured_text.chars().count() > MAX_CONTENT_CHARS;
 
     let mut timing_ms = Map::new();
     timing_ms.insert(
@@ -204,6 +219,26 @@ fn extract_csv_bytes(
     }
     metadata.insert("content_truncated".to_string(), json!(content_truncated));
     metadata.insert(
+        "delimiter".to_string(),
+        json!((delimiter as char).to_string()),
+    );
+    metadata.insert("row_count".to_string(), json!(rows.len()));
+    metadata.insert(
+        "column_count".to_string(),
+        json!(rows.iter().map(Vec::len).max().unwrap_or(0)),
+    );
+    metadata.insert(
+        "structured_sheets".to_string(),
+        json!([{
+            "sheet_name": sheet_name,
+            "rows": rows,
+            "csv": rows_to_csv(&rows),
+            "text": structured_text,
+            "delimiter": (delimiter as char).to_string(),
+            "source_format": source_format,
+        }]),
+    );
+    metadata.insert(
         "content_truncation_limit_chars".to_string(),
         json!(MAX_CONTENT_CHARS),
     );
@@ -218,7 +253,7 @@ fn extract_csv_bytes(
     build_document(
         source_format,
         title_from_source_path(source_path),
-        decoded.text,
+        structured_text,
         metadata,
         timing_ms,
         Some(decoded.encoding),
@@ -784,6 +819,84 @@ impl Table {
             .max()
             .unwrap_or(0)
     }
+
+    fn all_rows(&self) -> Vec<Vec<String>> {
+        std::iter::once(self.headers.clone())
+            .chain(self.rows.clone())
+            .filter(|row| !row.is_empty())
+            .collect()
+    }
+}
+
+fn detect_delimiter(text: &str, source_format: &str) -> u8 {
+    let fallback = if source_format == "tsv" { b'\t' } else { b',' };
+    let sample = text.lines().take(20).collect::<Vec<_>>().join("\n");
+    [b',', b';', b'\t', b'|']
+        .into_iter()
+        .max_by_key(|delimiter| {
+            sample
+                .as_bytes()
+                .iter()
+                .filter(|byte| *byte == delimiter)
+                .count()
+        })
+        .filter(|delimiter| sample.as_bytes().contains(delimiter))
+        .unwrap_or(fallback)
+}
+
+fn parse_delimited_rows(text: &str, delimiter: u8) -> Result<Vec<Vec<String>>> {
+    let mut reader = csv::ReaderBuilder::new()
+        .has_headers(false)
+        .flexible(true)
+        .delimiter(delimiter)
+        .from_reader(text.as_bytes());
+    let mut rows = Vec::new();
+    for record in reader.records() {
+        let mut row = record
+            .context("parsing delimited spreadsheet row")?
+            .iter()
+            .map(|cell| cell.trim().to_string())
+            .collect::<Vec<_>>();
+        trim_trailing_empty_cells(&mut row);
+        if row.iter().any(|cell| !cell.is_empty()) {
+            rows.push(row);
+        }
+    }
+    Ok(rows)
+}
+
+fn rows_to_csv(rows: &[Vec<String>]) -> String {
+    let mut writer = csv::Writer::from_writer(Vec::new());
+    for row in rows {
+        if writer.write_record(row).is_err() {
+            return String::new();
+        }
+    }
+    match writer.into_inner() {
+        Ok(bytes) => String::from_utf8(bytes).unwrap_or_default(),
+        Err(_) => String::new(),
+    }
+}
+
+fn render_structured_sheet(sheet_name: &str, headers: &[String], rows: &[Vec<String>]) -> String {
+    let rendered = std::iter::once(headers)
+        .chain(rows.iter().map(Vec::as_slice))
+        .filter(|row| !row.is_empty())
+        .map(|row| row.join(" | "))
+        .collect::<Vec<_>>()
+        .join("\n");
+    if rendered.trim().is_empty() {
+        String::new()
+    } else {
+        format!("Sheet: {sheet_name}\n{rendered}")
+    }
+}
+
+fn render_rows_as_sheet(sheet_name: &str, rows: &[Vec<String>]) -> String {
+    let Some((headers, body)) = rows.split_first() else {
+        return String::new();
+    };
+    render_structured_sheet(sheet_name, headers, body)
 }
 
 fn table_from_range(range: &Range<Data>) -> Table {
@@ -853,53 +966,6 @@ fn decode_csv_bytes(bytes: &[u8]) -> DecodedCsv {
         decoded_bytes,
         input_truncated,
     }
-}
-
-fn format_table(headers: &[String], rows: &[Vec<String>]) -> String {
-    let column_count = rows
-        .iter()
-        .map(Vec::len)
-        .chain(std::iter::once(headers.len()))
-        .max()
-        .unwrap_or(0);
-
-    if column_count == 0 {
-        return String::new();
-    }
-
-    let mut widths = vec![0usize; column_count];
-    for (index, header) in headers.iter().enumerate() {
-        widths[index] = widths[index].max(display_width(header));
-    }
-    for row in rows {
-        for (index, cell) in row.iter().enumerate() {
-            widths[index] = widths[index].max(display_width(cell));
-        }
-    }
-
-    let mut lines = Vec::new();
-    lines.push(format_row(headers, &widths));
-    for row in rows {
-        lines.push(format_row(row, &widths));
-    }
-    lines.join("\n")
-}
-
-fn format_row(row: &[String], widths: &[usize]) -> String {
-    widths
-        .iter()
-        .enumerate()
-        .map(|(index, width)| {
-            let cell = row.get(index).map(String::as_str).unwrap_or("");
-            let padding = width.saturating_sub(display_width(cell));
-            format!("{}{}", " ".repeat(padding), cell)
-        })
-        .collect::<Vec<_>>()
-        .join("  ")
-}
-
-fn display_width(value: &str) -> usize {
-    value.chars().count()
 }
 
 fn trim_trailing_empty_cells(row: &mut Vec<String>) {
@@ -1002,9 +1068,12 @@ mod tests {
 
         assert_eq!(extracted.source_format, "csv");
         assert_eq!(extracted.title, "sample");
-        assert!(extracted.content.contains("Name,Age,Email"));
+        assert!(extracted.content.contains("Name | Age | Email"));
         assert!(extracted.content.contains("John Doe"));
-        assert!(extracted.extraction_metadata["content_extraction"]["row_count"].is_null());
+        assert_eq!(
+            extracted.extraction_metadata["content_extraction"]["row_count"],
+            json!(2)
+        );
         assert_eq!(
             extracted.extraction_metadata["content_extraction"]["content_truncated"],
             json!(false)
@@ -1023,8 +1092,8 @@ mod tests {
 
         assert_eq!(extracted.source_format, "xlsx");
         assert_eq!(extracted.title, "sample");
-        assert!(extracted.content.contains("--- Sheet: Employees ---"));
-        assert!(extracted.content.contains("--- Sheet: Products ---"));
+        assert!(extracted.content.contains("Sheet: Employees"));
+        assert!(extracted.content.contains("Sheet: Products"));
         assert!(extracted.content.contains("Bob Johnson"));
         assert!(extracted.content.contains("Widget C"));
         assert_eq!(
@@ -1082,14 +1151,17 @@ mod tests {
     }
 
     #[test]
-    fn csv_is_plain_text_not_table_parsed() {
+    fn csv_is_structurally_parsed_with_detected_delimiter() {
         let bytes = b"Name;Age;Email\nAda;36;ada@example.test\n";
         let extracted = extract_spreadsheet_bytes(bytes, Some("semicolon.csv"), Some("text/csv"))
             .expect("semicolon CSV should extract");
 
-        assert!(extracted.content.contains("Name;Age;Email"));
-        assert!(extracted.content.contains("Ada;36;ada@example.test"));
-        assert!(extracted.extraction_metadata["content_extraction"]["delimiter"].is_null());
+        assert!(extracted.content.contains("Name | Age | Email"));
+        assert!(extracted.content.contains("Ada | 36 | ada@example.test"));
+        assert_eq!(
+            extracted.extraction_metadata["content_extraction"]["delimiter"],
+            json!(";")
+        );
     }
 
     #[test]
