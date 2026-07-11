@@ -68,6 +68,7 @@ SUPPORTED_EXTENSION_FAMILIES: Dict[str, Tuple[str, ...]] = {
     "mhtml": (".mhtml", ".mht"),
     "html": (".html", ".htm"),
     "image_ocr": (".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tiff", ".tif"),
+    "archive": (".zip",),
 }
 
 SUPPORTED_EXTENSIONS: Tuple[str, ...] = tuple(

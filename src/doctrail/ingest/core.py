@@ -11,6 +11,8 @@ import signal
 import hashlib
 import asyncio
 import logging
+import tempfile
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from datetime import datetime
@@ -33,6 +35,94 @@ from .manifest import load_manifest, get_file_metadata, find_manifest_in_directo
 
 # Initialize Rich console for pretty output
 console = Console()
+
+
+def _expand_zip_inputs(
+    paths: List[Path],
+) -> tuple[List[Path], Dict[str, str], Dict[str, Dict[str, Any]], Optional[tempfile.TemporaryDirectory]]:
+    """Expand ZIP inputs through Rust and return leaf paths plus provenance.
+
+    One temporary tree is owned by the caller for the duration of ingestion.
+    Nested ZIPs are expanded breadth-first with global entry and byte budgets so
+    individually valid inner archives cannot multiply into an aggregate bomb.
+    """
+    zip_paths = [path for path in paths if path.suffix.lower() == ".zip"]
+    if not zip_paths:
+        return paths, {}, {}, None
+
+    from . import native_extractor
+
+    if not native_extractor.available():
+        raise RuntimeError(
+            "ZIP ingestion requires the native Rust extension; run `make native`"
+        )
+
+    staging = tempfile.TemporaryDirectory(prefix="doctrail_zip_")
+    staging_root = Path(staging.name)
+    pending = deque()
+    leaves: List[Path] = []
+    logical_paths: Dict[str, str] = {}
+    archive_metadata: Dict[str, Dict[str, Any]] = {}
+    archive_index = 0
+    total_entries = 0
+    total_expanded_bytes = 0
+
+    for path in paths:
+        if path.suffix.lower() == ".zip":
+            pending.append((path, str(path), str(path), "", 1))
+        else:
+            leaves.append(path)
+
+    while pending:
+        archive_path, logical_archive, top_archive, member_prefix, depth = pending.popleft()
+        if depth > native_extractor.ZIP_MAX_NESTING_DEPTH:
+            raise RuntimeError(
+                f"ZIP nesting exceeds depth {native_extractor.ZIP_MAX_NESTING_DEPTH}: "
+                f"{logical_archive}"
+            )
+        destination = staging_root / f"archive-{archive_index:06}"
+        archive_index += 1
+        members = native_extractor.expand_zip(str(archive_path), str(destination))
+        total_entries += len(members)
+        total_expanded_bytes += sum(member["uncompressed_bytes"] for member in members)
+        if total_entries > native_extractor.ZIP_MAX_ENTRIES:
+            raise RuntimeError(
+                f"nested ZIPs expanded to {total_entries} entries, exceeding global limit "
+                f"{native_extractor.ZIP_MAX_ENTRIES}"
+            )
+        if total_expanded_bytes > native_extractor.ZIP_MAX_TOTAL_BYTES:
+            raise RuntimeError(
+                f"nested ZIPs expanded to {total_expanded_bytes} bytes, exceeding global limit "
+                f"{native_extractor.ZIP_MAX_TOTAL_BYTES}"
+            )
+
+        for member in members:
+            member_path = member["member_path"]
+            member_parts = Path(member_path).parts
+            if any(part.startswith(".") or part == "__MACOSX" for part in member_parts):
+                logger.debug(f"Skipping hidden ZIP member: {logical_archive}!/{member_path}")
+                continue
+            extracted_path = Path(member["path"])
+            member_chain = f"{member_prefix}!/{member_path}" if member_prefix else member_path
+            logical_path = f"{top_archive}!/{member_chain}"
+            if extracted_path.suffix.lower() == ".zip":
+                pending.append(
+                    (extracted_path, logical_path, top_archive, member_chain, depth + 1)
+                )
+                continue
+            leaves.append(extracted_path)
+            logical_paths[str(extracted_path)] = logical_path
+            archive_metadata[str(extracted_path)] = {
+                "archive_path": top_archive,
+                "archive_member_path": member_chain,
+                "archive_depth": depth,
+            }
+
+    logger.info(
+        f"Expanded {len(zip_paths)} ZIP input(s) into {len(logical_paths)} leaf file(s); "
+        f"{total_expanded_bytes} bytes staged"
+    )
+    return leaves, logical_paths, archive_metadata, staging
 
 
 def _default_worker_count() -> int:
@@ -362,6 +452,10 @@ async def process_ingest(
         if pre_hidden != len(all_files):
             logger.info(f"Skipped {pre_hidden - len(all_files)} file(s) inside hidden directories")
         logger.info(f"Found {len(all_files)} total files in {input_dir}")
+
+    all_files, archive_filepaths, archive_metadata, archive_staging = _expand_zip_inputs(all_files)
+    effective_override_filepaths = dict(override_filepaths or {})
+    effective_override_filepaths.update(archive_filepaths)
     
     # Apply include/exclude patterns
     if include_pattern or exclude_pattern:
@@ -544,7 +638,8 @@ async def process_ingest(
                 raw_metadata = dict(result['metadata'])
                 structured_sheets = raw_metadata.pop('_spreadsheet_sheets', None)
                 metadata = clean_metadata(raw_metadata)
-                manifest_metadata = get_file_metadata(str(file_path), manifest_data)
+                logical_file_path = effective_override_filepaths.get(str(file_path), str(file_path))
+                manifest_metadata = get_file_metadata(logical_file_path, manifest_data)
                 if manifest_metadata:
                     metadata.update(manifest_metadata)
                     logger.debug(f"Added {len(manifest_metadata)} fields from manifest for {file_path.name}")
@@ -556,9 +651,12 @@ async def process_ingest(
                 json_metadata_obj = _merge_ingest_json_metadata(json_metadata_obj, structured_sheets)
                 extracted_primary_fields = _extract_primary_fields(json_metadata_obj)
 
+                if str(file_path) in archive_metadata:
+                    metadata.update(archive_metadata[str(file_path)])
+
                 final_file_path = str(file_path)
-                if override_filepaths and str(file_path) in override_filepaths:
-                    final_file_path = override_filepaths[str(file_path)]
+                if str(file_path) in effective_override_filepaths:
+                    final_file_path = effective_override_filepaths[str(file_path)]
                     metadata['original_file_path'] = final_file_path
 
                 insert_document(
@@ -801,6 +899,9 @@ async def process_ingest(
             console.print(f"\n[dim]Log saved to: {log_path}[/dim]")
     except Exception as e:
         logger.warning(f"Could not write ingest log: {e}")
+
+    if archive_staging is not None:
+        archive_staging.cleanup()
 
     return {
         'status': 'success',

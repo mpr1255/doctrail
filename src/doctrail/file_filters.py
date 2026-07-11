@@ -63,7 +63,7 @@ def should_skip_file(file_path: str) -> bool:
         # Audio
         '.mp3', '.wav', '.flac', '.aac', '.ogg', '.wma', '.m4a', '.opus',
         # Archives
-        '.zip', '.rar', '.7z', '.tar', '.gz', '.bz2', '.xz', '.iso',
+        '.rar', '.7z', '.tar', '.gz', '.bz2', '.xz', '.iso',
         # Images (optional - uncomment if you want to skip)
         # '.jpg', '.jpeg', '.png', '.gif', '.bmp', '.svg', '.ico', '.webp',
         # Other

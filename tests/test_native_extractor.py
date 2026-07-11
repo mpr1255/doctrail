@@ -7,7 +7,10 @@ Rust path is active.
 """
 
 import json
+import io
 import sqlite3
+import zipfile
+from pathlib import Path
 
 import pytest
 
@@ -200,3 +203,55 @@ async def test_process_ingest_falls_back_whole_chunk_on_native_contract_error(
         ).fetchall()
     assert [row[0] for row in rows] == ["one.txt", "two.txt"]
     assert all(row[1] == "direct_text_read" for row in rows)
+
+
+def test_expand_zip_materializes_safe_members(tmp_path, native_enabled):
+    archive = tmp_path / "sample.zip"
+    with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("docs/one.txt", "first member")
+        zf.writestr("two.html", "<p>second member</p>")
+
+    members = native_extractor.expand_zip(str(archive), str(tmp_path / "expanded"))
+
+    assert [member["member_path"] for member in members] == ["docs/one.txt", "two.html"]
+    assert Path(members[0]["path"]).read_text(encoding="utf-8") == "first member"
+    assert members[1]["uncompressed_bytes"] == len("<p>second member</p>")
+
+
+@pytest.mark.asyncio
+async def test_process_ingest_expands_nested_zip_with_provenance(tmp_path, native_enabled):
+    inner_bytes = io.BytesIO()
+    with zipfile.ZipFile(inner_bytes, "w", compression=zipfile.ZIP_DEFLATED) as inner:
+        inner.writestr("nested/two.html", "<html><body><p>Nested Rust member.</p></body></html>")
+
+    source = tmp_path / "source"
+    source.mkdir()
+    archive = source / "bundle.zip"
+    with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as outer:
+        outer.writestr("docs/one.txt", "Top-level Rust member.")
+        outer.writestr("inner.zip", inner_bytes.getvalue())
+        outer.writestr("__MACOSX/._junk.txt", "metadata detritus")
+
+    db_path = tmp_path / "archive.sqlite"
+    result = await process_ingest(
+        db_path=str(db_path),
+        input_dir=str(source),
+        table="documents",
+        extractor="rust",
+        workers=2,
+        yes=True,
+    )
+
+    assert result["successful"] == 2
+    assert result["failed"] == 0
+    with sqlite3.connect(db_path) as conn:
+        rows = conn.execute(
+            "SELECT filepath, raw_content, metadata FROM documents ORDER BY filename"
+        ).fetchall()
+    assert len(rows) == 2
+    assert all("bundle.zip!/" in row[0] for row in rows)
+    assert any("Top-level Rust member" in row[1] for row in rows)
+    assert any("Nested Rust member" in row[1] for row in rows)
+    metadata = [json.loads(row[2]) for row in rows]
+    assert {item["archive_depth"] for item in metadata} == {"1", "2"}
+    assert any("inner.zip!/nested/two.html" in item["archive_member_path"] for item in metadata)

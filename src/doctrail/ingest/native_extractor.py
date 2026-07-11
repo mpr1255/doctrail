@@ -39,6 +39,11 @@ from typing import Any, Dict, List, Optional
 _native_module = None
 _native_loaded = False
 _VALID_STATUSES = {"extracted", "fallback_required", "failed", "skipped_unsupported"}
+ZIP_MAX_ENTRIES = 10_000
+ZIP_MAX_MEMBER_BYTES = 512 * 1024 * 1024
+ZIP_MAX_TOTAL_BYTES = 2 * 1024 * 1024 * 1024
+ZIP_MAX_COMPRESSION_RATIO = 200
+ZIP_MAX_NESTING_DEPTH = 3
 
 
 def _native():
@@ -80,6 +85,36 @@ def extract_batch(paths: List[str], threads: Optional[int] = None) -> List[Dict[
     docs = [json.loads(item) for item in raw]
     _validate_batch_contract(normalized_paths, docs)
     return docs
+
+
+def expand_zip(archive_path: str, destination: str) -> List[Dict[str, Any]]:
+    """Safely materialize a ZIP archive through the native extension."""
+    native = _native()
+    if native is None:
+        raise RuntimeError("ZIP ingestion requires doctrail._ingest_native")
+    if not hasattr(native, "expand_zip"):
+        raise RuntimeError(
+            "installed doctrail._ingest_native is stale; rebuild it with `make native`"
+        )
+    raw = native.expand_zip(
+        str(archive_path),
+        str(destination),
+        ZIP_MAX_ENTRIES,
+        ZIP_MAX_MEMBER_BYTES,
+        ZIP_MAX_TOTAL_BYTES,
+        ZIP_MAX_COMPRESSION_RATIO,
+    )
+    members = [json.loads(item) for item in raw]
+    for index, member in enumerate(members):
+        if not isinstance(member, dict):
+            raise RuntimeError(f"native ZIP member {index} is not an object")
+        if not isinstance(member.get("path"), str) or not isinstance(
+            member.get("member_path"), str
+        ):
+            raise RuntimeError(f"native ZIP member {index} has an invalid path contract")
+        if not isinstance(member.get("uncompressed_bytes"), int):
+            raise RuntimeError(f"native ZIP member {index} has an invalid size contract")
+    return members
 
 
 def _validate_batch_contract(paths: List[str], docs: List[Dict[str, Any]]) -> None:
