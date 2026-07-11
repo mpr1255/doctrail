@@ -1046,7 +1046,7 @@ Usage: doctrail ingest [OPTIONS]
   Ingest documents from local directories, Zotero, or plugins.
 
   Supported local file types: txt/md; csv/tsv; pdf; epub; mobi; doc; rtf; docx; xlsx; xls; pptx;
-  ppt; djvu; mhtml/mht; html/htm; png/jpg/jpeg/gif/bmp/tiff/tif.
+  ppt; djvu; mhtml/mht; html/htm; png/jpg/jpeg/gif/bmp/tiff/tif; zip.
 
   Examples:     doctrail ingest --input-dir ./docs --db-path ./data.db     doctrail ingest --zotero
   --collection "Papers" --db-path ./lit.db     doctrail ingest --plugin zotero --collection "My
@@ -1068,8 +1068,8 @@ Options:
                                   PDF extraction strategy
   --ocr-engine [auto|textra|ocrmypdf|mac-ocr]
                                   OCR backend when OCR is needed
-  --extractor [auto|rust|python]  Extraction engine: rust (native), python, or auto (rust if
-                                  installed)
+  --extractor [auto|rust|python]  Extraction engine: auto/rust requires native; python is the
+                                  explicit backup
   --readability                   Use readability for HTML
   --html-extractor [default|smart]
   --skip-garbage-check            Skip garbage detection
