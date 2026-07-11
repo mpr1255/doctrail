@@ -15,6 +15,7 @@ from pathlib import Path
 
 import pytest
 from openpyxl import Workbook
+from PIL import Image, ImageDraw, ImageFont
 
 from doctrail.ingest import native_extractor
 from doctrail.ingest.core import process_ingest
@@ -143,6 +144,25 @@ def test_sparse_xlsx_with_bounded_dimension_stays_native(tmp_path, native_enable
     assert doc["status"] == "extracted"
     assert doc["source_format"] == "xlsx"
     assert "bounded spreadsheet fallback" in doc["content"]
+
+
+def test_scanned_pdf_uses_textra_before_ocrmypdf(tmp_path, native_enabled):
+    if shutil.which("textra") is None:
+        pytest.skip("Textra is not installed")
+
+    image = Image.new("RGB", (1600, 500), "white")
+    draw = ImageDraw.Draw(image)
+    font = ImageFont.truetype("/System/Library/Fonts/Helvetica.ttc", 110)
+    draw.text((80, 160), "DOCTRAIL TEXTRA PDF", fill="black", font=font)
+    scanned_pdf = tmp_path / "scanned.pdf"
+    image.save(scanned_pdf, "PDF", resolution=150)
+
+    doc = native_extractor.extract_batch([str(scanned_pdf)], 1)[0]
+
+    assert doc["status"] == "extracted"
+    assert doc["source_format"] == "pdf"
+    assert doc["extraction_method"] == "textra_ocr"
+    assert "DOCTRAIL" in doc["content"].upper()
 
 
 @pytest.mark.parametrize(

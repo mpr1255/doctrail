@@ -325,6 +325,23 @@ fn external_image_ocr(path: &Path, source_format: &str) -> Result<ExtractedDocum
 
 fn external_pdf_ocr(path: &Path) -> Result<ExtractedDocument> {
     let temp = tempdir().context("creating PDF OCR directory")?;
+    let textra_output = temp.path().join("textra.txt");
+    let textra = run_program(
+        "textra",
+        vec![
+            path.as_os_str().to_owned(),
+            OsString::from("-o"),
+            textra_output.as_os_str().to_owned(),
+        ],
+        Duration::from_secs(1800),
+    );
+    if textra.is_ok() && textra_output.is_file() {
+        let content = read_file_limited(&textra_output)?;
+        if !content.trim().is_empty() {
+            return external_text_document(path, content, "pdf", "textra_ocr");
+        }
+    }
+
     let mut last_error = None;
     for (index, language) in ["chi_sim+eng", "eng"].into_iter().enumerate() {
         let output = temp.path().join(format!("ocr-{index}.pdf"));
