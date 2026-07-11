@@ -253,6 +253,26 @@ async def test_process_ingest_records_whole_chunk_failure_without_python_fallbac
     assert table_exists == 0
 
 
+@pytest.mark.asyncio
+async def test_auto_mode_fails_closed_when_native_extension_is_unavailable(
+    tmp_path, native_enabled, monkeypatch
+):
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "document.txt").write_text("must not use Python implicitly", encoding="utf-8")
+    monkeypatch.setattr(native_extractor, "available", lambda: False)
+
+    with pytest.raises(RuntimeError, match="Native extraction is required"):
+        await process_ingest(
+            db_path=str(tmp_path / "closed.sqlite"),
+            input_dir=str(source),
+            table="documents",
+            extractor="auto",
+            workers=1,
+            yes=True,
+        )
+
+
 def test_expand_zip_materializes_safe_members(tmp_path, native_enabled):
     archive = tmp_path / "sample.zip"
     with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as zf:
