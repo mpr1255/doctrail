@@ -126,7 +126,7 @@ async def test_mac_ocr_service_uses_configured_funnel_reservation(monkeypatch, t
     second = "https://ocr-two.example/funnel"
     monkeypatch.setenv("MAC_OCR__SERVICE_ENDPOINTS", f"{first},{second}")
     image_path = tmp_path / "page.png"
-    image_path.write_bytes(b"image bytes")
+    image_path.write_bytes(b"x")
 
     respx.post(f"{first}/reserve").mock(return_value=Response(503))
     respx.post(f"{second}/reserve").mock(
@@ -163,6 +163,31 @@ async def test_mac_ocr_service_normalizes_misnamed_image_to_png(monkeypatch, tmp
     body = upload.calls[0].request.content
     assert b'filename="thumbnail.png"' in body
     assert b"\x89PNG\r\n\x1a\n" in body
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_mac_ocr_service_prefers_sha_assigned_node(monkeypatch, tmp_path):
+    first = "https://ocr-one.example/funnel"
+    second = "https://ocr-two.example/funnel"
+    monkeypatch.setenv("MAC_OCR__SERVICE_ENDPOINTS", f"{first},{second}")
+    image_path = tmp_path / "page.png"
+    image_path.write_bytes(b"image bytes")  # SHA-1 modulo two selects `second`.
+
+    first_reserve = respx.post(f"{first}/reserve").mock(
+        return_value=Response(201, json={"reservation_id": "wrong-node"})
+    )
+    respx.post(f"{second}/reserve").mock(
+        return_value=Response(201, json={"reservation_id": "assigned-node"})
+    )
+    respx.post(f"{second}/ocr", params={"reservation_id": "assigned-node"}).mock(
+        return_value=Response(200, json={"text": "Cached OCR text"})
+    )
+
+    text = await _ocr_with_mac_ocr_service(str(image_path))
+
+    assert text == "Cached OCR text"
+    assert not first_reserve.called
 
 
 @pytest.mark.asyncio

@@ -6,6 +6,7 @@ extraction from various file types.
 """
 
 import os
+import hashlib
 import importlib.util
 import asyncio
 import subprocess
@@ -316,11 +317,15 @@ async def _ocr_with_mac_ocr_service(file_path: str) -> str:
         else httpx.Timeout(None, connect=10.0)
     )
     upload_path, upload_name, temporary_upload = _mac_ocr_upload(file_path)
+    with upload_path.open("rb") as upload_handle:
+        upload_sha1 = hashlib.file_digest(upload_handle, "sha1").hexdigest()
+    preferred_index = int(upload_sha1, 16) % len(endpoints)
+    ordered_endpoints = endpoints[preferred_index:] + endpoints[:preferred_index]
 
     try:
         async with httpx.AsyncClient(timeout=timeout) as client:
             while deadline is None or time.monotonic() < deadline:
-                for endpoint in endpoints:
+                for endpoint in ordered_endpoints:
                     try:
                         response = await client.post(f"{endpoint}/reserve", timeout=10.0)
                         if response.status_code != 201:
