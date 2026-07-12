@@ -224,7 +224,7 @@ def test_ingest_wal_allows_writer_while_reader_holds_snapshot(tmp_path):
         assert fresh_reader.execute("SELECT COUNT(*) FROM documents").fetchone()[0] == 2
 
 
-def test_ingest_retries_transient_writer_lock(tmp_path, monkeypatch):
+def test_ingest_waits_until_writer_lock_is_released(tmp_path, monkeypatch):
     from doctrail.ingest.database import configure_ingest_database, insert_document
 
     monkeypatch.setenv("DOCTRAIL_SQLITE_BUSY_TIMEOUT_MS", "20")
@@ -258,7 +258,9 @@ def test_ingest_retries_transient_writer_lock(tmp_path, monkeypatch):
     worker = threading.Thread(target=write_after_lock)
     worker.start()
     assert started.wait(timeout=2)
-    time.sleep(0.15)
+    # This is longer than the former bounded retry budget. Ingest must keep
+    # waiting instead of failing and abandoning the remainder of the corpus.
+    time.sleep(1.25)
     holder.rollback()
     holder.close()
     worker.join(timeout=5)

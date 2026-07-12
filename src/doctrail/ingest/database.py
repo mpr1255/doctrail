@@ -21,8 +21,9 @@ from .text_processing import sanitize_text_for_storage
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_BUSY_TIMEOUT_MS = 30_000
-INSERT_LOCK_ATTEMPTS = 5
+DEFAULT_BUSY_TIMEOUT_MS = 1_000
+INSERT_LOCK_RETRY_DELAY_SECONDS = 0.5
+INSERT_LOCK_LOG_INTERVAL_SECONDS = 30.0
 
 
 def _sanitize_storage_value(value):
@@ -101,9 +102,10 @@ def insert_document(
 ):
     """Insert or replace one ingested document.
 
-    WAL busy waits and bounded lock retries protect the single writer from
-    transient reader/checkpoint contention. The `sha1` primary key gives
-    replace semantics when overwrite is enabled.
+    WAL busy waits and interruptible lock retries protect the single writer
+    from transient or long-running contention. A writer lock pauses this
+    insert until SQLite becomes available; Ctrl-C still interrupts the wait.
+    The `sha1` primary key gives replace semantics when overwrite is enabled.
 
     labels: optional list of labels to store as JSON array in 'labels' column
     json_metadata: optional dict to store as JSON in 'json_metadata' column
@@ -128,7 +130,9 @@ def insert_document(
         if key in important_fields and value is not None
     }
 
-    for attempt in range(1, INSERT_LOCK_ATTEMPTS + 1):
+    lock_wait_started = None
+    next_lock_log = None
+    while True:
         try:
             with db.conn:
                 existing = (
@@ -175,19 +179,29 @@ def insert_document(
         except sqlite3.OperationalError as exc:
             message = str(exc).lower()
             is_lock_error = "locked" in message or "busy" in message
-            if not is_lock_error or attempt == INSERT_LOCK_ATTEMPTS:
+            if not is_lock_error:
                 logger.error(f"Error inserting document {sha1}: {exc}")
                 raise
             try:
                 db.conn.rollback()
             except sqlite3.Error:
                 pass
-            delay = 0.05 * (2 ** (attempt - 1))
-            logger.warning(
-                f"SQLite was busy inserting {sha1}; retrying "
-                f"({attempt}/{INSERT_LOCK_ATTEMPTS}) in {delay:.2f}s"
-            )
-            time.sleep(delay)
+            now = time.monotonic()
+            if lock_wait_started is None:
+                lock_wait_started = now
+                next_lock_log = now + INSERT_LOCK_LOG_INTERVAL_SECONDS
+                logger.warning(
+                    f"SQLite is locked while inserting {sha1}; pausing until "
+                    "the database writer is available (Ctrl-C to stop)"
+                )
+            elif next_lock_log is not None and now >= next_lock_log:
+                waited = now - lock_wait_started
+                logger.warning(
+                    f"Still waiting for SQLite writer lock while inserting "
+                    f"{sha1} ({waited:.0f}s elapsed)"
+                )
+                next_lock_log = now + INSERT_LOCK_LOG_INTERVAL_SECONDS
+            time.sleep(INSERT_LOCK_RETRY_DELAY_SECONDS)
         except Exception as exc:
             logger.error(f"Error inserting document {sha1}: {exc}")
             raise
