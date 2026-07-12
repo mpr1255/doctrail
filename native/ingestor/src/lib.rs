@@ -1802,7 +1802,7 @@ fn extract_by_kind(
             } else {
                 options.mime_type
             };
-            let document = extractors::text::extract_text_bytes(
+            let mut document = extractors::text::extract_text_bytes(
                 text_bytes,
                 options.source_path,
                 text_mime,
@@ -1820,10 +1820,58 @@ fn extract_by_kind(
                                 && !matches!(*character, '\n' | '\r' | '\t'))
                     })
                     .count();
-                if suspicious * 100 >= total {
+                if suspicious > 0 {
+                    let recovered = document
+                        .content
+                        .chars()
+                        .map(|character| {
+                            let codepoint = character as u32;
+                            if character == '\u{fffd}'
+                                || (0xe000..=0xf8ff).contains(&codepoint)
+                                || (character.is_control()
+                                    && !matches!(character, '\n' | '\r' | '\t'))
+                            {
+                                ' '
+                            } else {
+                                character
+                            }
+                        })
+                        .collect::<String>();
+                    let recovered = recovered
+                        .lines()
+                        .map(str::trim)
+                        .filter(|line| !line.is_empty())
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    let recovered_alphanumeric = recovered
+                        .chars()
+                        .filter(|character| character.is_alphanumeric())
+                        .count();
+                    if recovered_alphanumeric < MIN_CONTENT_LENGTH_TO_INDEX {
+                        anyhow::bail!(
+                            "corrupt null-padded legacy text: only \
+                             {recovered_alphanumeric} recoverable alphanumeric characters"
+                        );
+                    }
+                    document.content = recovered;
+                    document.content_length = document.content.chars().count();
+                    let language_report = detect_language(&document.content);
+                    document.language = language_report.language.clone();
+                    document.extraction_metadata["language_detection"] =
+                        language_detection_metadata(&language_report);
+                    document.extraction_metadata["content_extraction"]
+                        ["partial_legacy_recovery"] = json!(true);
+                    document.extraction_metadata["content_extraction"]
+                        ["discarded_suspicious_characters"] = json!(suspicious);
+                    document.extraction_metadata["content_extraction"]
+                        ["suspicious_character_ratio"] =
+                        json!(suspicious as f64 / total as f64);
+                    document.extraction_metadata["content_extraction"]["content_length"] =
+                        json!(document.content_length);
+                }
+                if document.content.trim().is_empty() {
                     anyhow::bail!(
-                        "corrupt null-padded legacy text: suspicious character ratio {:.2}%",
-                        suspicious as f64 * 100.0 / total as f64
+                        "corrupt null-padded legacy text: no recoverable document text"
                     );
                 }
             }
@@ -3697,6 +3745,39 @@ mod tests {
 
         assert_eq!(extracted.source_format, "text");
         assert!(extracted.content.contains("恢复出来的中文资料"));
+    }
+
+    #[test]
+    fn null_padded_legacy_text_keeps_clean_content_around_corrupt_bytes() {
+        let source = "这是一份从损坏磁盘恢复的中文资料，仍然包含可以搜索和阅读的正文。".repeat(30);
+        let (encoded, _, _) = GBK.encode(&source);
+        let mut padded = Vec::with_capacity(encoded.len() * 3 / 2);
+        for (index, chunk) in encoded.chunks(8).enumerate() {
+            padded.extend_from_slice(chunk);
+            padded.push(0);
+            if index % 5 == 0 {
+                padded.push(1);
+                padded.push(0);
+            }
+        }
+
+        let extracted = extract_bytes(
+            &padded,
+            ExtractOptions {
+                mime_type: None,
+                source_path: Some("recovered.doc"),
+                kind: HtmlKind::Auto,
+            },
+        )
+        .unwrap();
+
+        assert!(extracted.content.contains("损坏磁盘恢复"));
+        assert!(!extracted.content.contains('\u{1}'));
+        assert_eq!(
+            extracted.extraction_metadata["content_extraction"]
+                ["partial_legacy_recovery"],
+            json!(true)
+        );
     }
 
     #[test]
