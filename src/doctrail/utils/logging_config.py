@@ -8,6 +8,17 @@ from typing import Optional, Dict, Any
 from ..constants import LOG_FILE_PATH, LOG_FORMAT, LOG_DATE_FORMAT
 
 
+class _SuppressThirdPartyDebug(logging.Filter):
+    """Keep verbose Doctrail logs while discarding library implementation noise."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.name == "PIL" or record.name.startswith("PIL."):
+            return record.levelno >= logging.WARNING
+        if record.name == "asyncio" or record.name.startswith("asyncio."):
+            return record.levelno >= logging.WARNING
+        return True
+
+
 def setup_logging(verbose: bool = False, log_file: Optional[str] = None) -> None:
     """Configure logging for the entire application.
     
@@ -34,6 +45,7 @@ def setup_logging(verbose: bool = False, log_file: Optional[str] = None) -> None
     file_handler.setLevel(logging.DEBUG)
     file_formatter = logging.Formatter(LOG_FORMAT, datefmt=LOG_DATE_FORMAT)
     file_handler.setFormatter(file_formatter)
+    file_handler.addFilter(_SuppressThirdPartyDebug())
     root_logger.addHandler(file_handler)
     
     # Console handler - respects verbose flag
@@ -44,6 +56,7 @@ def setup_logging(verbose: bool = False, log_file: Optional[str] = None) -> None
         datefmt=LOG_DATE_FORMAT
     )
     console_handler.setFormatter(console_formatter)
+    console_handler.addFilter(_SuppressThirdPartyDebug())
     root_logger.addHandler(console_handler)
     
     # Suppress noisy libraries

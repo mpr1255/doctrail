@@ -424,6 +424,29 @@ def test_ingest_help():
     assert format_supported_extensions_for_help() in normalized_output
 
 
+def test_verbose_logging_filters_pillow_and_asyncio_debug(tmp_path, capsys):
+    import logging
+    from doctrail.utils.logging_config import setup_logging
+
+    log_path = tmp_path / "verbose.log"
+    setup_logging(verbose=True, log_file=str(log_path))
+
+    logging.getLogger("PIL.PngImagePlugin").setLevel(logging.DEBUG)
+    logging.getLogger("asyncio").setLevel(logging.DEBUG)
+    logging.getLogger("PIL.PngImagePlugin").debug("STREAM b'IDAT'")
+    logging.getLogger("asyncio").debug("Using selector: KqueueSelector")
+    logging.getLogger("doctrail.ingest.core").debug("useful ingest detail")
+
+    stderr = capsys.readouterr().err
+    file_log = log_path.read_text(encoding="utf-8")
+    assert "useful ingest detail" in stderr
+    assert "useful ingest detail" in file_log
+    assert "STREAM b'IDAT'" not in stderr
+    assert "STREAM b'IDAT'" not in file_log
+    assert "KqueueSelector" not in stderr
+    assert "KqueueSelector" not in file_log
+
+
 def test_ingest_defaults_to_cwd_doctrail_db(tmp_path):
     """Ingest should default to ./doctrail.db when no db-path is provided."""
     runner = CliRunner()
