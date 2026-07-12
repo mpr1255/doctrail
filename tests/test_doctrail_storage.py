@@ -249,7 +249,7 @@ def test_ingest_loads_simple_tokenizer_required_by_existing_fts(monkeypatch, tmp
             self.loaded.append(path)
 
     connection = Connection()
-    monkeypatch.setattr(ingest_database, "_simple_tokenizer_path", lambda: extension)
+    monkeypatch.setenv("DOCTRAIL_SQLITE_EXTENSIONS", str(extension))
 
     ingest_database._load_required_fts_extensions(connection)
 
@@ -271,13 +271,26 @@ def test_ingest_does_not_load_extension_for_builtin_fts(monkeypatch):
         def enable_load_extension(self, _enabled):
             raise AssertionError("builtin tokenizers must not load an extension")
 
-    monkeypatch.setattr(
-        ingest_database,
-        "_simple_tokenizer_path",
-        lambda: (_ for _ in ()).throw(AssertionError("path lookup must not run")),
-    )
+    monkeypatch.delenv("DOCTRAIL_SQLITE_EXTENSIONS", raising=False)
 
     ingest_database._load_required_fts_extensions(Connection())
+
+
+def test_ingest_requires_explicit_extension_for_custom_simple_fts(monkeypatch):
+    from doctrail.ingest import database as ingest_database
+
+    class Cursor:
+        def fetchall(self):
+            return [("CREATE VIRTUAL TABLE docs_fts USING fts5(text, tokenize='simple')",)]
+
+    class Connection:
+        def execute(self, _sql):
+            return Cursor()
+
+    monkeypatch.delenv("DOCTRAIL_SQLITE_EXTENSIONS", raising=False)
+
+    with pytest.raises(RuntimeError, match="--sqlite-extension"):
+        ingest_database._load_required_fts_extensions(Connection())
 
 
 def test_ingest_waits_until_writer_lock_is_released(tmp_path, monkeypatch):

@@ -115,6 +115,13 @@ def get_zotero_config(config_data: Optional[dict]) -> dict:
 @click.option('--skip-garbage-check', is_flag=True, help='Skip garbage detection')
 @click.option('--yes', '-y', is_flag=True, help='Skip prompts')
 @click.option('--fulltext', is_flag=True, help='Create FTS index')
+@click.option(
+    '--sqlite-extension',
+    'sqlite_extensions',
+    multiple=True,
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    help='SQLite extension to load for this ingest; may be repeated',
+)
 @click.option('--manifest', help='Path to manifest.json')
 @click.option('--zotero', is_flag=True, help='Zotero mode')
 @click.option('--collection', help='Zotero collection name')
@@ -149,6 +156,7 @@ def ingest(
     skip_garbage_check: bool,
     yes: bool,
     fulltext: bool,
+    sqlite_extensions: tuple[Path, ...],
     manifest: Optional[str],
     zotero: bool,
     collection: Optional[str],
@@ -170,6 +178,10 @@ def ingest(
         doctrail ingest --plugin zotero --collection "My Research"
     """
     skip_requirements = ctx.obj.get('skip_requirements', False) if ctx.obj else False
+    if sqlite_extensions:
+        os.environ["DOCTRAIL_SQLITE_EXTENSIONS"] = os.pathsep.join(
+            str(path.resolve()) for path in sqlite_extensions
+        )
     if not verify_dependencies(skip_requirements):
         ctx.exit(1)
 

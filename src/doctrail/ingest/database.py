@@ -27,34 +27,19 @@ INSERT_LOCK_RETRY_DELAY_SECONDS = 0.5
 INSERT_LOCK_LOG_INTERVAL_SECONDS = 30.0
 
 
-def _simple_tokenizer_path() -> Path:
-    configured = os.environ.get("DOCTRAIL_SQLITE_SIMPLE_EXTENSION")
-    candidates = []
-    if configured:
-        candidates.append(Path(configured).expanduser())
-
-    module_dir = Path(__file__).resolve().parent
-    candidates.extend(
-        [
-            module_dir / "libsimple.dylib",
-            module_dir / "libsimple.so",
-            Path.home() / ".claude/skills/sqlite-search/libsimple.dylib",
-            Path.home() / ".claude/skills/sqlite-search/libsimple.so",
-        ]
-    )
-    for candidate in candidates:
-        if candidate.is_file():
-            return candidate
-
-    raise RuntimeError(
-        "This database contains an FTS5 index using the custom simple tokenizer, "
-        "but its SQLite extension is unavailable. Set "
-        "DOCTRAIL_SQLITE_SIMPLE_EXTENSION to libsimple.dylib or libsimple.so."
-    )
+def _configured_sqlite_extensions() -> List[Path]:
+    raw = os.environ.get("DOCTRAIL_SQLITE_EXTENSIONS", "")
+    paths = [Path(value).expanduser() for value in raw.split(os.pathsep) if value]
+    missing = [str(path) for path in paths if not path.is_file()]
+    if missing:
+        raise RuntimeError(
+            "Configured SQLite extension does not exist: " + ", ".join(missing)
+        )
+    return paths
 
 
 def _load_required_fts_extensions(connection) -> None:
-    """Load connection-local extensions required by existing FTS tables."""
+    """Load explicitly configured extensions and validate existing FTS needs."""
     fts_definitions = connection.execute(
         "SELECT sql FROM sqlite_master "
         "WHERE type = 'table' AND sql LIKE '%USING fts5%'"
@@ -63,16 +48,27 @@ def _load_required_fts_extensions(connection) -> None:
         r"\btokenize\s*=\s*(['\"]?)simple(?:\s|['\"]|\))",
         re.IGNORECASE,
     )
-    if not any(simple_pattern.search(row[0] or "") for row in fts_definitions):
+    requires_simple = any(
+        simple_pattern.search(row[0] or "") for row in fts_definitions
+    )
+    extension_paths = _configured_sqlite_extensions()
+    if requires_simple and not extension_paths:
+        raise RuntimeError(
+            "This database contains an FTS5 index using the custom simple "
+            "tokenizer. Rerun with --sqlite-extension /path/to/libsimple.dylib "
+            "or set DOCTRAIL_SQLITE_EXTENSIONS."
+        )
+    if not extension_paths:
         return
 
-    extension_path = _simple_tokenizer_path()
     try:
         connection.enable_load_extension(True)
-        connection.load_extension(str(extension_path))
+        for extension_path in extension_paths:
+            connection.load_extension(str(extension_path))
     except (AttributeError, sqlite3.Error) as exc:
+        configured = ", ".join(str(path) for path in extension_paths)
         raise RuntimeError(
-            f"Could not load the SQLite simple tokenizer from {extension_path}: {exc}"
+            f"Could not load configured SQLite extension(s) {configured}: {exc}"
         ) from exc
     finally:
         try:
