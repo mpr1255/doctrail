@@ -522,3 +522,54 @@ async def test_process_ingest_skips_css_before_native_submission(
     assert result["successful"] == 1
     assert result["failed"] == 0
     assert submitted == [str(source / "document.txt")]
+
+
+@pytest.mark.asyncio
+async def test_native_ingest_defers_ocr_until_all_rust_batches_finish(
+    tmp_path, native_enabled, monkeypatch
+):
+    source = tmp_path / "source"
+    source.mkdir()
+    paths = []
+    for index in range(33):
+        path = source / f"document-{index:02}.txt"
+        path.write_text(f"document {index}", encoding="utf-8")
+        paths.append(path)
+
+    events = []
+
+    def fake_extract_batch(batch_paths, threads=None):
+        events.append("rust")
+        docs = []
+        for batch_path in batch_paths:
+            needs_ocr = batch_path == str(paths[0])
+            docs.append({
+                "path": batch_path,
+                "status": "fallback_required" if needs_ocr else "extracted",
+                "content": "" if needs_ocr else f"extracted {Path(batch_path).name}",
+                "source_format": "text",
+                "extraction_method": "text",
+                "extraction_ms": 1,
+                "ocr_needed": needs_ocr,
+                "ocr_reason": "test_ocr" if needs_ocr else None,
+            })
+        return docs
+
+    async def fake_ocr(path):
+        events.append("ocr")
+        return "queued OCR text"
+
+    monkeypatch.setattr(native_extractor, "extract_batch", fake_extract_batch)
+    monkeypatch.setattr("doctrail.ingest.core.ocr_with_mac_ocr", fake_ocr)
+    result = await process_ingest(
+        db_path=str(tmp_path / "documents.db"),
+        input_dir=str(source),
+        table="documents",
+        extractor="rust",
+        ocr_engine="mac-ocr",
+        workers=1,
+        yes=True,
+    )
+
+    assert result["successful"] == 33
+    assert events == ["rust", "rust", "ocr"]

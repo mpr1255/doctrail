@@ -143,6 +143,27 @@ async def test_mac_ocr_service_uses_configured_funnel_reservation(monkeypatch, t
 
 
 @pytest.mark.asyncio
+@respx.mock
+async def test_mac_ocr_service_reports_file_specific_500_without_capacity_timeout(
+    monkeypatch, tmp_path
+):
+    endpoint = "https://ocr-one.example/funnel"
+    monkeypatch.setenv("MAC_OCR__SERVICE_ENDPOINTS", endpoint)
+    image_path = tmp_path / "broken.pdf"
+    image_path.write_bytes(b"%PDF-broken")
+
+    respx.post(f"{endpoint}/reserve").mock(
+        return_value=Response(201, json={"reservation_id": "reserved"})
+    )
+    respx.post(f"{endpoint}/ocr", params={"reservation_id": "reserved"}).mock(
+        return_value=Response(500, text="cannot render PDF")
+    )
+
+    with pytest.raises(RuntimeError, match="HTTP 500.*cannot render PDF"):
+        await _ocr_with_mac_ocr_service(str(image_path))
+
+
+@pytest.mark.asyncio
 async def test_process_document_handles_xlsx_real(tmp_path):
     from openpyxl import Workbook
 

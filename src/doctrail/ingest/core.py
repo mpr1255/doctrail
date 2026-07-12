@@ -839,6 +839,7 @@ async def process_ingest(
             path_to_sha = {str(fp): sha for fp, sha in files_to_process}
             native_paths: List[str] = []
             native_ocr_semaphore = asyncio.Semaphore(worker_count)
+            deferred_mac_ocr: List[tuple[str, Dict[str, Any]]] = []
 
             async def run_native_mac_ocr(path: str, doc: Dict[str, Any]) -> Dict[str, Any]:
                 try:
@@ -928,13 +929,12 @@ async def process_ingest(
                             "elapsed": 0,
                         })
                     continue
-                mac_ocr_inputs = []
                 for p, doc in zip(batch_paths, docs):
                     if native_extractor.is_complete_extraction(doc, p):
                         handle_result(native_extractor.to_result(p, path_to_sha[p], doc))
                         continue
                     if doc.get("ocr_needed") and ocr_engine == "mac-ocr":
-                        mac_ocr_inputs.append((p, doc))
+                        deferred_mac_ocr.append((p, doc))
                         continue
                     reason = (
                         doc.get("error")
@@ -947,28 +947,39 @@ async def process_ingest(
                         "error": f"Native extraction incomplete: {reason}",
                         "elapsed": (doc.get("extraction_ms") or 0) / 1000.0,
                     })
-                if mac_ocr_inputs:
-                    progress.update(
-                        task,
-                        description=(
-                            f"[magenta]Mac OCR {len(mac_ocr_inputs)} file(s): "
-                            f"{_short_display_name(Path(mac_ocr_inputs[0][0]), input_path)}[/magenta]"
-                        ),
-                    )
-                    ocr_tasks = [
-                        asyncio.create_task(run_native_mac_ocr(path, doc))
-                        for path, doc in mac_ocr_inputs
-                    ]
-                    for completed in asyncio.as_completed(ocr_tasks):
-                        result = await completed
+            if deferred_mac_ocr:
+                ocr_queue: asyncio.Queue[tuple[str, Dict[str, Any]]] = asyncio.Queue()
+                for item in deferred_mac_ocr:
+                    ocr_queue.put_nowait(item)
+
+                async def drain_mac_ocr_queue() -> None:
+                    while True:
+                        try:
+                            path, doc = ocr_queue.get_nowait()
+                        except asyncio.QueueEmpty:
+                            return
                         progress.update(
                             task,
                             description=(
-                                f"[magenta]Mac OCR completed: "
-                                f"{_short_display_name(Path(result['file_path']), input_path)}[/magenta]"
+                                f"[magenta]Mac OCR queue ({ocr_queue.qsize()} remaining): "
+                                f"{_short_display_name(Path(path), input_path)}[/magenta]"
                             ),
                         )
-                        handle_result(result)
+                        try:
+                            handle_result(await run_native_mac_ocr(path, doc))
+                        finally:
+                            ocr_queue.task_done()
+
+                progress.update(
+                    task,
+                    description=f"[magenta]Draining {len(deferred_mac_ocr)} queued OCR file(s)[/magenta]",
+                )
+                await asyncio.gather(
+                    *(
+                        drain_mac_ocr_queue()
+                        for _ in range(min(worker_count, len(deferred_mac_ocr)))
+                    )
+                )
             files_to_process = []
 
         submission_batch_size = max(worker_count * 4, 1)
