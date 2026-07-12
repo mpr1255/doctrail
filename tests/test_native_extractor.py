@@ -87,7 +87,7 @@ def test_invalid_legacy_doc_is_not_sent_to_image_ocr(tmp_path, native_enabled):
 
     assert doc["status"] == "fallback_required"
     assert doc["ocr_needed"] is False
-    assert doc["fallback_kind"] == "legacy_doc_antiword_libreoffice_or_ocr"
+    assert doc["fallback_kind"] == "legacy_doc_antiword_textutil_libreoffice"
 
 
 def test_extract_batch_preserves_order_and_count(tmp_path, native_enabled):

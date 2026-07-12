@@ -91,7 +91,7 @@ fn extract_doc_bytes(
     let document = match office_oxide::doc::DocDocument::from_reader(Cursor::new(bytes)) {
         Ok(document) => document,
         Err(error) => bail!(
-            "legacy DOC native Rust extraction failed with office_oxide; fallback_required=legacy_doc_antiword_libreoffice_or_ocr; error={error}"
+            "legacy DOC native Rust extraction failed with office_oxide; fallback_required=legacy_doc_antiword_textutil_libreoffice; error={error}"
         ),
     };
     let parse_duration = parse_started_at.elapsed();
@@ -104,7 +104,7 @@ fn extract_doc_bytes(
 
     if !reasonableness.reasonable {
         bail!(
-            "legacy DOC native Rust extraction with office_oxide produced insufficient text; fallback_required=legacy_doc_antiword_libreoffice_or_ocr; chars={} file_size={} ratio={:.6} reason={} image_count={}",
+            "legacy DOC native Rust extraction with office_oxide produced insufficient text; fallback_required=legacy_doc_antiword_textutil_libreoffice; chars={} file_size={} ratio={:.6} reason={} image_count={}",
             reasonableness.char_count,
             bytes.len(),
             reasonableness.ratio,
@@ -996,7 +996,7 @@ mod tests {
 
         assert!(err
             .to_string()
-            .contains("fallback_required=legacy_doc_antiword_libreoffice_or_ocr"));
+            .contains("fallback_required=legacy_doc_antiword_textutil_libreoffice"));
     }
 
     #[test]

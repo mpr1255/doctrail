@@ -31,6 +31,7 @@ use zip::ZipArchive;
 
 const ZIP_RATIO_CHECK_MIN_BYTES: u64 = 1024 * 1024;
 const MAX_EXTERNAL_OUTPUT_BYTES: u64 = 64 * 1024 * 1024;
+const LARGE_HTML_EXTERNAL_BYTES: u64 = 8 * 1024 * 1024;
 
 /// One extraction result. Field names are the contract with
 /// `doctrail.ingest.native_extractor` (see its module docstring).
@@ -160,6 +161,14 @@ fn extract_one(path: &str) -> DocOut {
         .and_then(|value| value.to_str())
         .unwrap_or_default()
         .to_ascii_lowercase();
+    if matches!(extension.as_str(), "html" | "htm")
+        && fs::metadata(path)
+            .is_ok_and(|metadata| metadata.len() >= LARGE_HTML_EXTERNAL_BYTES)
+    {
+        if let Ok(document) = external_html(Path::new(path)) {
+            return doc_out_from_extracted(path, document, started);
+        }
+    }
     if matches!(
         extension.as_str(),
         "png" | "jpg" | "jpeg" | "gif" | "bmp" | "tif" | "tiff"
@@ -226,6 +235,7 @@ fn external_extract(path: &Path) -> Result<ExtractedDocument> {
         .unwrap_or_default()
         .to_ascii_lowercase();
     match extension.as_str() {
+        "html" | "htm" => external_html(path),
         "mobi" | "azw" | "azw3" => external_ebook_convert(path, &extension),
         "djvu" | "djv" => external_djvu(path),
         "doc" => external_doc(path),
@@ -343,7 +353,7 @@ fn external_doc(path: &Path) -> Result<ExtractedDocument> {
         }
     }
 
-    let content = run_program(
+    let textutil = run_program(
         "textutil",
         vec![
             OsString::from("-convert"),
@@ -352,11 +362,70 @@ fn external_doc(path: &Path) -> Result<ExtractedDocument> {
             path.as_os_str().to_owned(),
         ],
         Duration::from_secs(120),
-    )?;
-    if !external_text_is_usable(&content) {
-        bail!("legacy DOC fallbacks produced no usable text");
+    );
+    if let Ok(content) = textutil {
+        if external_text_is_usable(&content) {
+            return external_text_document(path, content, "doc", "textutil");
+        }
     }
-    external_text_document(path, content, "doc", "textutil")
+
+    let mut header = [0_u8; 8];
+    File::open(path)
+        .with_context(|| format!("opening legacy DOC {}", path.display()))?
+        .read_exact(&mut header)
+        .with_context(|| format!("reading legacy DOC header {}", path.display()))?;
+    if header != [0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1] {
+        bail!("legacy DOC fallbacks produced no usable text; file is not a CFB document");
+    }
+
+    let temp = tempdir().context("creating LibreOffice DOC conversion directory")?;
+    let profile = temp.path().join("profile");
+    fs::create_dir_all(&profile).context("creating LibreOffice DOC profile")?;
+    run_program(
+        "soffice",
+        vec![
+            OsString::from("--headless"),
+            OsString::from("--nologo"),
+            OsString::from("--nodefault"),
+            OsString::from("--nolockcheck"),
+            OsString::from(format!(
+                "-env:UserInstallation=file://{}",
+                profile.display()
+            )),
+            OsString::from("--convert-to"),
+            OsString::from("txt:Text"),
+            OsString::from("--outdir"),
+            temp.path().as_os_str().to_owned(),
+            path.as_os_str().to_owned(),
+        ],
+        Duration::from_secs(180),
+    )?;
+    let output = temp
+        .path()
+        .join(
+            path.file_stem()
+                .ok_or_else(|| anyhow::anyhow!("legacy DOC path has no stem"))?,
+        )
+        .with_extension("txt");
+    let content = read_file_limited(&output)?;
+    if !external_text_is_usable(&content) {
+        bail!("LibreOffice produced no usable text from legacy DOC");
+    }
+    external_text_document(path, content, "doc", "libreoffice_text")
+}
+
+fn external_html(path: &Path) -> Result<ExtractedDocument> {
+    let content = run_program(
+        "w3m",
+        vec![
+            OsString::from("-dump"),
+            OsString::from("-cols"),
+            OsString::from("120"),
+            path.as_os_str().to_owned(),
+        ],
+        Duration::from_secs(120),
+    )?;
+    external_text_document(path, content, "html", "w3m_bounded_fallback")
 }
 
 fn external_text_is_usable(content: &str) -> bool {

@@ -66,6 +66,12 @@ pub(crate) fn extract_pdf_bytes(
     source_path: Option<&str>,
     mime_type: Option<&str>,
 ) -> anyhow::Result<super::types::GeneralExtractedDocument> {
+    if !bytes[..bytes.len().min(1024)]
+        .windows(5)
+        .any(|window| window == b"%PDF-")
+    {
+        anyhow::bail!("damaged PDF: missing %PDF header in first 1024 bytes");
+    }
     let _guard = PDF_EXTRACTION_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -537,9 +543,20 @@ mod tests {
     }
 
     #[test]
-    fn invalid_pdf_returns_ocr_signal_metadata() {
-        let extracted =
-            extract_pdf_bytes(b"not a pdf", Some("bad.pdf"), Some("application/pdf")).unwrap();
+    fn missing_pdf_header_is_damaged_not_ocr() {
+        let error = extract_pdf_bytes(b"not a pdf", Some("bad.pdf"), Some("application/pdf"))
+            .unwrap_err();
+        assert!(error.to_string().contains("missing %PDF header"));
+    }
+
+    #[test]
+    fn malformed_pdf_with_header_returns_ocr_signal_metadata() {
+        let extracted = extract_pdf_bytes(
+            b"%PDF-1.4\nbroken",
+            Some("bad.pdf"),
+            Some("application/pdf"),
+        )
+        .unwrap();
         let content_extraction = extracted
             .extraction_metadata
             .get("content_extraction")

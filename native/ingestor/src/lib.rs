@@ -1,7 +1,7 @@
 use anyhow::{anyhow, Context, Result};
 use base64::{engine::general_purpose, Engine as _};
 use chardetng::EncodingDetector;
-use encoding_rs::{Encoding, UTF_8};
+use encoding_rs::{Encoding, GBK, UTF_8};
 use kuchikikiki::traits::*;
 use mail_parser::{Encoding as MimeEncoding, Message, MessageParser, MessagePart, MimeHeaders};
 use mimetype_detector::detect as detect_mime_type;
@@ -333,7 +333,11 @@ pub fn decode_to_html(bytes: &[u8], options: ExtractOptions<'_>) -> Result<Strin
             let part_charset = part
                 .content_type()
                 .and_then(|content_type| content_type.attribute("charset"));
-            let decoded = decode_html_bytes_with_hint(&part_bytes, part_charset);
+            let decoded = decode_mhtml_body_bytes(
+                &part_bytes,
+                part_charset,
+                selected_body_type,
+            );
             Ok(mhtml_body_as_html(decoded.decoded.as_ref(), selected_body_type).into_owned())
         }
         other => anyhow::bail!(
@@ -443,7 +447,7 @@ fn extract_mhtml_bytes(bytes: &[u8], source_path: Option<&str>) -> Result<Extrac
     let part_charset = part
         .content_type()
         .and_then(|content_type| content_type.attribute("charset"));
-    let decoded = decode_html_bytes_with_hint(&part_bytes, part_charset);
+    let decoded = decode_mhtml_body_bytes(&part_bytes, part_charset, selected_body_type);
     let body_duration = body_started_at.elapsed();
 
     let body_html = mhtml_body_as_html(decoded.decoded.as_ref(), selected_body_type);
@@ -521,7 +525,7 @@ fn select_mhtml_body_part<'a>(
         return Some(part);
     }
 
-    message
+    let normal_body = message
         .parts
         .iter()
         .find_map(|part| mhtml_xml_body_type(part).map(|body_type| (part, body_type)))
@@ -530,7 +534,31 @@ fn select_mhtml_body_part<'a>(
                 .parts
                 .iter()
                 .find_map(|part| mhtml_plain_body_type(part).map(|body_type| (part, body_type)))
-        })
+        });
+    if normal_body.is_some() {
+        return normal_body;
+    }
+
+    if message.parts.len() == 1 {
+        let part = &message.parts[0];
+        if mhtml_octet_stream_body_type(part).is_some() {
+            return Some((part, "application/octet-stream-text"));
+        }
+    }
+    None
+}
+
+fn mhtml_octet_stream_body_type(part: &MessagePart<'_>) -> Option<&'static str> {
+    let content_type = part.content_type()?;
+    (content_type
+        .c_type
+        .as_ref()
+        .eq_ignore_ascii_case("application")
+        && content_type
+            .c_subtype
+            .as_deref()
+            .is_some_and(|subtype| subtype.eq_ignore_ascii_case("octet-stream")))
+    .then_some("application/octet-stream-text")
 }
 
 fn mhtml_html_body_type(part: &MessagePart<'_>) -> Option<&'static str> {
@@ -584,7 +612,10 @@ fn mhtml_plain_body_type(part: &MessagePart<'_>) -> Option<&'static str> {
 }
 
 fn mhtml_body_as_html<'a>(decoded: &'a str, selected_body_type: &str) -> Cow<'a, str> {
-    if selected_body_type != "text/plain" {
+    if !matches!(
+        selected_body_type,
+        "text/plain" | "application/octet-stream-text"
+    ) {
         return Cow::Borrowed(decoded);
     }
 
@@ -602,6 +633,38 @@ fn mhtml_body_as_html<'a>(decoded: &'a str, selected_body_type: &str) -> Cow<'a,
     }
     html.push_str("</pre></body></html>");
     Cow::Owned(html)
+}
+
+fn decode_mhtml_body_bytes<'a>(
+    data: &'a [u8],
+    hinted_encoding: Option<&str>,
+    selected_body_type: &str,
+) -> HtmlDecodeResult<'a> {
+    let detected = decode_html_bytes_with_hint(data, hinted_encoding);
+    if selected_body_type != "application/octet-stream-text" || hinted_encoding.is_some() {
+        return detected;
+    }
+
+    let western_extended = detected
+        .decoded
+        .chars()
+        .filter(|character| ('\u{00a0}'..='\u{00ff}').contains(character))
+        .count();
+    let (gbk_text, _, gbk_had_errors) = GBK.decode(data);
+    let gbk_cjk = gbk_text
+        .chars()
+        .filter(|character| is_cjk_or_fullwidth_codepoint(*character as u32))
+        .count();
+    if !gbk_had_errors && western_extended >= 20 && gbk_cjk >= 20 {
+        return HtmlDecodeResult {
+            encoding_name: GBK.name(),
+            decoded: gbk_text,
+            source: "octet_stream_gbk_heuristic",
+            declared_encoding: None,
+            had_errors: false,
+        };
+    }
+    detected
 }
 
 fn extract_html_bytes(bytes: &[u8], source_path: Option<&str>) -> Result<ExtractedDocument> {
@@ -1562,8 +1625,11 @@ fn strip_known_boilerplate_html(html: &str) -> (String, usize) {
 pub fn detect_content_type(bytes: &[u8]) -> ContentTypeDetection {
     let detected = detect_mime_type(bytes);
     let mhtml_signature = looks_like_mhtml_signature(bytes);
+    let null_padded_text = looks_like_null_padded_legacy_text(bytes);
     let mime_type = if mhtml_signature {
         "multipart/related".to_string()
+    } else if null_padded_text {
+        "text/plain".to_string()
     } else {
         detected.mime().to_string()
     };
@@ -1577,16 +1643,22 @@ pub fn detect_content_type(bytes: &[u8]) -> ContentTypeDetection {
         mime_type,
         name: if mhtml_signature {
             "MHTML".to_string()
+        } else if null_padded_text {
+            "Null-padded legacy text".to_string()
         } else {
             detected.name().to_string()
         },
         extension: if mhtml_signature {
             "mhtml".to_string()
+        } else if null_padded_text {
+            "txt".to_string()
         } else {
             detected.extension().to_string()
         },
         kind: if mhtml_signature {
             "MHTML".to_string()
+        } else if null_padded_text {
+            "Text".to_string()
         } else {
             detected.kind().to_string()
         },
@@ -1616,7 +1688,7 @@ fn resolve_extract_kind(
         }
 
         if let Some(kind) = detected_text_extract_kind(&normalized_detected_mime) {
-            if declared_kind.is_none() {
+            if declared_kind.is_none() || detection.name == "Null-padded legacy text" {
                 return Some(kind);
             }
         }
@@ -1713,8 +1785,49 @@ fn extract_by_kind(
                 .map(general_to_extracted)
         }
         ExtractKind::Text => {
-            extractors::text::extract_text_bytes(bytes, options.source_path, options.mime_type)
-                .map(general_to_extracted)
+            let compact;
+            let null_padded_legacy = looks_like_null_padded_legacy_text(bytes);
+            let text_bytes = if null_padded_legacy {
+                compact = bytes
+                    .iter()
+                    .copied()
+                    .filter(|byte| *byte != 0)
+                    .collect::<Vec<_>>();
+                compact.as_slice()
+            } else {
+                bytes
+            };
+            let text_mime = if null_padded_legacy {
+                Some("text/plain; charset=gb18030")
+            } else {
+                options.mime_type
+            };
+            let document = extractors::text::extract_text_bytes(
+                text_bytes,
+                options.source_path,
+                text_mime,
+            )?;
+            if null_padded_legacy {
+                let total = document.content.chars().count().max(1);
+                let suspicious = document
+                    .content
+                    .chars()
+                    .filter(|character| {
+                        let codepoint = *character as u32;
+                        *character == '\u{fffd}'
+                            || (0xe000..=0xf8ff).contains(&codepoint)
+                            || (character.is_control()
+                                && !matches!(*character, '\n' | '\r' | '\t'))
+                    })
+                    .count();
+                if suspicious * 100 >= total {
+                    anyhow::bail!(
+                        "corrupt null-padded legacy text: suspicious character ratio {:.2}%",
+                        suspicious as f64 * 100.0 / total as f64
+                    );
+                }
+            }
+            Ok(general_to_extracted(document))
         }
     }
 }
@@ -1750,6 +1863,48 @@ fn looks_like_mhtml_signature(bytes: &[u8]) -> bool {
     lower.contains("mime-version:")
         && lower.contains("content-type: multipart/related")
         && (lower.contains("snapshot-content-location:") || lower.contains("content-location:"))
+}
+
+fn looks_like_null_padded_legacy_text(bytes: &[u8]) -> bool {
+    if bytes.starts_with(&[0xff, 0xfe]) || bytes.starts_with(&[0xfe, 0xff]) {
+        return false;
+    }
+    let sample = &bytes[..bytes.len().min(65_536)];
+    if sample.len() < 256 || sample.iter().filter(|byte| **byte == 0).count() * 10 < sample.len() {
+        return false;
+    }
+    let compact = sample
+        .iter()
+        .copied()
+        .filter(|byte| *byte != 0)
+        .collect::<Vec<_>>();
+    let (decoded, _, _) = GBK.decode(&compact);
+    let total = decoded.chars().count().max(1);
+    let printable = decoded
+        .chars()
+        .filter(|character| {
+            character.is_alphanumeric()
+                || character.is_whitespace()
+                || character.is_ascii_punctuation()
+                || is_cjk_or_fullwidth_codepoint(*character as u32)
+        })
+        .count();
+    let alphanumeric = decoded
+        .chars()
+        .filter(|character| character.is_alphanumeric())
+        .count();
+    let replacements = decoded
+        .chars()
+        .filter(|character| *character == '\u{fffd}')
+        .count();
+    let cjk = decoded
+        .chars()
+        .filter(|character| is_cjk_or_fullwidth_codepoint(*character as u32))
+        .count();
+    printable * 100 >= total * 85
+        && alphanumeric * 100 >= total * 40
+        && replacements * 100 < total
+        && cjk * 10 >= total
 }
 
 fn detected_text_extract_kind(normalized_mime_type: &str) -> Option<ExtractKind> {
@@ -3519,6 +3674,32 @@ mod tests {
     }
 
     #[test]
+    fn null_padded_legacy_chinese_text_overrides_pdf_extension() {
+        let source = "这是一份恢复出来的中文资料，文件名虽然以PDF结尾，实际内容是旧式编码的纯文本。".repeat(20);
+        let (encoded, _, _) = GBK.encode(&source);
+        let mut padded = Vec::with_capacity(encoded.len() * 5 / 4);
+        for chunk in encoded.chunks(4) {
+            padded.extend_from_slice(chunk);
+            padded.push(0);
+        }
+
+        let detection = detect_content_type(&padded);
+        assert_eq!(detection.mime_type, "text/plain");
+        let extracted = extract_bytes(
+            &padded,
+            ExtractOptions {
+                mime_type: None,
+                source_path: Some("mislabeled.pdf"),
+                kind: HtmlKind::Auto,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(extracted.source_format, "text");
+        assert!(extracted.content.contains("恢复出来的中文资料"));
+    }
+
+    #[test]
     fn mhtml_signature_overrides_html_extension() {
         let bytes = b"From: saved\r\nSnapshot-Content-Location: https://example.test/\r\nMIME-Version: 1.0\r\nContent-Type: multipart/related; boundary=x\r\n\r\n--x--\r\n";
         let detection = detect_content_type(bytes);
@@ -4194,6 +4375,42 @@ This plain-text archived page contains enough substantive material to remain use
             extracted.extraction_metadata["content_extraction"]["mhtml_selected_body_type"],
             "text/plain"
         );
+    }
+
+    #[test]
+    fn mhtml_recovers_single_base64_octet_stream_text() {
+        let mhtml = r#"From: <Saved by Mozilla>
+Subject: Unknown
+MIME-Version: 1.0
+Content-Type: application/octet-stream
+Content-Transfer-Encoding: base64
+Content-Location: http://example.test/archive.txt
+
+VGhpcyBpcyBhIHJlY292ZXJlZCBzaW5nbGUtcGFydCB0ZXh0IHBheWxvYWQgZnJvbSBhbiBNSE1MIGFyY2hpdmUu
+"#;
+
+        let extracted = extract_mhtml_bytes(mhtml.as_bytes(), Some("single-part.mht")).unwrap();
+        assert_eq!(extracted.source_format, "mhtml");
+        assert!(extracted.content.contains("recovered single-part text payload"));
+        assert_eq!(
+            extracted.extraction_metadata["content_extraction"]["mhtml_selected_body_type"],
+            "application/octet-stream-text"
+        );
+    }
+
+    #[test]
+    fn mhtml_octet_stream_detects_legacy_gbk_text() {
+        let source = "新语丝网站保存的中文文章正文包含足够多的汉字，用来验证没有字符集声明的旧式单文件网页归档能够正确识别简体中文编码，而不是存成西文乱码。";
+        let (bytes, _, _) = GBK.encode(source);
+
+        let decoded = decode_mhtml_body_bytes(
+            bytes.as_ref(),
+            None,
+            "application/octet-stream-text",
+        );
+
+        assert_eq!(decoded.encoding_name, GBK.name());
+        assert!(decoded.decoded.contains("新语丝网站保存的中文文章"));
     }
 
     #[test]
