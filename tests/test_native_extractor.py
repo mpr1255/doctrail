@@ -443,3 +443,82 @@ async def test_process_ingest_contains_corrupt_zip_failure(tmp_path, native_enab
     with sqlite3.connect(db_path) as conn:
         rows = conn.execute("SELECT filename, raw_content FROM documents").fetchall()
     assert rows == [("good.txt", "The valid document survives.")]
+
+
+@pytest.mark.asyncio
+async def test_native_zero_page_pdf_still_tries_mac_ocr_and_preserves_failure(
+    tmp_path, native_enabled, monkeypatch, capsys
+):
+    source = tmp_path / "source"
+    source.mkdir()
+    broken_pdf = source / "truncated.pdf"
+    broken_pdf.write_bytes(b"%PDF-1.6\ntruncated")
+
+    monkeypatch.setattr(
+        native_extractor,
+        "extract_batch",
+        lambda paths, threads: [{
+            "path": paths[0],
+            "status": "extracted",
+            "content": "",
+            "source_format": "pdf",
+            "extraction_method": "mupdf_smart_paragraphs",
+            "extraction_ms": 1,
+            "ocr_needed": True,
+            "ocr_reason": "zero_pages",
+        }],
+    )
+
+    attempted = []
+
+    async def failing_ocr(path):
+        attempted.append(path)
+        raise RuntimeError("renderer returned HTTP 500")
+
+    monkeypatch.setattr("doctrail.ingest.core.ocr_with_mac_ocr", failing_ocr)
+    result = await process_ingest(
+        db_path=str(tmp_path / "documents.db"),
+        input_dir=str(source),
+        table="documents",
+        extractor="rust",
+        ocr_engine="mac-ocr",
+        workers=1,
+        yes=True,
+    )
+
+    assert result["failed"] == 1
+    assert attempted == [str(broken_pdf)]
+    output = capsys.readouterr().out
+    assert "Mac OCR failed after zero_pages" in output
+    assert "renderer returned HTTP 500" in output
+
+
+@pytest.mark.asyncio
+async def test_process_ingest_skips_css_before_native_submission(
+    tmp_path, native_enabled, monkeypatch
+):
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "document.txt").write_text("Useful document", encoding="utf-8")
+    (source / "theme.css").write_text("body { color: red; }", encoding="utf-8")
+
+    submitted = []
+    real_extract_batch = native_extractor.extract_batch
+
+    def recording_extract_batch(paths, threads=None):
+        submitted.extend(paths)
+        return real_extract_batch(paths, threads)
+
+    monkeypatch.setattr(native_extractor, "extract_batch", recording_extract_batch)
+    result = await process_ingest(
+        db_path=str(tmp_path / "documents.db"),
+        input_dir=str(source),
+        table="documents",
+        extractor="rust",
+        workers=1,
+        yes=True,
+    )
+
+    assert result["successful"] == 1
+    assert result["failed"] == 0
+    assert submitted == [str(source / "document.txt")]

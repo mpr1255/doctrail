@@ -60,6 +60,7 @@ async def run_ingest(
     table: str = "documents",
     force: bool = False,
     overwrite: bool = False,
+    skip_existing: bool = False,
     limit: Optional[int] = None,
     include_pattern: Optional[str] = None,
     exclude_pattern: Optional[str] = None,
@@ -93,6 +94,7 @@ async def run_ingest(
         table: Target table name
         force: Force operation even if schema mismatch detected
         overwrite: Overwrite existing documents
+        skip_existing: Skip exact database filepaths before hashing for a fast resume
         limit: Limit number of files to process
         include_pattern: Only process files matching this glob pattern
         exclude_pattern: Skip files matching this glob pattern
@@ -192,6 +194,7 @@ async def run_ingest(
                 verbose=verbose,
                 force=force,
                 overwrite=overwrite,
+                skip_existing=skip_existing,
                 limit=limit,
                 include_pattern=include_pattern,
                 exclude_pattern=exclude_pattern,

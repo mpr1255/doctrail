@@ -787,16 +787,23 @@ def _try_ocr_with_textra(file_path: str, file_sha1: str) -> Optional[str]:
 async def _try_ocr_with_mac_ocr(file_path: str) -> Optional[str]:
     """OCR a file through Doctrail's configured Mac OCR Funnel endpoints."""
     try:
-        if os.environ.get("DOCTRAIL_MAC_OCR_CLIENT_PATH"):
-            ocr_client = _load_mac_ocr_module()
-            text = await ocr_client.ocr_async(file_path, node=None)
-        else:
-            text = await _ocr_with_mac_ocr_service(file_path)
-        cleaned = text.strip()
-        return cleaned or None
+        return await ocr_with_mac_ocr(file_path)
     except Exception as e:
         logger.warning(f"Mac OCR failed for {file_path}: {e}")
         return None
+
+
+async def ocr_with_mac_ocr(file_path: str) -> str:
+    """Run configured Mac OCR and preserve the real backend error for callers."""
+    if os.environ.get("DOCTRAIL_MAC_OCR_CLIENT_PATH"):
+        ocr_client = _load_mac_ocr_module()
+        text = await ocr_client.ocr_async(file_path, node=None)
+    else:
+        text = await _ocr_with_mac_ocr_service(file_path)
+    cleaned = text.strip()
+    if not cleaned:
+        raise RuntimeError(f"Mac OCR returned empty text for {file_path}")
+    return cleaned
 
 def _try_ocr_image_with_textra(file_path: str, file_sha1: str) -> Optional[str]:
     """OCR a single image via textra on macOS. Returns text or None."""

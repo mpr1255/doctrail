@@ -88,6 +88,58 @@ async def test_ingest_existing_row_check_quotes_table_name(tmp_path):
     assert result["successful"] == 0
 
 
+@pytest.mark.asyncio
+async def test_skip_existing_anti_joins_filepath_before_hashing(
+    tmp_path, monkeypatch, capsys
+):
+    """Fast resume should discard exact filepath matches before SHA-1 work."""
+    from doctrail.ingest.core import process_ingest
+
+    input_dir = tmp_path / "input"
+    input_dir.mkdir()
+    source_file = input_dir / "already-there.txt"
+    source_file.write_text("existing content", encoding="utf-8")
+
+    db_path = tmp_path / "docs.db"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            CREATE TABLE documents (
+                sha1 TEXT PRIMARY KEY,
+                filename TEXT,
+                filepath TEXT,
+                raw_content TEXT,
+                file_created TEXT,
+                file_modified TEXT
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO documents
+                (sha1, filename, filepath, raw_content, file_created, file_modified)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            ("stored", source_file.name, str(source_file), "existing content", "now", "now"),
+        )
+
+    def fail_if_hashed(*args, **kwargs):
+        raise AssertionError("exact filepath match should not be hashed")
+
+    monkeypatch.setattr("doctrail.ingest.core.hashlib.sha1", fail_if_hashed)
+    result = await process_ingest(
+        db_path=str(db_path),
+        input_dir=str(input_dir),
+        table="documents",
+        force=True,
+        skip_existing=True,
+        yes=True,
+    )
+
+    assert result["successful"] == 0
+    assert "Fast resume: skipped 1 exact filepath(s) before hashing" in capsys.readouterr().out
+
+
 def test_enrich_help():
     """Test that enrich --help works."""
     runner = CliRunner()

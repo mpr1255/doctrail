@@ -98,6 +98,11 @@ def get_zotero_config(config_data: Optional[dict]) -> dict:
 @click.option('--input-dir', multiple=True, help='Input directory (can repeat)')
 @click.option('--force', is_flag=True, help='Force ingest even if schema mismatch')
 @click.option('--overwrite', is_flag=True, help='Overwrite existing documents')
+@click.option(
+    '--skip-existing',
+    is_flag=True,
+    help='Fast resume: skip exact database filepaths before hashing (ZIPs are still checked)',
+)
 @click.option('--limit', type=int, help='Limit files to process')
 @click.option('--include-pattern', help='Only process matching files')
 @click.option('--exclude-pattern', help='Skip matching files')
@@ -131,6 +136,7 @@ def ingest(
     input_dir: tuple,
     force: bool,
     overwrite: bool,
+    skip_existing: bool,
     limit: Optional[int],
     include_pattern: Optional[str],
     exclude_pattern: Optional[str],
@@ -269,6 +275,7 @@ def ingest(
             table=table,
             force=force,
             overwrite=overwrite,
+            skip_existing=skip_existing,
             limit=limit,
             include_pattern=include_pattern,
             exclude_pattern=exclude_pattern,

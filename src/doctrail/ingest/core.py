@@ -11,6 +11,8 @@ import signal
 import hashlib
 import asyncio
 import logging
+import shutil
+import subprocess
 import tempfile
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
@@ -38,7 +40,8 @@ from .database import (
 from .document_processor import (
     process_document,
     SkippedFileException,
-    _try_ocr_with_mac_ocr,
+    SUPPORTED_EXTENSIONS,
+    ocr_with_mac_ocr,
 )
 from .text_processing import clean_ocr_text
 from ..db_operations import _quote_identifier
@@ -47,6 +50,40 @@ from .manifest import load_manifest, get_file_metadata, find_manifest_in_directo
 
 # Initialize Rich console for pretty output
 console = Console()
+
+
+def _enumerate_input_files(input_path: Path) -> List[Path]:
+    """Enumerate files with fd, falling back to pathlib when fd is unavailable."""
+    fd_path = shutil.which("fd")
+    if fd_path:
+        try:
+            result = subprocess.run(
+                [
+                    fd_path,
+                    "--type",
+                    "f",
+                    "--hidden",
+                    "--no-ignore",
+                    "--print0",
+                    ".",
+                    str(input_path),
+                ],
+                check=True,
+                capture_output=True,
+            )
+            paths = [
+                Path(os.fsdecode(raw_path))
+                for raw_path in result.stdout.split(b"\0")
+                if raw_path
+            ]
+            logger.info(f"Enumerated {len(paths)} files with fd")
+            return paths
+        except (OSError, subprocess.CalledProcessError) as exc:
+            logger.warning(f"fd enumeration failed; falling back to pathlib: {exc}")
+
+    paths = [path for path in input_path.rglob("*") if path.is_file()]
+    logger.info(f"Enumerated {len(paths)} files with pathlib fallback")
+    return paths
 
 
 def _expand_zip_inputs(
@@ -376,6 +413,7 @@ async def process_ingest(
     verbose: bool = False,
     force: bool = False,
     overwrite: bool = False,
+    skip_existing: bool = False,
     limit: Optional[int] = None,
     include_pattern: Optional[str] = None,
     exclude_pattern: Optional[str] = None,
@@ -402,20 +440,15 @@ async def process_ingest(
         verbose: Enable verbose logging
         readability: Use readability library for HTML content extraction
         force: Force import even if database schema doesn't match
+        skip_existing: Skip exact database filepaths before hashing
         fulltext: Create full-text search index
     """
-    # Set up signal handling for graceful shutdown
+    # Use OS-level termination so Ctrl-C is immediate even while Rust is
+    # executing outside the Python interpreter. SQLite WAL protects committed
+    # rows; temporary extraction files may be left for normal /tmp cleanup.
     shutdown_requested = False
-    
-    def signal_handler(sig, frame):
-        console.print("\n[red]Shutdown requested. Terminating immediately...[/red]")
-        logger.info("Shutdown signal received - terminating")
-        # Force immediate exit
-        os._exit(1)
-    
-    # Register signal handlers
-    signal.signal(signal.SIGINT, signal_handler)
-    signal.signal(signal.SIGTERM, signal_handler)
+    signal.signal(signal.SIGINT, signal.SIG_DFL)
+    signal.signal(signal.SIGTERM, signal.SIG_DFL)
     
     # Set up logging
     log_level = "DEBUG" if verbose else "WARNING"  # Less verbose by default
@@ -460,12 +493,25 @@ async def process_ingest(
     
     # Get existing documents if not overwriting
     existing_sha1s = set()
+    existing_filepaths = set()
+    if overwrite and skip_existing:
+        raise RuntimeError("--overwrite and --skip-existing cannot be used together")
     if not overwrite:
         try:
             if table in db.table_names():
                 table_ref = _quote_identifier(table, "table name")
                 existing_sha1s = {row[0] for row in db.execute(f"SELECT sha1 FROM {table_ref}")}
                 logger.info(f"Found {len(existing_sha1s)} existing documents in table '{table}'")
+                if skip_existing and "filepath" in {column.name for column in db[table].columns}:
+                    existing_filepaths = {
+                        row[0]
+                        for row in db.execute(
+                            f"SELECT filepath FROM {table_ref} WHERE filepath IS NOT NULL"
+                        )
+                    }
+                    logger.info(
+                        f"Loaded {len(existing_filepaths)} existing filepaths for fast resume"
+                    )
         except Exception as e:
             logger.warning(f"Could not read existing documents: {e}")
     
@@ -480,9 +526,8 @@ async def process_ingest(
         all_files = [input_path]
         logger.info(f"Processing single file: {input_path}")
     else:
-        # Directory mode - find all files recursively
-        all_files = list(input_path.rglob("*"))
-        all_files = [f for f in all_files if f.is_file()]
+        # Directory mode - enumerate all files recursively with fd when present.
+        all_files = _enumerate_input_files(input_path)
         # Never descend into hidden directories (.git, .unison, .stversions,
         # .svn, ...). rglob walks into them, and their contents (e.g. Unison
         # conflict copies) have non-hidden names that should_skip_file would let
@@ -496,6 +541,21 @@ async def process_ingest(
         if pre_hidden != len(all_files):
             logger.info(f"Skipped {pre_hidden - len(all_files)} file(s) inside hidden directories")
         logger.info(f"Found {len(all_files)} total files in {input_dir}")
+
+    if skip_existing and existing_filepaths:
+        before_fast_skip = len(all_files)
+        # ZIP rows use archive.zip!/member logical paths and must still be
+        # expanded so a partially ingested archive can resume safely.
+        all_files = [
+            path
+            for path in all_files
+            if path.suffix.lower() == ".zip" or str(path) not in existing_filepaths
+        ]
+        fast_skipped = before_fast_skip - len(all_files)
+        console.print(
+            f"[cyan]Fast resume:[/cyan] skipped {fast_skipped} exact filepath(s) "
+            "before hashing"
+        )
 
     (
         all_files,
@@ -574,6 +634,10 @@ async def process_ingest(
                 skipped_count += 1
                 logger.debug(f"Skipping JSON sidecar candidate: {file_path}")
                 continue
+
+            if file_path.suffix.lower() not in SUPPORTED_EXTENSIONS:
+                skipped_count += 1
+                continue
             
             # Calculate SHA1
             try:
@@ -582,7 +646,6 @@ async def process_ingest(
                 
                 # Skip if already processed (unless overwriting)
                 if not overwrite and file_sha1 in existing_sha1s:
-                    logger.debug(f"Skipping already processed file: {file_path}")
                     if file_path.suffix.lower() in OFFICE_SUFFIXES:
                         existing_office_paths.add(str(file_path))
                     continue
@@ -777,13 +840,15 @@ async def process_ingest(
             native_ocr_semaphore = asyncio.Semaphore(worker_count)
 
             async def run_native_mac_ocr(path: str, doc: Dict[str, Any]) -> Dict[str, Any]:
-                async with native_ocr_semaphore:
-                    ocr_text = await _try_ocr_with_mac_ocr(path)
-                if not ocr_text:
+                try:
+                    async with native_ocr_semaphore:
+                        ocr_text = await ocr_with_mac_ocr(path)
+                except Exception as exc:
+                    ocr_reason = doc.get("ocr_reason") or "unspecified OCR signal"
                     return {
                         "success": False,
                         "file_path": path,
-                        "error": "Mac OCR backend returned no text",
+                        "error": f"Mac OCR failed after {ocr_reason}: {exc}",
                         "elapsed": (doc.get("extraction_ms") or 0) / 1000.0,
                     }
                 source_format = doc.get("source_format") or Path(path).suffix.lower().lstrip(".")
@@ -840,6 +905,13 @@ async def process_ingest(
                 if shutdown_requested:
                     break
                 batch_paths = native_paths[start:start + native_chunk]
+                progress.update(
+                    task,
+                    description=(
+                        f"[cyan]Rust extracting {len(batch_paths)} file(s): "
+                        f"{_short_display_name(Path(batch_paths[0]), input_path)}[/cyan]"
+                    ),
+                )
                 # Per-file Rust panics come back as status=failed. A recoverable
                 # batch-level failure is recorded against every input in the chunk;
                 # native process aborts and segfaults cannot be caught in-process.
@@ -875,10 +947,26 @@ async def process_ingest(
                         "elapsed": (doc.get("extraction_ms") or 0) / 1000.0,
                     })
                 if mac_ocr_inputs:
-                    ocr_results = await asyncio.gather(
-                        *(run_native_mac_ocr(path, doc) for path, doc in mac_ocr_inputs)
+                    progress.update(
+                        task,
+                        description=(
+                            f"[magenta]Mac OCR {len(mac_ocr_inputs)} file(s): "
+                            f"{_short_display_name(Path(mac_ocr_inputs[0][0]), input_path)}[/magenta]"
+                        ),
                     )
-                    for result in ocr_results:
+                    ocr_tasks = [
+                        asyncio.create_task(run_native_mac_ocr(path, doc))
+                        for path, doc in mac_ocr_inputs
+                    ]
+                    for completed in asyncio.as_completed(ocr_tasks):
+                        result = await completed
+                        progress.update(
+                            task,
+                            description=(
+                                f"[magenta]Mac OCR completed: "
+                                f"{_short_display_name(Path(result['file_path']), input_path)}[/magenta]"
+                            ),
+                        )
                         handle_result(result)
             files_to_process = []
 

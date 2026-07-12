@@ -568,7 +568,7 @@ fn expand_zip(
                 .map(|member| serde_json::to_string(&member).expect("archive member serializes"))
                 .collect()
         })
-        .map_err(|error| PyRuntimeError::new_err(error.to_string()))
+        .map_err(|error| PyRuntimeError::new_err(format!("{error:#}")))
 }
 
 /// Extract a batch of paths in parallel (rayon, GIL released). Returns one JSON

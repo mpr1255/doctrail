@@ -1060,6 +1060,8 @@ Options:
   --input-dir TEXT                Input directory (can repeat)
   --force                         Force ingest even if schema mismatch
   --overwrite                     Overwrite existing documents
+  --skip-existing                 Fast resume: skip exact database filepaths before hashing (ZIPs
+                                  are still checked)
   --limit INTEGER                 Limit files to process
   --include-pattern TEXT          Only process matching files
   --exclude-pattern TEXT          Skip matching files
