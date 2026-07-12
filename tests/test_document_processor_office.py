@@ -128,7 +128,7 @@ async def test_mac_ocr_service_uses_configured_funnel_reservation(monkeypatch, t
     image_path = tmp_path / "page.png"
     image_path.write_bytes(b"x")
 
-    respx.post(f"{first}/reserve").mock(return_value=Response(503))
+    respx.post(f"{first}/reserve").mock(return_value=Response(500))
     respx.post(f"{second}/reserve").mock(
         return_value=Response(201, json={"reservation_id": "reserved"})
     )
@@ -188,6 +188,28 @@ async def test_mac_ocr_service_prefers_sha_assigned_node(monkeypatch, tmp_path):
 
     assert text == "Cached OCR text"
     assert not first_reserve.called
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_mac_ocr_service_waits_on_full_sha_assigned_node(monkeypatch, tmp_path):
+    first = "https://ocr-one.example/funnel"
+    second = "https://ocr-two.example/funnel"
+    monkeypatch.setenv("MAC_OCR__SERVICE_ENDPOINTS", f"{first},{second}")
+    monkeypatch.setenv("DOCTRAIL_MAC_OCR_CAPACITY_WAIT_SECONDS", "0.01")
+    monkeypatch.setenv("DOCTRAIL_MAC_OCR_POLL_SECONDS", "0.001")
+    image_path = tmp_path / "page.png"
+    image_path.write_bytes(b"x")  # SHA-1 modulo two selects `first`.
+
+    respx.post(f"{first}/reserve").mock(return_value=Response(503))
+    second_reserve = respx.post(f"{second}/reserve").mock(
+        return_value=Response(201, json={"reservation_id": "wrong-node"})
+    )
+
+    with pytest.raises(TimeoutError, match="waiting for Mac OCR capacity"):
+        await _ocr_with_mac_ocr_service(str(image_path))
+
+    assert not second_reserve.called
 
 
 @pytest.mark.asyncio

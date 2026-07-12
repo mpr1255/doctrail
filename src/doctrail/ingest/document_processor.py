@@ -325,10 +325,12 @@ async def _ocr_with_mac_ocr_service(file_path: str) -> str:
     try:
         async with httpx.AsyncClient(timeout=timeout) as client:
             while deadline is None or time.monotonic() < deadline:
-                for endpoint in ordered_endpoints:
+                for endpoint_index, endpoint in enumerate(ordered_endpoints):
                     try:
                         response = await client.post(f"{endpoint}/reserve", timeout=10.0)
                         if response.status_code != 201:
+                            if endpoint_index == 0 and response.status_code in {409, 429, 503}:
+                                break
                             continue
                         reservation_id = response.json()["reservation_id"]
                         with upload_path.open("rb") as file_handle:
