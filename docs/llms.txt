@@ -1077,6 +1077,7 @@ Options:
   --skip-garbage-check            Skip garbage detection
   -y, --yes                       Skip prompts
   --fulltext                      Create FTS index
+  --sqlite-extension FILE         SQLite extension to load for this ingest; may be repeated
   --manifest TEXT                 Path to manifest.json
   --zotero                        Zotero mode
   --collection TEXT               Zotero collection name
