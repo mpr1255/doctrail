@@ -360,23 +360,20 @@ def ocr_fn_for_bytes(data: bytes, media_name: str, ocr_fn: Callable[[Path], str]
 def _ocr_callable(ocr_engine: str):
     """Return a bounded OCR cascade for an extracted image file."""
     from .document_processor import (
-        _load_mac_ocr_module,
+        _try_ocr_with_mac_ocr,
         _try_ocr_image_with_tesseract,
         _try_ocr_image_with_textra,
     )
     import asyncio
 
-    module = _load_mac_ocr_module() if ocr_engine == "mac-ocr" else None
-
     def _ocr(path: Path) -> str:
-        if module is not None:
+        if ocr_engine == "mac-ocr":
             try:
-                text = asyncio.run(module.ocr_async(str(path))) or ""
-                if text.strip():
-                    return text
+                return asyncio.run(_try_ocr_with_mac_ocr(str(path))) or ""
             except Exception as exc:
-                logger.warning(f"mac-ocr failed for {path.name}; trying local OCR: {exc}")
-        if ocr_engine in {"auto", "mac-ocr", "textra"}:
+                logger.warning(f"mac-ocr failed for {path.name}: {exc}")
+                return ""
+        if ocr_engine in {"auto", "textra"}:
             text = _try_ocr_image_with_textra(str(path), sha1_bytes(path.read_bytes()))
             if text and text.strip():
                 return text

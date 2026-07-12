@@ -35,7 +35,12 @@ from .database import (
     insert_document,
     setup_fts,
 )
-from .document_processor import process_document, SkippedFileException
+from .document_processor import (
+    process_document,
+    SkippedFileException,
+    _try_ocr_with_mac_ocr,
+)
+from .text_processing import clean_ocr_text
 from ..db_operations import _quote_identifier
 from ..file_filters import should_skip_file, apply_file_patterns, check_for_manual_override
 from .manifest import load_manifest, get_file_metadata, find_manifest_in_directory
@@ -751,6 +756,34 @@ async def process_ingest(
             console.print("[cyan]Using native Rust extractor[/cyan] (multicore in-process)")
             path_to_sha = {str(fp): sha for fp, sha in files_to_process}
             native_paths: List[str] = []
+            native_ocr_semaphore = asyncio.Semaphore(worker_count)
+
+            async def run_native_mac_ocr(path: str, doc: Dict[str, Any]) -> Dict[str, Any]:
+                async with native_ocr_semaphore:
+                    ocr_text = await _try_ocr_with_mac_ocr(path)
+                if not ocr_text:
+                    return {
+                        "success": False,
+                        "file_path": path,
+                        "error": "Mac OCR backend returned no text",
+                        "elapsed": (doc.get("extraction_ms") or 0) / 1000.0,
+                    }
+                source_format = doc.get("source_format") or Path(path).suffix.lower().lstrip(".")
+                return {
+                    "success": True,
+                    "file_path": path,
+                    "sha1": path_to_sha[path],
+                    "content": clean_ocr_text(ocr_text),
+                    "metadata": {
+                        "extraction_method": "mac_ocr",
+                        "processing_method": "rust-ingestor",
+                        "ocr_engine": "mac-ocr",
+                        "ocr_applied": True,
+                        "source_format": source_format,
+                        "title": doc.get("title") or None,
+                    },
+                    "elapsed": (doc.get("extraction_ms") or 0) / 1000.0,
+                }
             for fp, sha in files_to_process:
                 p = str(fp)
                 override_path = check_for_manual_override(p)
@@ -804,9 +837,13 @@ async def process_ingest(
                             "elapsed": 0,
                         })
                     continue
+                mac_ocr_inputs = []
                 for p, doc in zip(batch_paths, docs):
                     if native_extractor.is_complete_extraction(doc, p):
                         handle_result(native_extractor.to_result(p, path_to_sha[p], doc))
+                        continue
+                    if doc.get("ocr_needed") and ocr_engine == "mac-ocr":
+                        mac_ocr_inputs.append((p, doc))
                         continue
                     reason = (
                         doc.get("error")
@@ -819,6 +856,12 @@ async def process_ingest(
                         "error": f"Native extraction incomplete: {reason}",
                         "elapsed": (doc.get("extraction_ms") or 0) / 1000.0,
                     })
+                if mac_ocr_inputs:
+                    ocr_results = await asyncio.gather(
+                        *(run_native_mac_ocr(path, doc) for path, doc in mac_ocr_inputs)
+                    )
+                    for result in ocr_results:
+                        handle_result(result)
             files_to_process = []
 
         submission_batch_size = max(worker_count * 4, 1)
