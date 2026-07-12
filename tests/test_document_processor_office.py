@@ -38,6 +38,13 @@ def _async_return(value):
     return _inner
 
 
+def _accept_synthetic_ocr_upload(monkeypatch):
+    monkeypatch.setattr(
+        "doctrail.ingest.document_processor._mac_ocr_upload",
+        lambda file_path: (Path(file_path), Path(file_path).name, None),
+    )
+
+
 def _missing_tools(*tools):
     return [tool for tool in tools if shutil.which(tool) is None]
 
@@ -127,6 +134,7 @@ async def test_mac_ocr_service_uses_configured_funnel_reservation(monkeypatch, t
     monkeypatch.setenv("MAC_OCR__SERVICE_ENDPOINTS", f"{first},{second}")
     image_path = tmp_path / "page.png"
     image_path.write_bytes(b"x")
+    _accept_synthetic_ocr_upload(monkeypatch)
 
     respx.post(f"{first}/reserve").mock(return_value=Response(500))
     respx.post(f"{second}/reserve").mock(
@@ -167,12 +175,32 @@ async def test_mac_ocr_service_normalizes_misnamed_image_to_png(monkeypatch, tmp
 
 @pytest.mark.asyncio
 @respx.mock
+async def test_mac_ocr_service_rejects_non_image_doc_before_reservation(
+    monkeypatch, tmp_path
+):
+    endpoint = "https://ocr-one.example/funnel"
+    monkeypatch.setenv("MAC_OCR__SERVICE_ENDPOINTS", endpoint)
+    doc_path = tmp_path / "corrupt.doc"
+    doc_path.write_bytes(b"not an image or PDF")
+    reserve = respx.post(f"{endpoint}/reserve").mock(
+        return_value=Response(201, json={"reservation_id": "must-not-run"})
+    )
+
+    with pytest.raises(RuntimeError, match="neither a decodable raster nor a PDF"):
+        await _ocr_with_mac_ocr_service(str(doc_path))
+
+    assert not reserve.called
+
+
+@pytest.mark.asyncio
+@respx.mock
 async def test_mac_ocr_service_prefers_sha_assigned_node(monkeypatch, tmp_path):
     first = "https://ocr-one.example/funnel"
     second = "https://ocr-two.example/funnel"
     monkeypatch.setenv("MAC_OCR__SERVICE_ENDPOINTS", f"{first},{second}")
     image_path = tmp_path / "page.png"
     image_path.write_bytes(b"image bytes")  # SHA-1 modulo two selects `second`.
+    _accept_synthetic_ocr_upload(monkeypatch)
 
     first_reserve = respx.post(f"{first}/reserve").mock(
         return_value=Response(201, json={"reservation_id": "wrong-node"})
@@ -200,6 +228,7 @@ async def test_mac_ocr_service_waits_on_full_sha_assigned_node(monkeypatch, tmp_
     monkeypatch.setenv("DOCTRAIL_MAC_OCR_POLL_SECONDS", "0.001")
     image_path = tmp_path / "page.png"
     image_path.write_bytes(b"x")  # SHA-1 modulo two selects `first`.
+    _accept_synthetic_ocr_upload(monkeypatch)
 
     respx.post(f"{first}/reserve").mock(return_value=Response(503))
     second_reserve = respx.post(f"{second}/reserve").mock(
@@ -246,6 +275,7 @@ async def test_mac_ocr_service_fails_over_after_transient_textra_500(
     monkeypatch.setenv("MAC_OCR__SERVICE_ENDPOINTS", f"{first},{second}")
     image_path = tmp_path / "page.png"
     image_path.write_bytes(b"x")  # SHA-1 modulo two selects first.
+    _accept_synthetic_ocr_upload(monkeypatch)
 
     respx.post(f"{first}/reserve").mock(
         return_value=Response(201, json={"reservation_id": "first-job"})

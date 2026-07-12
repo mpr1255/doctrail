@@ -440,7 +440,22 @@ fn external_text_is_usable(content: &str) -> bool {
             character.is_control() && !matches!(*character, '\n' | '\r' | '\t')
         })
         .count();
-    replacement.saturating_mul(100) < total && controls.saturating_mul(100) < total
+    let mut longest_repeated_run: usize = 0;
+    let mut current_run: usize = 0;
+    let mut previous = None;
+    for character in content.chars() {
+        if previous == Some(character) {
+            current_run += 1;
+        } else {
+            previous = Some(character);
+            current_run = 1;
+        }
+        longest_repeated_run = longest_repeated_run.max(current_run);
+    }
+    replacement.saturating_mul(100) < total
+        && controls.saturating_mul(100) < total
+        && !(longest_repeated_run >= 128
+            && longest_repeated_run.saturating_mul(4) >= total)
 }
 
 fn external_ppt(path: &Path) -> Result<ExtractedDocument> {
@@ -915,6 +930,16 @@ mod tests {
     #[test]
     fn external_text_gate_rejects_binary_control_dump() {
         let garbage = "word\0\u{0001}\u{0002}\u{0003}".repeat(50);
+        assert!(!external_text_is_usable(&garbage));
+    }
+
+    #[test]
+    fn external_text_gate_rejects_recovered_repeated_character_garbage() {
+        let garbage = format!(
+            "{}\n{}",
+            "1".repeat(600),
+            "binary-looking fallback output with a few accidental words"
+        );
         assert!(!external_text_is_usable(&garbage));
     }
 

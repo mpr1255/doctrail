@@ -292,8 +292,13 @@ def _mac_ocr_upload(file_path: str):
             temporary = tempfile.NamedTemporaryFile(suffix=".png")
             image.save(temporary, format="PNG")
             temporary.flush()
-    except (UnidentifiedImageError, OSError):
-        return source_path, source_path.name, None
+    except (UnidentifiedImageError, OSError) as exc:
+        if source_path.suffix.lower() == ".pdf":
+            return source_path, source_path.name, None
+        raise RuntimeError(
+            f"Mac OCR candidate is neither a decodable raster nor a PDF: "
+            f"{source_path}"
+        ) from exc
 
     return Path(temporary.name), f"{source_path.stem}.png", temporary
 
