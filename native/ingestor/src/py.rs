@@ -187,6 +187,7 @@ fn external_extract(path: &Path) -> Result<ExtractedDocument> {
         "djvu" | "djv" => external_djvu(path),
         "rtf" => external_rtf(path),
         "ppt" => external_ppt(path),
+        "xlsx" => external_xlsx(path),
         _ => bail!("no bounded native external lane for extension {extension:?}"),
     }
 }
@@ -298,6 +299,48 @@ fn external_ppt(path: &Path) -> Result<ExtractedDocument> {
         Duration::from_secs(120),
     )?;
     external_text_document(path, content, "ppt", "strings")
+}
+
+fn external_xlsx(path: &Path) -> Result<ExtractedDocument> {
+    let temp = tempdir().context("creating LibreOffice spreadsheet repair directory")?;
+    let profile = temp.path().join("profile");
+    fs::create_dir_all(&profile).context("creating LibreOffice repair profile")?;
+    run_program(
+        "soffice",
+        vec![
+            OsString::from("--headless"),
+            OsString::from("--nologo"),
+            OsString::from("--nodefault"),
+            OsString::from("--nolockcheck"),
+            OsString::from(format!(
+                "-env:UserInstallation=file://{}",
+                profile.display()
+            )),
+            OsString::from("--convert-to"),
+            OsString::from("xlsx"),
+            OsString::from("--outdir"),
+            temp.path().as_os_str().to_owned(),
+            path.as_os_str().to_owned(),
+        ],
+        Duration::from_secs(180),
+    )?;
+    let output = temp.path().join(
+        path.file_name()
+            .ok_or_else(|| anyhow::anyhow!("spreadsheet path has no filename"))?,
+    );
+    let mut document = extract_file(
+        &output,
+        ExtractOptions {
+            mime_type: None,
+            source_path: path.to_str(),
+            kind: HtmlKind::Auto,
+        },
+    )?;
+    document.extraction_metadata["content_extraction"]["extraction_method"] =
+        Value::String("libreoffice_repair_calamine".to_string());
+    document.extraction_metadata["content_extraction"]["external_command_bounded"] =
+        Value::Bool(true);
+    Ok(document)
 }
 
 fn run_program(program: &str, args: Vec<OsString>, timeout: Duration) -> Result<String> {

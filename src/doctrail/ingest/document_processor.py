@@ -245,6 +245,20 @@ def _mac_ocr_service_endpoints() -> Tuple[str, ...]:
         or os.environ.get("WORKER__OCR_SERVICE_ENDPOINTS")
         or ""
     )
+    if not raw_endpoints:
+        # An editable pre-PyPI install should work from any cwd. Read only the
+        # OCR endpoint key from its source checkout rather than importing every
+        # API credential in that checkout's .env file.
+        checkout_env = Path(__file__).resolve().parents[3] / ".env"
+        if checkout_env.is_file():
+            from ..core_utils import parse_env_file
+
+            values = parse_env_file(checkout_env)
+            raw_endpoints = (
+                values.get("MAC_OCR__SERVICE_ENDPOINTS")
+                or values.get("WORKER__OCR_SERVICE_ENDPOINTS")
+                or ""
+            )
     return tuple(
         endpoint.strip().rstrip("/")
         for endpoint in raw_endpoints.split(",")
@@ -262,9 +276,10 @@ async def _ocr_with_mac_ocr_service(file_path: str) -> str:
 
     wait_seconds = int(os.environ.get("DOCTRAIL_MAC_OCR_CAPACITY_WAIT_SECONDS", "300"))
     poll_seconds = float(os.environ.get("DOCTRAIL_MAC_OCR_POLL_SECONDS", "2"))
+    request_seconds = float(os.environ.get("DOCTRAIL_MAC_OCR_REQUEST_TIMEOUT_SECONDS", "300"))
     deadline = time.monotonic() + wait_seconds
     errors = []
-    timeout = httpx.Timeout(None, connect=10.0)
+    timeout = httpx.Timeout(request_seconds, connect=10.0)
 
     async with httpx.AsyncClient(timeout=timeout) as client:
         while time.monotonic() < deadline:
@@ -279,6 +294,7 @@ async def _ocr_with_mac_ocr_service(file_path: str) -> str:
                             f"{endpoint}/ocr",
                             params={"reservation_id": reservation_id},
                             files={"file": (Path(file_path).name, file_handle)},
+                            timeout=timeout,
                         )
                     response.raise_for_status()
                     text = response.json().get("text", "").strip()
