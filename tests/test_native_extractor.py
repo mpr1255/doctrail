@@ -146,10 +146,7 @@ def test_sparse_xlsx_with_bounded_dimension_stays_native(tmp_path, native_enable
     assert "bounded spreadsheet fallback" in doc["content"]
 
 
-def test_scanned_pdf_uses_textra_before_ocrmypdf(tmp_path, native_enabled):
-    if shutil.which("textra") is None:
-        pytest.skip("Textra is not installed")
-
+def test_scanned_pdf_returns_ocr_signal_without_running_local_ocr(tmp_path, native_enabled):
     image = Image.new("RGB", (1600, 500), "white")
     draw = ImageDraw.Draw(image)
     font = ImageFont.truetype("/System/Library/Fonts/Helvetica.ttc", 110)
@@ -161,8 +158,8 @@ def test_scanned_pdf_uses_textra_before_ocrmypdf(tmp_path, native_enabled):
 
     assert doc["status"] == "extracted"
     assert doc["source_format"] == "pdf"
-    assert doc["extraction_method"] == "textra_ocr"
-    assert "DOCTRAIL" in doc["content"].upper()
+    assert doc["extraction_method"] == "mupdf_smart_paragraphs"
+    assert doc["ocr_needed"] is True
 
 
 @pytest.mark.parametrize(
@@ -172,7 +169,6 @@ def test_scanned_pdf_uses_textra_before_ocrmypdf(tmp_path, native_enabled):
         ("federalist_fixture.djvu", "djvutxt", "djvu", "djvutxt"),
         ("federalist_fixture.rtf", "textutil", "rtf", "textutil"),
         ("federalist_fixture.ppt", "strings", "ppt", "strings"),
-        ("federalist_fixture.png", "tesseract", "png", None),
     ],
 )
 def test_native_external_lanes_cover_python_only_fixtures(
@@ -192,9 +188,7 @@ def test_native_external_lanes_cover_python_only_fixtures(
         assert doc["extraction_method"] == expected_method
 
 
-def test_native_scanned_pdf_runs_bounded_ocr_lane(tmp_path, native_enabled):
-    if shutil.which("ocrmypdf") is None or shutil.which("tesseract") is None:
-        pytest.skip("ocrmypdf and tesseract are required")
+def test_native_scanned_pdf_defers_to_configured_ocr_backend(tmp_path, native_enabled):
     from PIL import Image
 
     image_path = Path(__file__).parent / "assets" / "files" / "federalist_fixture.png"
@@ -206,9 +200,19 @@ def test_native_scanned_pdf_runs_bounded_ocr_lane(tmp_path, native_enabled):
 
     assert doc["status"] == "extracted", doc
     assert doc["source_format"] == "pdf"
-    assert doc["ocr_needed"] is False
-    assert doc["extraction_method"] == "ocrmypdf"
-    assert "Federalist fixture" in doc["content"]
+    assert doc["ocr_needed"] is True
+    assert doc["extraction_method"] == "mupdf_smart_paragraphs"
+
+
+def test_native_image_defers_to_configured_ocr_backend(native_enabled):
+    path = Path(__file__).parent / "assets" / "files" / "federalist_fixture.png"
+
+    doc = native_extractor.extract_batch([str(path)], 1)[0]
+
+    assert doc["status"] == "fallback_required"
+    assert doc["source_format"] == "png"
+    assert doc["ocr_needed"] is True
+    assert doc["ocr_reason"] == "image_requires_ocr"
 
 
 def test_to_result_maps_to_ingest_contract(tmp_path, native_enabled):

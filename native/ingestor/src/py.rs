@@ -11,7 +11,7 @@ use crate::{
     classify_extraction_failure, extract_bytes, extract_file, ExtractOptions, ExtractedDocument,
     HtmlKind,
 };
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{bail, Context, Result};
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 use rayon::prelude::*;
@@ -109,27 +109,41 @@ fn doc_out_from_extracted(path: &str, doc: ExtractedDocument, started: Instant) 
 
 fn extract_one(path: &str) -> DocOut {
     let started = Instant::now();
+    let extension = Path::new(path)
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if matches!(
+        extension.as_str(),
+        "png" | "jpg" | "jpeg" | "gif" | "bmp" | "tif" | "tiff"
+    ) {
+        return DocOut {
+            path: path.to_string(),
+            status: "fallback_required".to_string(),
+            source_format: Some(extension),
+            title: None,
+            content: String::new(),
+            content_chars: 0,
+            language: None,
+            language_confidence: None,
+            mime_type: None,
+            extraction_method: None,
+            extraction_metadata: None,
+            ocr_needed: true,
+            ocr_reason: Some("image_requires_ocr".to_string()),
+            fallback_kind: Some("configured_ocr_backend".to_string()),
+            error: None,
+            extraction_ms: started.elapsed().as_millis() as u64,
+        };
+    }
     let opts = ExtractOptions {
         mime_type: None,
         source_path: Some(path),
         kind: HtmlKind::Auto,
     };
     match extract_file(Path::new(path), opts) {
-        Ok(doc) => {
-            let ocr_needed =
-                meta_bool(&doc.extraction_metadata, "content_extraction", "ocr_needed")
-                    || meta_bool(
-                        &doc.extraction_metadata,
-                        "content_extraction",
-                        "requires_full_pdf_ocr",
-                    );
-            if ocr_needed && Path::new(path).extension().is_some_and(|ext| ext == "pdf") {
-                if let Ok(ocr_doc) = external_pdf_ocr(Path::new(path)) {
-                    return doc_out_from_extracted(path, ocr_doc, started);
-                }
-            }
-            doc_out_from_extracted(path, doc, started)
-        }
+        Ok(doc) => doc_out_from_extracted(path, doc, started),
         Err(e) => {
             if let Ok(doc) = external_extract(Path::new(path)) {
                 return doc_out_from_extracted(path, doc, started);
@@ -173,10 +187,6 @@ fn external_extract(path: &Path) -> Result<ExtractedDocument> {
         "djvu" | "djv" => external_djvu(path),
         "rtf" => external_rtf(path),
         "ppt" => external_ppt(path),
-        "png" | "jpg" | "jpeg" | "gif" | "bmp" | "tif" | "tiff" => {
-            external_image_ocr(path, &extension)
-        }
-        "pdf" => external_pdf_ocr(path),
         _ => bail!("no bounded native external lane for extension {extension:?}"),
     }
 }
@@ -288,103 +298,6 @@ fn external_ppt(path: &Path) -> Result<ExtractedDocument> {
         Duration::from_secs(120),
     )?;
     external_text_document(path, content, "ppt", "strings")
-}
-
-fn external_image_ocr(path: &Path, source_format: &str) -> Result<ExtractedDocument> {
-    let temp = tempdir().context("creating image OCR directory")?;
-    let output = temp.path().join("output.txt");
-    let textra = run_program(
-        "textra",
-        vec![
-            path.as_os_str().to_owned(),
-            OsString::from("-o"),
-            output.as_os_str().to_owned(),
-        ],
-        Duration::from_secs(180),
-    );
-    if textra.is_ok() && output.is_file() {
-        let content = read_file_limited(&output)?;
-        if !content.trim().is_empty() {
-            return external_text_document(path, content, source_format, "textra_ocr");
-        }
-    }
-    let content = run_program(
-        "tesseract",
-        vec![
-            path.as_os_str().to_owned(),
-            OsString::from("stdout"),
-            OsString::from("-l"),
-            OsString::from("eng"),
-            OsString::from("--psm"),
-            OsString::from("6"),
-        ],
-        Duration::from_secs(180),
-    )?;
-    external_text_document(path, content, source_format, "tesseract_ocr")
-}
-
-fn external_pdf_ocr(path: &Path) -> Result<ExtractedDocument> {
-    let temp = tempdir().context("creating PDF OCR directory")?;
-    let textra_output = temp.path().join("textra.txt");
-    let textra = run_program(
-        "textra",
-        vec![
-            path.as_os_str().to_owned(),
-            OsString::from("-o"),
-            textra_output.as_os_str().to_owned(),
-        ],
-        Duration::from_secs(1800),
-    );
-    if textra.is_ok() && textra_output.is_file() {
-        let content = read_file_limited(&textra_output)?;
-        if !content.trim().is_empty() {
-            return external_text_document(path, content, "pdf", "textra_ocr");
-        }
-    }
-
-    let mut last_error = None;
-    for (index, language) in ["chi_sim+eng", "eng"].into_iter().enumerate() {
-        let output = temp.path().join(format!("ocr-{index}.pdf"));
-        match run_program(
-            "ocrmypdf",
-            vec![
-                OsString::from("-l"),
-                OsString::from(language),
-                OsString::from("--force-ocr"),
-                OsString::from("--output-type"),
-                OsString::from("pdf"),
-                path.as_os_str().to_owned(),
-                output.as_os_str().to_owned(),
-            ],
-            Duration::from_secs(1800),
-        ) {
-            Ok(_) if output.is_file() => {
-                let mut document = extract_file(
-                    &output,
-                    ExtractOptions {
-                        mime_type: Some("application/pdf"),
-                        source_path: output.to_str(),
-                        kind: HtmlKind::Auto,
-                    },
-                )?;
-                document.source_format = "pdf".to_string();
-                document.extraction_metadata["content_extraction"]["extraction_method"] =
-                    Value::String("ocrmypdf".to_string());
-                document.extraction_metadata["content_extraction"]["ocr_applied"] =
-                    Value::Bool(true);
-                document.extraction_metadata["content_extraction"]["ocr_needed"] =
-                    Value::Bool(false);
-                document.extraction_metadata["content_extraction"]["requires_full_pdf_ocr"] =
-                    Value::Bool(false);
-                document.extraction_metadata["content_extraction"]["external_command_bounded"] =
-                    Value::Bool(true);
-                return Ok(document);
-            }
-            Ok(_) => last_error = Some(anyhow!("ocrmypdf produced no output")),
-            Err(error) => last_error = Some(error),
-        }
-    }
-    Err(last_error.unwrap_or_else(|| anyhow!("ocrmypdf failed")))
 }
 
 fn run_program(program: &str, args: Vec<OsString>, timeout: Duration) -> Result<String> {

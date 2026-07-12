@@ -23,7 +23,8 @@ The optional local safety limits are:
 
 The Rust path directly parses the common text, HTML, PDF, Office, EPUB, and
 spreadsheet formats. Its bounded external lanes use `ebook-convert` for
-MOBI/AZW, `djvutxt` for DJVU, `textutil` or `unrtf` for RTF, `strings` for
-legacy PPT, `textra` or `tesseract` for images, and `ocrmypdf` for scanned
-PDFs. Every external process has a hard timeout, and captured output is limited
-to 64 MiB.
+MOBI/AZW, `djvutxt` for DJVU, `textutil` or `unrtf` for RTF, and `strings` for
+legacy PPT. MuPDF owns PDF text extraction. Files that genuinely require OCR
+are returned to Doctrail for routing through its configured OCR backend; Rust
+never starts a local OCR engine. Every external process has a hard timeout, and
+captured output is limited to 64 MiB.

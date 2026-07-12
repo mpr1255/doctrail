@@ -9,11 +9,14 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import respx
+from httpx import Response
 
 from doctrail.ingest.document_processor import (
     SUPPORTED_EXTENSION_FAMILIES,
     SkippedFileException,
     _load_mac_ocr_module,
+    _ocr_with_mac_ocr_service,
     format_supported_extensions_for_help,
     process_document,
 )
@@ -114,6 +117,29 @@ def test_load_mac_ocr_module_from_env_path(monkeypatch, tmp_path):
     module = _load_mac_ocr_module()
 
     assert hasattr(module, "ocr_async")
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_mac_ocr_service_uses_configured_funnel_reservation(monkeypatch, tmp_path):
+    first = "https://ocr-one.example/funnel"
+    second = "https://ocr-two.example/funnel"
+    monkeypatch.setenv("MAC_OCR__SERVICE_ENDPOINTS", f"{first},{second}")
+    image_path = tmp_path / "page.png"
+    image_path.write_bytes(b"image bytes")
+
+    respx.post(f"{first}/reserve").mock(return_value=Response(503))
+    respx.post(f"{second}/reserve").mock(
+        return_value=Response(201, json={"reservation_id": "reserved"})
+    )
+    upload = respx.post(f"{second}/ocr", params={"reservation_id": "reserved"}).mock(
+        return_value=Response(200, json={"text": "==== Page 1 ====\nFarm OCR text"})
+    )
+
+    text = await _ocr_with_mac_ocr_service(str(image_path))
+
+    assert "Farm OCR text" in text
+    assert upload.called
 
 
 @pytest.mark.asyncio

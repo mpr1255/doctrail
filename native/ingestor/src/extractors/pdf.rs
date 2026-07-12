@@ -244,12 +244,7 @@ fn process_pdf_extraction_result(
 
     let extraction_failed = extraction.is_none();
     let page_count = extraction.as_ref().and_then(|value| value.page_count);
-    let (mut ocr_needed, mut ocr_reason) =
-        needs_ocr(&content, page_count, extraction_failed, &language_detection);
-    if !ocr_needed && crate::mojibake_rejection(&content, "").is_some() {
-        ocr_needed = true;
-        ocr_reason = "mojibake_detected";
-    }
+    let (ocr_needed, ocr_reason) = needs_ocr(&content, page_count, extraction_failed);
 
     PdfExtractionAttempt {
         raw_text,
@@ -455,7 +450,6 @@ fn needs_ocr(
     content: &str,
     page_count: Option<usize>,
     extraction_failed: bool,
-    language_detection: &LanguageDetectionReport,
 ) -> (bool, &'static str) {
     if extraction_failed {
         return (true, "pdf_text_extraction_failed");
@@ -466,10 +460,32 @@ fn needs_ocr(
     if content.trim().is_empty() {
         return (true, "empty_extraction");
     }
-    if !language_detection.threshold_passed {
-        return (true, "language_detection_threshold_failed");
+    let non_space = content
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .count();
+    let replacement = content
+        .chars()
+        .filter(|character| *character == '\u{fffd}')
+        .count();
+    let control = content
+        .chars()
+        .filter(|character| {
+            let value = *character as u32;
+            (value < 0x20 && !matches!(*character, '\t' | '\n' | '\r'))
+                || (0x7f..=0x9f).contains(&value)
+        })
+        .count();
+    if replacement.saturating_mul(20) >= non_space || control.saturating_mul(10) >= non_space {
+        return (true, "corrupt_text_layer");
     }
-    (false, "language_detection_threshold_passed")
+    if let Some(page_count) = page_count.filter(|count| *count > 0) {
+        let character_count = content.chars().count();
+        if character_count < page_count.saturating_mul(40) {
+            return (true, "sparse_text_layer");
+        }
+    }
+    (false, "usable_text_layer")
 }
 
 fn title_from_content_text(content: &str) -> Option<String> {
@@ -551,7 +567,36 @@ mod tests {
         );
         assert_eq!(content_extraction["pdf_text_backend_requested"], "mupdf");
         assert_eq!(content_extraction["pdf_text_backend"], "mupdf");
-        assert_eq!(content_extraction["ocr_needed"], false);
+        assert_eq!(
+            content_extraction["ocr_needed"],
+            false,
+            "reason={} chars={} sample={:?}",
+            content_extraction["ocr_reason"],
+            extracted.content.chars().count(),
+            extracted.content.chars().take(500).collect::<String>()
+        );
+    }
+
+    #[test]
+    fn text_rich_real_pdf_from_env_never_requires_ocr() {
+        let Ok(path) = std::env::var("DOCTRAIL_TEXT_RICH_PDF_TEST") else {
+            return;
+        };
+        let bytes = std::fs::read(path).unwrap();
+        let extracted = extract_pdf_bytes(&bytes, None, Some("application/pdf")).unwrap();
+        let content_extraction = &extracted.extraction_metadata["content_extraction"];
+
+        assert!(extracted.content.chars().count() > 1_000_000);
+        assert_eq!(content_extraction["pdf_text_backend"], "mupdf");
+        assert_eq!(
+            content_extraction["ocr_needed"],
+            false,
+            "reason={} chars={} sample={:?}",
+            content_extraction["ocr_reason"],
+            extracted.content.chars().count(),
+            extracted.content.chars().take(500).collect::<String>()
+        );
+        assert_eq!(content_extraction["ocr_reason"], "usable_text_layer");
     }
 
     #[test]
@@ -568,6 +613,6 @@ mod tests {
         let attempt = process_pdf_extraction_result(Ok(extraction), Duration::from_millis(123));
 
         assert!(attempt.ocr_needed);
-        assert_eq!(attempt.ocr_reason, "mojibake_detected");
+        assert_eq!(attempt.ocr_reason, "corrupt_text_layer");
     }
 }
