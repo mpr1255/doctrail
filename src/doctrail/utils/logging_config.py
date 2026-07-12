@@ -75,6 +75,8 @@ def suppress_noisy_loggers() -> None:
     logging.getLogger('filelock').setLevel(logging.WARNING)
     logging.getLogger('tika').setLevel(logging.WARNING)
     logging.getLogger('chardet').setLevel(logging.WARNING)
+    logging.getLogger('PIL').setLevel(logging.WARNING)
+    logging.getLogger('asyncio').setLevel(logging.WARNING)
     
     # Suppress environment variable manipulation warnings
     os.environ['GRPC_VERBOSITY'] = 'ERROR'
