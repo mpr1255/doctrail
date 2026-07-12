@@ -1,6 +1,6 @@
 import pytest
 
-from doctrail.ingest.text_processing import clean_ocr_text
+from doctrail.ingest.text_processing import clean_ocr_text, sanitize_text_for_storage
 
 
 def test_clean_ocr_text_preserves_linebreaks():
@@ -24,3 +24,17 @@ def test_clean_ocr_text_normalizes_whitespace_without_collapsing_lines():
         "",
         "Line three",
     ]
+
+
+def test_sanitize_text_for_storage_removes_controls_and_terminal_escapes():
+    raw = (
+        "\x1b[31mRed\x1b[0m\x00\x07\r\n"
+        "Next\u0085Line\ufeff\u202eEND\u200d\u200c\tTabbed"
+    )
+
+    assert sanitize_text_for_storage(raw) == "Red\nNextLineEND\u200d\u200c\tTabbed"
+
+
+def test_sanitize_text_for_storage_rejects_non_strings():
+    with pytest.raises(TypeError, match="expected str"):
+        sanitize_text_for_storage(b"bytes")

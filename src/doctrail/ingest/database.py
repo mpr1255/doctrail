@@ -17,10 +17,27 @@ from typing import Any, Dict, Optional, List
 import sqlite_utils
 from loguru import logger
 
+from .text_processing import sanitize_text_for_storage
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_BUSY_TIMEOUT_MS = 30_000
 INSERT_LOCK_ATTEMPTS = 5
+
+
+def _sanitize_storage_value(value):
+    if isinstance(value, str):
+        return sanitize_text_for_storage(value)
+    if isinstance(value, dict):
+        return {
+            sanitize_text_for_storage(str(key)): _sanitize_storage_value(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_sanitize_storage_value(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_sanitize_storage_value(item) for item in value)
+    return value
 
 
 def _busy_timeout_ms() -> int:
@@ -93,13 +110,16 @@ def insert_document(
     extra_fields: optional flat dict of additional top-level columns to set (e.g., url, archive_url)
     """
     stat_source = Path(file_stat_path) if file_stat_path else Path(file_path)
+    content = sanitize_text_for_storage(content)
     important_fields = {
         'original_url', 'source_url', 'url',
         'extraction_method', 'processing_method',
         'author', 'title', 'language',
     }
     stored_metadata = {
-        key: str(value) if value is not None else None
+        sanitize_text_for_storage(str(key)): (
+            sanitize_text_for_storage(str(value)) if value is not None else None
+        )
         for key, value in metadata.items()
     }
     top_level_metadata = {
@@ -132,7 +152,7 @@ def insert_document(
                 )
                 document = {
                     "sha1": sha1,
-                    "filename": os.path.basename(file_path),
+                    "filename": sanitize_text_for_storage(os.path.basename(file_path)),
                     "filepath": os.path.abspath(file_path),
                     "raw_content": content,
                     "file_created": datetime.fromtimestamp(stat_source.stat().st_ctime).isoformat(),
@@ -143,11 +163,11 @@ def insert_document(
                     **top_level_metadata,
                 }
                 if labels:
-                    document["labels"] = json.dumps(list(labels))
+                    document["labels"] = json.dumps(_sanitize_storage_value(list(labels)))
                 if json_metadata is not None:
-                    document["json_metadata"] = json.dumps(json_metadata)
+                    document["json_metadata"] = json.dumps(_sanitize_storage_value(json_metadata))
                 if extra_fields:
-                    document.update(extra_fields)
+                    document.update(_sanitize_storage_value(extra_fields))
 
                 db[table_name].insert(document, alter=True, pk="sha1", replace=True)
                 logger.debug(f"Successfully inserted document {sha1} into {table_name}")

@@ -71,6 +71,34 @@ def test_ingest_added_at_is_set_once_and_preserved_on_overwrite(tmp_path):
     assert overwritten["raw_content"] == "second version"
 
 
+def test_ingest_sanitizes_content_and_metadata_at_storage_boundary(tmp_path):
+    from doctrail.ingest.database import insert_document
+
+    source = tmp_path / "document.txt"
+    source.write_text("source", encoding="utf-8")
+    db = sqlite_utils.Database(tmp_path / "documents.db")
+
+    insert_document(
+        db,
+        "documents",
+        "sanitized-sha1",
+        str(source),
+        "\x1b[31mRed\x1b[0m\x00\r\nNext\u0085Line\u202e",
+        {"title": "\x1b[1mClean title\x1b[0m\x07"},
+        labels=["safe\x00label"],
+        json_metadata={"nested": {"value": "text\u0085value"}},
+        extra_fields={"source_url": "https://example.test/\x07item"},
+    )
+
+    row = db["documents"].get("sanitized-sha1")
+    assert row["raw_content"] == "Red\nNextLine"
+    assert row["title"] == "Clean title"
+    assert json.loads(row["metadata"])["title"] == "Clean title"
+    assert json.loads(row["labels"]) == ["safelabel"]
+    assert json.loads(row["json_metadata"])["nested"]["value"] == "textvalue"
+    assert row["source_url"] == "https://example.test/item"
+
+
 def test_ingest_backfills_added_at_from_existing_updated_at(tmp_path):
     from doctrail.ingest.database import insert_document
 

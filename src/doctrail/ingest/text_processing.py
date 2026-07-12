@@ -7,9 +7,56 @@ extracted text content.
 
 import re
 import logging
+import unicodedata
 from typing import Dict
 
 logger = logging.getLogger(__name__)
+
+ANSI_ESCAPE_RE = re.compile(
+    r"""
+    \x1b
+    (?:
+        \[[0-?]*[\x20-\x2f]*[@-~]
+        |\][^\x07\x1b]*(?:\x07|\x1b\\)
+        |[PX^_][^\x1b]*(?:\x1b\\)
+        |[@-_]
+    )
+    """,
+    re.VERBOSE | re.DOTALL,
+)
+
+BIDI_CONTROL_CODEPOINTS = {
+    0x061C,
+    0x200E,
+    0x200F,
+    *range(0x202A, 0x202F),
+    *range(0x2066, 0x206A),
+}
+
+
+def sanitize_text_for_storage(text: str) -> str:
+    """Remove unsafe controls without damaging multilingual text."""
+    if not isinstance(text, str):
+        raise TypeError(f"sanitize_text_for_storage expected str, got {type(text).__name__}")
+    if not text:
+        return ""
+
+    text = ANSI_ESCAPE_RE.sub("", text)
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    text = text.replace("\f", "\n").replace("\v", " ")
+
+    cleaned = []
+    for character in text:
+        if character in "\n\t":
+            cleaned.append(character)
+            continue
+        codepoint = ord(character)
+        if codepoint == 0xFEFF or codepoint in BIDI_CONTROL_CODEPOINTS:
+            continue
+        if unicodedata.category(character) in {"Cc", "Cs"}:
+            continue
+        cleaned.append(character)
+    return "".join(cleaned)
 
 
 def add_page_markers(text: str) -> str:
