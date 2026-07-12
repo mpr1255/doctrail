@@ -224,6 +224,62 @@ def test_ingest_wal_allows_writer_while_reader_holds_snapshot(tmp_path):
         assert fresh_reader.execute("SELECT COUNT(*) FROM documents").fetchone()[0] == 2
 
 
+def test_ingest_loads_simple_tokenizer_required_by_existing_fts(monkeypatch, tmp_path):
+    from doctrail.ingest import database as ingest_database
+
+    extension = tmp_path / "libsimple.dylib"
+    extension.write_bytes(b"placeholder")
+
+    class Cursor:
+        def fetchall(self):
+            return [("CREATE VIRTUAL TABLE docs_fts USING fts5(text, tokenize='simple')",)]
+
+    class Connection:
+        def __init__(self):
+            self.extension_states = []
+            self.loaded = []
+
+        def execute(self, _sql):
+            return Cursor()
+
+        def enable_load_extension(self, enabled):
+            self.extension_states.append(enabled)
+
+        def load_extension(self, path):
+            self.loaded.append(path)
+
+    connection = Connection()
+    monkeypatch.setattr(ingest_database, "_simple_tokenizer_path", lambda: extension)
+
+    ingest_database._load_required_fts_extensions(connection)
+
+    assert connection.loaded == [str(extension)]
+    assert connection.extension_states == [True, False]
+
+
+def test_ingest_does_not_load_extension_for_builtin_fts(monkeypatch):
+    from doctrail.ingest import database as ingest_database
+
+    class Cursor:
+        def fetchall(self):
+            return [("CREATE VIRTUAL TABLE docs_fts USING fts5(text, tokenize='unicode61')",)]
+
+    class Connection:
+        def execute(self, _sql):
+            return Cursor()
+
+        def enable_load_extension(self, _enabled):
+            raise AssertionError("builtin tokenizers must not load an extension")
+
+    monkeypatch.setattr(
+        ingest_database,
+        "_simple_tokenizer_path",
+        lambda: (_ for _ in ()).throw(AssertionError("path lookup must not run")),
+    )
+
+    ingest_database._load_required_fts_extensions(Connection())
+
+
 def test_ingest_waits_until_writer_lock_is_released(tmp_path, monkeypatch):
     from doctrail.ingest.database import configure_ingest_database, insert_document
 

@@ -8,6 +8,7 @@ and managing database schema for the ingestion process.
 import os
 import json
 import logging
+import re
 import sqlite3
 import threading
 import time
@@ -24,6 +25,60 @@ logger = logging.getLogger(__name__)
 DEFAULT_BUSY_TIMEOUT_MS = 1_000
 INSERT_LOCK_RETRY_DELAY_SECONDS = 0.5
 INSERT_LOCK_LOG_INTERVAL_SECONDS = 30.0
+
+
+def _simple_tokenizer_path() -> Path:
+    configured = os.environ.get("DOCTRAIL_SQLITE_SIMPLE_EXTENSION")
+    candidates = []
+    if configured:
+        candidates.append(Path(configured).expanduser())
+
+    module_dir = Path(__file__).resolve().parent
+    candidates.extend(
+        [
+            module_dir / "libsimple.dylib",
+            module_dir / "libsimple.so",
+            Path.home() / ".claude/skills/sqlite-search/libsimple.dylib",
+            Path.home() / ".claude/skills/sqlite-search/libsimple.so",
+        ]
+    )
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+
+    raise RuntimeError(
+        "This database contains an FTS5 index using the custom simple tokenizer, "
+        "but its SQLite extension is unavailable. Set "
+        "DOCTRAIL_SQLITE_SIMPLE_EXTENSION to libsimple.dylib or libsimple.so."
+    )
+
+
+def _load_required_fts_extensions(connection) -> None:
+    """Load connection-local extensions required by existing FTS tables."""
+    fts_definitions = connection.execute(
+        "SELECT sql FROM sqlite_master "
+        "WHERE type = 'table' AND sql LIKE '%USING fts5%'"
+    ).fetchall()
+    simple_pattern = re.compile(
+        r"\btokenize\s*=\s*(['\"]?)simple(?:\s|['\"]|\))",
+        re.IGNORECASE,
+    )
+    if not any(simple_pattern.search(row[0] or "") for row in fts_definitions):
+        return
+
+    extension_path = _simple_tokenizer_path()
+    try:
+        connection.enable_load_extension(True)
+        connection.load_extension(str(extension_path))
+    except (AttributeError, sqlite3.Error) as exc:
+        raise RuntimeError(
+            f"Could not load the SQLite simple tokenizer from {extension_path}: {exc}"
+        ) from exc
+    finally:
+        try:
+            connection.enable_load_extension(False)
+        except AttributeError:
+            pass
 
 
 def _sanitize_storage_value(value):
@@ -54,6 +109,7 @@ def _busy_timeout_ms() -> int:
 
 def configure_ingest_database(db):
     """Configure one sqlite-utils connection for one writer and many readers."""
+    _load_required_fts_extensions(db.conn)
     timeout_ms = _busy_timeout_ms()
     db.execute(f"PRAGMA busy_timeout = {timeout_ms}")
     current_mode = db.execute("PRAGMA journal_mode").fetchone()[0]
