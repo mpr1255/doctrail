@@ -543,8 +543,15 @@ async def process_ingest(
             logger.info(f"Skipped {pre_hidden - len(all_files)} file(s) inside hidden directories")
         logger.info(f"Found {len(all_files)} total files in {input_dir}")
 
+    from .embedded_media import OFFICE_SUFFIXES
+    resume_office_paths: set[str] = set()
     if skip_existing and existing_filepaths:
         before_fast_skip = len(all_files)
+        resume_office_paths = {
+            str(path)
+            for path in all_files
+            if str(path) in existing_filepaths and path.suffix.lower() in OFFICE_SUFFIXES
+        }
         # ZIP rows use archive.zip!/member logical paths and must still be
         # expanded so a partially ingested archive can resume safely.
         all_files = [
@@ -607,9 +614,9 @@ async def process_ingest(
 
     # Filter out already-processed files
     files_to_process = []
+    hash_candidates: List[Path] = []
     existing_office_paths: set[str] = set()
     skipped_count = 0
-    from .embedded_media import OFFICE_SUFFIXES
     
     with Progress(
         SpinnerColumn(),
@@ -639,22 +646,62 @@ async def process_ingest(
             if file_path.suffix.lower() not in SUPPORTED_EXTENSIONS:
                 skipped_count += 1
                 continue
-            
-            # Calculate SHA1
-            try:
-                with open(file_path, 'rb') as f:
-                    file_sha1 = hashlib.sha1(f.read()).hexdigest()
-                
-                # Skip if already processed (unless overwriting)
+
+            logical_path = effective_override_filepaths.get(str(file_path), str(file_path))
+            if skip_existing and logical_path in existing_filepaths:
+                if file_path.suffix.lower() in OFFICE_SUFFIXES:
+                    existing_office_paths.add(str(file_path))
+                continue
+            hash_candidates.append(file_path)
+
+        if hash_candidates:
+            hash_workers = min(
+                _default_worker_count() if workers is None else workers,
+                len(hash_candidates),
+            )
+            hash_task = progress.add_task(
+                f"Hashing {len(hash_candidates)} files ({hash_workers} workers)...",
+                total=len(hash_candidates),
+            )
+            hash_results = None
+            if (
+                extractor in {"auto", "rust"}
+                and not os.environ.get("DOCTRAIL_DISABLE_NATIVE")
+            ):
+                try:
+                    from . import native_extractor
+
+                    if native_extractor.available():
+                        hash_results = native_extractor.hash_batch(
+                            [str(path) for path in hash_candidates], hash_workers
+                        )
+                except Exception as exc:
+                    logger.warning(f"Native multicore hashing failed; using Python: {exc}")
+            if hash_results is None:
+                hash_results = []
+                for path in hash_candidates:
+                    try:
+                        with path.open("rb") as handle:
+                            sha1 = hashlib.file_digest(handle, "sha1").hexdigest()
+                        hash_results.append({"path": str(path), "sha1": sha1, "error": None})
+                    except Exception as exc:
+                        hash_results.append({
+                            "path": str(path), "sha1": None, "error": str(exc)
+                        })
+
+            for file_path, hash_result in zip(hash_candidates, hash_results):
+                progress.update(hash_task, advance=1)
+                file_sha1 = hash_result.get("sha1")
+                if not file_sha1:
+                    logger.warning(
+                        f"Could not hash {file_path}: {hash_result.get('error') or 'unknown error'}"
+                    )
+                    continue
                 if not overwrite and file_sha1 in existing_sha1s:
                     if file_path.suffix.lower() in OFFICE_SUFFIXES:
                         existing_office_paths.add(str(file_path))
                     continue
-                
                 files_to_process.append((file_path, file_sha1))
-            except Exception as e:
-                logger.warning(f"Could not read file {file_path}: {e}")
-                continue
 
     # Deduplicate by sha1 (the ingest row key): identical bytes are the same
     # document. Keep the first occurrence in input order so the winning row is
@@ -1145,15 +1192,19 @@ async def process_ingest(
                         if not shutdown_requested:
                             submit_next()
     
-    # Extract each embedded Office image as a linked child row and OCR it. This
-    # runs after parent rows are durable so every child can point to an existing
-    # parent sha1. ZIP-expanded Office files still exist until archive cleanup.
+    # Extract Office images locally, send only normalized PNGs to OCR, and merge
+    # the resulting text into the parent row. Include failed and fast-skipped
+    # Office parents: the image lane may recover an otherwise image-only file.
     from .embedded_media import run_media_ingest
-    office_paths = [
-        str(path)
-        for path in all_files
-        if str(path) in successful_source_paths and path.suffix.lower() in OFFICE_SUFFIXES
-    ]
+    office_paths = sorted(
+        {
+            str(path)
+            for path in all_files
+            if path.suffix.lower() in OFFICE_SUFFIXES
+        }
+        | existing_office_paths
+        | resume_office_paths
+    )
     if office_paths:
         console.print(f"\n[cyan]Extracting embedded images from {len(office_paths)} Office file(s)...[/cyan]")
         embedded_media_stats = await asyncio.to_thread(
@@ -1173,7 +1224,7 @@ async def process_ingest(
             failed_files.append(("embedded media", media_error))
         console.print(
             "  Embedded images: "
-            f"[green]{embedded_media_stats.get('inserted', 0)} stored[/green], "
+            f"[green]{embedded_media_stats.get('inserted', 0)} parent rows merged[/green], "
             f"{embedded_media_stats.get('ocr_chars', 0)} OCR characters"
         )
         if embedded_media_stats.get("ocr_empty"):

@@ -3,9 +3,8 @@
 Office files (``.doc/.docx/.xls/.xlsx/.ppt/.pptx``) frequently paste screenshots
 inline. A text-only extractor drops every one, yet those images are often the
 primary evidence (a captured web page, a scanned table). This module pulls the
-embedded images out, OCRs each one, and stores it as its own row in the same
-``documents`` table, linked back to the parent document so a claim in the parent
-text can be tied to the screenshot that proves it.
+embedded images out, converts them to PNG, OCRs only those PNGs, and folds the
+result back into the parent document row.
 
 Extraction paths
 ----------------
@@ -16,13 +15,11 @@ Extraction paths
   whether the file has any images at all; if so, LibreOffice headless converts
   it to OOXML and we read the media from the converted zip.
 
-Row model
----------
-Each embedded-image occurrence becomes a ``documents`` row keyed by its parent,
-position, media name, and image hash. ``parent_sha1`` / ``parent_path`` /
-``image_index`` record where it was found, while ``image_sha1`` preserves the
-content identity shared by duplicate screenshots. ``raw_content`` is the OCR
-text (so FTS indexes it); EXIF and the original media name land in ``metadata``.
+Storage model
+-------------
+The parent row keeps its native text, followed by labelled embedded-image OCR
+sections. Per-image names, hashes, dimensions, and OCR status are retained in
+``json_metadata``. No Office container is ever uploaded to an OCR endpoint.
 """
 
 from __future__ import annotations
@@ -35,6 +32,7 @@ import signal
 import subprocess
 import tempfile
 import zipfile
+from datetime import datetime
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
 
@@ -349,12 +347,17 @@ def _extract_rows_for_file(
 
 
 def ocr_fn_for_bytes(data: bytes, media_name: str, ocr_fn: Callable[[Path], str]) -> str:
-    """Write image bytes to a temp file (the OCR clients take a path) and OCR."""
-    suffix = Path(media_name).suffix.lower() or ".png"
-    with tempfile.NamedTemporaryFile(suffix=suffix, delete=True) as tf:
-        tf.write(data)
-        tf.flush()
-        return ocr_fn(Path(tf.name)) or ""
+    """Normalize embedded raster data to PNG before calling an OCR client."""
+    from PIL import Image
+
+    with Image.open(io.BytesIO(data)) as image:
+        image.load()
+        if image.mode not in {"1", "L", "LA", "RGB", "RGBA"}:
+            image = image.convert("RGBA" if "transparency" in image.info else "RGB")
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=True) as tf:
+            image.save(tf, format="PNG")
+            tf.flush()
+            return ocr_fn(Path(tf.name)) or ""
 
 
 def _ocr_callable(ocr_engine: str):
@@ -396,16 +399,17 @@ def run_media_ingest(
     fulltext: bool = True,
     path_overrides: Optional[Dict[str, str]] = None,
 ) -> Dict[str, object]:
-    """Extract + OCR embedded Office images into ``table_name`` as child rows.
-
-    Each image occurrence becomes a stable row linked to its parent via
-    ``parent_sha1`` / ``image_index``. The separate ``image_sha1`` field records
-    duplicate image content across parents. FTS on ``raw_content`` makes the OCR
-    text searchable next to the source text.
-    """
+    """OCR embedded Office images and merge the text into each parent row."""
     from concurrent.futures import ThreadPoolExecutor, as_completed
+    import json
     import sqlite_utils
-    from .database import configure_ingest_database, insert_document, setup_fts
+    from .database import (
+        _sanitize_storage_value,
+        configure_ingest_database,
+        insert_document,
+        setup_fts,
+    )
+    from .text_processing import sanitize_text_for_storage
 
     if ocr_engine == "none":
         ocr_fn, ocr_label = (lambda p: ""), "none"
@@ -420,14 +424,15 @@ def run_media_ingest(
     logger.info(f"Scanning {len(files)} Office file(s) for embedded images")
 
     db = configure_ingest_database(sqlite_utils.Database(db_path))
-    seen_row_sha1: set = set()
+    processed_parent_sha1s: set[str] = set()
     if table_name in db.table_names() and not overwrite:
         try:
-            seen_row_sha1 = {
-                r["sha1"] for r in db[table_name].rows_where("source_format = ?", ["embedded-image"])
-            }
+            for row in db[table_name].rows_where("json_metadata IS NOT NULL"):
+                value = json.loads(row.get("json_metadata") or "{}")
+                if isinstance(value, dict) and "embedded_media" in value:
+                    processed_parent_sha1s.add(row["sha1"])
         except Exception:
-            seen_row_sha1 = set()
+            processed_parent_sha1s = set()
 
     stats: Dict[str, object] = {
         "files_with_images": 0,
@@ -440,15 +445,13 @@ def run_media_ingest(
     }
 
     def worker(path: Path):
+        parent_sha1 = sha1_bytes(path.read_bytes())
+        if parent_sha1 in processed_parent_sha1s and not overwrite:
+            return parent_sha1, None
         logical_path = (path_overrides or {}).get(str(path), str(path))
-        return _extract_rows_for_file(
-            path,
-            soffice=soffice,
-            ocr_fn=ocr_fn,
-            ocr_engine=ocr_label,
-            min_ocr_dim=min_ocr_dim,
-            logical_parent_path=logical_path,
-            skip_row_sha1s=seen_row_sha1,
+        return parent_sha1, _extract_rows_for_file(
+            path, soffice=soffice, ocr_fn=ocr_fn, ocr_engine=ocr_label,
+            min_ocr_dim=min_ocr_dim, logical_parent_path=logical_path,
         )
 
     with ThreadPoolExecutor(max_workers=workers) as pool:
@@ -458,37 +461,110 @@ def run_media_ingest(
             done += 1
             src = futures[fut]
             try:
-                rows = fut.result()
+                parent_sha1, rows = fut.result()
             except Exception as exc:
                 logger.warning(f"Embedded-media worker failed for {src.name}: {exc}")
                 stats["failed_files"].append(f"{src}: {exc}")
                 continue
+            if rows is None:
+                stats["skipped_dupe"] += 1
+                continue
             if rows:
                 stats["files_with_images"] += 1
+
+            ocr_sections = []
+            media_records = []
             for row in rows:
                 stats["images"] += 1
                 if row["metadata"].get("ocr_attempted") and not row["content"]:
                     stats["ocr_empty"] += 1
-                row_sha1 = row["sha1"]
-                if row_sha1 in seen_row_sha1 and not overwrite:
-                    stats["skipped_dupe"] += 1
-                    continue
-                seen_row_sha1.add(row_sha1)
                 stats["ocr_chars"] += len(row["content"])
+                media_records.append({
+                    "index": int(row["extra_fields"]["image_index"]),
+                    "name": row["metadata"]["embedded_media_name"],
+                    "sha1": row["extra_fields"]["image_sha1"],
+                    "width": row["metadata"].get("image_width"),
+                    "height": row["metadata"].get("image_height"),
+                    "ocr_status": row["metadata"]["ocr_status"],
+                    "ocr_chars": len(row["content"]),
+                })
+                if row["content"]:
+                    ocr_sections.append(
+                        f"--- Embedded image {int(row['extra_fields']['image_index']) + 1}: "
+                        f"{row['metadata']['embedded_media_name']} ---\n{row['content']}"
+                    )
+
+            existing_rows = (
+                list(db[table_name].rows_where("sha1 = ?", [parent_sha1]))
+                if table_name in db.table_names()
+                else []
+            )
+            existing = existing_rows[0] if existing_rows else None
+            if not existing and not ocr_sections:
+                continue
+
+            existing_content = (existing or {}).get("raw_content") or ""
+            marker = "\n\n--- EMBEDDED IMAGE OCR ---\n\n"
+            base_content = existing_content.split(marker, 1)[0].rstrip()
+            merged_content = base_content
+            if ocr_sections:
+                merged_content = f"{base_content}{marker}{chr(10).join(ocr_sections)}".strip()
+
+            try:
+                metadata = json.loads((existing or {}).get("metadata") or "{}")
+            except (TypeError, json.JSONDecodeError):
+                metadata = {}
+            if not isinstance(metadata, dict):
+                metadata = {}
+            metadata.update({
+                "embedded_media_count": len(rows),
+                "embedded_media_ocr_count": len(ocr_sections),
+                "embedded_media_ocr_chars": sum(len(row["content"]) for row in rows),
+                "embedded_media_processing": "local-extract-png-mac-ocr-merge",
+            })
+            try:
+                json_metadata = json.loads((existing or {}).get("json_metadata") or "{}")
+            except (TypeError, json.JSONDecodeError):
+                json_metadata = {}
+            if not isinstance(json_metadata, dict):
+                json_metadata = {}
+            json_metadata["embedded_media"] = media_records
+
+            logical_path = (path_overrides or {}).get(str(src), str(src))
+            if existing:
+                db[table_name].update(
+                    parent_sha1,
+                    {
+                        "raw_content": sanitize_text_for_storage(merged_content),
+                        "metadata": json.dumps(_sanitize_storage_value(metadata)),
+                        "json_metadata": json.dumps(_sanitize_storage_value(json_metadata)),
+                        "updated_at": datetime.now().isoformat(),
+                    },
+                    alter=True,
+                )
+            else:
                 insert_document(
                     db,
                     table_name,
-                    row_sha1,
-                    row["synthetic_path"],
-                    row["content"],
-                    row["metadata"],
-                    extra_fields=row["extra_fields"],
-                    overwrite=overwrite,
-                    file_stat_path=row["file_stat_path"],
+                    parent_sha1,
+                    logical_path,
+                    merged_content,
+                    {
+                        "title": src.stem,
+                        "source_format": src.suffix.lower().lstrip("."),
+                        "extraction_method": "embedded-media-ocr-only",
+                        **metadata,
+                    },
+                    json_metadata=json_metadata,
+                    extra_fields={"source_format": src.suffix.lower().lstrip(".")},
+                    file_stat_path=str(src),
                 )
-                stats["inserted"] += 1
+            stats["inserted"] += 1
             if done % 50 == 0:
-                logger.info(f"media ingest {done}/{len(files)} files, {stats['inserted']} images stored")
+                logger.info(
+                    f"media ingest {done}/{len(files)} files, "
+                    f"{stats['inserted']} parent rows merged"
+                )
 
     # Refresh FTS so the new OCR text is searchable.
     if fulltext:

@@ -299,8 +299,46 @@ def test_legacy_media_conversion_kills_process_group_on_timeout(monkeypatch, tmp
     assert calls["communicate"] == 2
 
 
+def test_embedded_media_ocr_creates_parent_for_image_only_office_file(monkeypatch, tmp_path):
+    source = tmp_path / "image-only.doc"
+    source.write_bytes(b"legacy parent bytes")
+    image_bytes = (ASSET_DIR / "federalist_fixture.png").read_bytes()
+    monkeypatch.setattr(
+        embedded_media,
+        "office_images",
+        lambda path, soffice="soffice": [("word/media/image1.jpg", image_bytes)],
+    )
+    ocr_paths = []
+
+    def fake_ocr(path):
+        ocr_paths.append(path)
+        return "Recovered embedded image text"
+
+    monkeypatch.setattr(
+        embedded_media,
+        "_ocr_callable",
+        lambda engine: (fake_ocr, "test-ocr"),
+    )
+    db_path = tmp_path / "image-only.sqlite"
+
+    result = embedded_media.run_media_ingest(
+        [str(source)], str(db_path), ocr_engine="mac-ocr", fulltext=False
+    )
+
+    assert result["inserted"] == 1
+    with sqlite3.connect(db_path) as connection:
+        row = connection.execute(
+            "SELECT sha1, filename, raw_content, json_metadata FROM documents"
+        ).fetchone()
+    assert row[0] == _sha1_for(source)
+    assert row[1] == "image-only.doc"
+    assert "Recovered embedded image text" in row[2]
+    assert len(json.loads(row[3])["embedded_media"]) == 1
+    assert ocr_paths[0].suffix == ".png"
+
+
 @pytest.mark.asyncio
-async def test_native_ingest_extracts_stores_and_ocrs_embedded_docx_image(
+async def test_native_ingest_merges_embedded_docx_image_ocr_into_parent(
     monkeypatch, tmp_path
 ):
     from docx import Document
@@ -309,7 +347,6 @@ async def test_native_ingest_extracts_stores_and_ocrs_embedded_docx_image(
     source = tmp_path / "source"
     source.mkdir()
     image_path = ASSET_DIR / "federalist_fixture.png"
-    image_bytes = image_path.read_bytes()
     docx_path = source / "with-image.docx"
     document = Document()
     document.add_paragraph("Parent document text for native extraction.")
@@ -343,22 +380,24 @@ async def test_native_ingest_extracts_stores_and_ocrs_embedded_docx_image(
     assert result["embedded_media"]["inserted"] == 1
     with sqlite3.connect(db_path) as connection:
         parent = connection.execute(
-            "SELECT sha1, added_at FROM documents WHERE filename = 'with-image.docx'"
+            """SELECT sha1, raw_content, json_metadata, metadata, added_at
+               FROM documents WHERE filename = 'with-image.docx'"""
         ).fetchone()
-        child = connection.execute(
-            """SELECT parent_sha1, raw_content, image_bytes, metadata, added_at
-               FROM documents WHERE source_format = 'embedded-image'"""
-        ).fetchone()
+        row_count = connection.execute("SELECT count(*) FROM documents").fetchone()[0]
 
     assert parent is not None
-    assert child is not None
-    assert child[0] == parent[0]
-    assert child[1] == "Embedded image OCR fixture text"
-    assert child[2] == image_bytes
-    assert json.loads(child[3])["ocr_status"] == "success"
-    assert parent[1]
-    assert child[4]
+    assert "Parent document text for native extraction." in parent[1]
+    assert "--- EMBEDDED IMAGE OCR ---" in parent[1]
+    assert "Embedded image OCR fixture text" in parent[1]
+    media = json.loads(parent[2])["embedded_media"]
+    assert len(media) == 1
+    assert media[0]["ocr_status"] == "success"
+    assert media[0]["ocr_chars"] == len("Embedded image OCR fixture text")
+    assert json.loads(parent[3])["embedded_media_ocr_count"] == 1
+    assert parent[4]
+    assert row_count == 1
     assert len(ocr_calls) == 1
+    assert ocr_calls[0].suffix == ".png"
 
     repeated = await process_ingest(
         db_path=str(db_path),
