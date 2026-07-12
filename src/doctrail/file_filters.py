@@ -20,6 +20,11 @@ def should_skip_file(file_path: str) -> bool:
     if path.name.startswith('.'):
         logger.info(f"Skipping hidden file: {file_path}")
         return True
+
+    # Microsoft Office owner/lock files are not documents or valid OOXML ZIPs.
+    if path.name.startswith('~$'):
+        logger.info(f"Skipping Office lock file: {file_path}")
+        return True
     
     # Skip system files specific to different platforms
     system_files = ['.DS_Store', 'Thumbs.db', 'desktop.ini']

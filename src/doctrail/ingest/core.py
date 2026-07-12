@@ -123,6 +123,7 @@ def _expand_zip_inputs(
     archive_failures: List[tuple[str, str]] = []
     archive_index = 0
     total_expanded_bytes = 0
+    hidden_members_skipped = 0
     tree_entries: Dict[str, int] = {}
     tree_expanded_bytes: Dict[str, int] = {}
 
@@ -180,7 +181,7 @@ def _expand_zip_inputs(
             member_path = member["member_path"]
             member_parts = Path(member_path).parts
             if any(part.startswith(".") or part == "__MACOSX" for part in member_parts):
-                logger.debug(f"Skipping hidden ZIP member: {logical_archive}!/{member_path}")
+                hidden_members_skipped += 1
                 continue
             extracted_path = Path(member["path"])
             member_chain = f"{member_prefix}!/{member_path}" if member_prefix else member_path
@@ -200,7 +201,7 @@ def _expand_zip_inputs(
 
     logger.info(
         f"Expanded {len(zip_paths)} ZIP input(s) into {len(logical_paths)} leaf file(s); "
-        f"{total_expanded_bytes} bytes staged"
+        f"{total_expanded_bytes} bytes staged; skipped {hidden_members_skipped} hidden member(s)"
     )
     return leaves, logical_paths, archive_metadata, staging, archive_failures
 
