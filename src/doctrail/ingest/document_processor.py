@@ -308,7 +308,7 @@ async def _ocr_with_mac_ocr_service(file_path: str) -> str:
                             files={"file": (Path(file_path).name, file_handle)},
                             timeout=timeout,
                         )
-                    if response.status_code >= 500:
+                    if response.status_code >= 400:
                         raise RuntimeError(
                             f"Mac OCR rejected {Path(file_path).name}: "
                             f"HTTP {response.status_code} {response.text[:200]}"

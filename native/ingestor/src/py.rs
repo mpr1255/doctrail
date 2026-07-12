@@ -17,6 +17,7 @@ use pyo3::prelude::*;
 use rayon::prelude::*;
 use serde::Serialize;
 use serde_json::Value;
+use sha1::{Digest, Sha1};
 use std::ffi::OsString;
 use std::fs::{self, File};
 use std::io::{Read, Write};
@@ -59,6 +60,43 @@ struct ArchiveMember {
     member_path: String,
     uncompressed_bytes: u64,
     compressed_bytes: u64,
+}
+
+#[derive(Debug, Serialize)]
+struct HashResult {
+    path: String,
+    sha1: Option<String>,
+    error: Option<String>,
+}
+
+fn hash_one(path: &str) -> HashResult {
+    let result = (|| -> Result<String> {
+        let mut file = File::open(path).with_context(|| format!("opening {path} for hashing"))?;
+        let mut hasher = Sha1::new();
+        let mut buffer = vec![0_u8; 1024 * 1024];
+        loop {
+            let read = file
+                .read(&mut buffer)
+                .with_context(|| format!("reading {path} for hashing"))?;
+            if read == 0 {
+                break;
+            }
+            hasher.update(&buffer[..read]);
+        }
+        Ok(format!("{:x}", hasher.finalize()))
+    })();
+    match result {
+        Ok(sha1) => HashResult {
+            path: path.to_string(),
+            sha1: Some(sha1),
+            error: None,
+        },
+        Err(error) => HashResult {
+            path: path.to_string(),
+            sha1: None,
+            error: Some(format!("{error:#}")),
+        },
+    }
 }
 
 fn meta_str(meta: &Value, section: &str, key: &str) -> Option<String> {
@@ -157,11 +195,7 @@ fn extract_one(path: &str) -> DocOut {
                 return doc_out_from_extracted(path, doc, started);
             }
             let failure = classify_extraction_failure(&e);
-            let ocr_needed = failure
-                .fallback_kind
-                .as_deref()
-                .map(|k| k.contains("ocr"))
-                .unwrap_or(false);
+            let ocr_needed = failure.fallback_kind.as_deref() == Some("configured_ocr_backend");
             let ocr_reason = ocr_needed.then(|| "image_requires_ocr".to_string());
             DocOut {
                 path: path.to_string(),
@@ -194,6 +228,7 @@ fn external_extract(path: &Path) -> Result<ExtractedDocument> {
     match extension.as_str() {
         "mobi" | "azw" | "azw3" => external_ebook_convert(path, &extension),
         "djvu" | "djv" => external_djvu(path),
+        "doc" => external_doc(path),
         "rtf" => external_rtf(path),
         "ppt" => external_ppt(path),
         "xlsx" => external_xlsx(path),
@@ -294,6 +329,49 @@ fn external_rtf(path: &Path) -> Result<ExtractedDocument> {
         ),
     };
     external_text_document(path, content, "rtf", method)
+}
+
+fn external_doc(path: &Path) -> Result<ExtractedDocument> {
+    let antiword = run_program(
+        "antiword",
+        vec![path.as_os_str().to_owned()],
+        Duration::from_secs(120),
+    );
+    if let Ok(content) = antiword {
+        if external_text_is_usable(&content) {
+            return external_text_document(path, content, "doc", "antiword");
+        }
+    }
+
+    let content = run_program(
+        "textutil",
+        vec![
+            OsString::from("-convert"),
+            OsString::from("txt"),
+            OsString::from("-stdout"),
+            path.as_os_str().to_owned(),
+        ],
+        Duration::from_secs(120),
+    )?;
+    if !external_text_is_usable(&content) {
+        bail!("legacy DOC fallbacks produced no usable text");
+    }
+    external_text_document(path, content, "doc", "textutil")
+}
+
+fn external_text_is_usable(content: &str) -> bool {
+    if content.trim().is_empty() || !content.chars().any(char::is_alphanumeric) {
+        return false;
+    }
+    let total = content.chars().count().max(1);
+    let replacement = content.chars().filter(|character| *character == '\u{fffd}').count();
+    let controls = content
+        .chars()
+        .filter(|character| {
+            character.is_control() && !matches!(*character, '\n' | '\r' | '\t')
+        })
+        .count();
+    replacement.saturating_mul(100) < total && controls.saturating_mul(100) < total
 }
 
 fn external_ppt(path: &Path) -> Result<ExtractedDocument> {
@@ -647,6 +725,29 @@ fn extract_batch(py: Python<'_>, paths: Vec<String>, threads: Option<usize>) -> 
     })
 }
 
+/// Hash paths in parallel with streaming SHA-1 reads. Results are ordered and
+/// per-file failures never abort the batch.
+#[pyfunction]
+#[pyo3(signature = (paths, threads=None))]
+fn hash_batch(py: Python<'_>, paths: Vec<String>, threads: Option<usize>) -> Vec<String> {
+    py.allow_threads(|| {
+        let run = || {
+            paths
+                .par_iter()
+                .map(|path| serde_json::to_string(&hash_one(path)).expect("hash result serializes"))
+                .collect::<Vec<String>>()
+        };
+        match threads {
+            Some(count) if count > 0 => rayon::ThreadPoolBuilder::new()
+                .num_threads(count)
+                .build()
+                .map(|pool| pool.install(run))
+                .unwrap_or_else(|_| run()),
+            _ => run(),
+        }
+    })
+}
+
 /// Extract a single path (GIL released). Returns one JSON string.
 #[pyfunction]
 fn extract_path(py: Python<'_>, path: String) -> String {
@@ -656,6 +757,7 @@ fn extract_path(py: Python<'_>, path: String) -> String {
 #[pymodule]
 fn _ingest_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(extract_batch, m)?)?;
+    m.add_function(wrap_pyfunction!(hash_batch, m)?)?;
     m.add_function(wrap_pyfunction!(extract_path, m)?)?;
     m.add_function(wrap_pyfunction!(expand_zip, m)?)?;
     Ok(())
@@ -734,5 +836,31 @@ mod tests {
                 .unwrap_err()
                 .to_string();
         assert!(total_error.contains("total limit"));
+    }
+
+    #[test]
+    fn external_text_gate_keeps_short_real_text() {
+        assert!(external_text_is_usable("PRISMA flow diagram"));
+    }
+
+    #[test]
+    fn external_text_gate_rejects_binary_control_dump() {
+        let garbage = "word\0\u{0001}\u{0002}\u{0003}".repeat(50);
+        assert!(!external_text_is_usable(&garbage));
+    }
+
+    #[test]
+    fn streaming_sha1_matches_known_vector() {
+        let root = tempdir().unwrap();
+        let path = root.path().join("known.txt");
+        fs::write(&path, b"abc").unwrap();
+
+        let result = hash_one(path.to_str().unwrap());
+
+        assert_eq!(
+            result.sha1.as_deref(),
+            Some("a9993e364706816aba3e25717850c26c9cd0d89d")
+        );
+        assert!(result.error.is_none());
     }
 }

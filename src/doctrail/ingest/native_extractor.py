@@ -89,6 +89,33 @@ def extract_batch(paths: List[str], threads: Optional[int] = None) -> List[Dict[
     return docs
 
 
+def hash_batch(paths: List[str], threads: Optional[int] = None) -> List[Dict[str, Any]]:
+    """Stream SHA-1 for many paths in Rust's bounded Rayon pool."""
+    native = _native()
+    if native is None or not hasattr(native, "hash_batch"):
+        raise RuntimeError(
+            "native extension does not provide hash_batch; rebuild it with `make native`"
+        )
+    normalized_paths = [str(path) for path in paths]
+    results = [json.loads(item) for item in native.hash_batch(normalized_paths, threads)]
+    if len(results) != len(normalized_paths):
+        raise RuntimeError(
+            f"native hasher returned {len(results)} result(s) for "
+            f"{len(normalized_paths)} path(s)"
+        )
+    for index, (expected_path, result) in enumerate(zip(normalized_paths, results)):
+        if result.get("path") != expected_path:
+            raise RuntimeError(f"native hash result {index} path mismatch")
+        sha1 = result.get("sha1")
+        if sha1 is not None and (
+            not isinstance(sha1, str)
+            or len(sha1) != 40
+            or any(character not in "0123456789abcdef" for character in sha1)
+        ):
+            raise RuntimeError(f"native hash result {index} has invalid SHA-1")
+    return results
+
+
 def expand_zip(archive_path: str, destination: str) -> List[Dict[str, Any]]:
     """Safely materialize a ZIP archive through the native extension."""
     native = _native()

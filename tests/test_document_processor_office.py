@@ -144,8 +144,9 @@ async def test_mac_ocr_service_uses_configured_funnel_reservation(monkeypatch, t
 
 @pytest.mark.asyncio
 @respx.mock
-async def test_mac_ocr_service_reports_file_specific_500_without_capacity_timeout(
-    monkeypatch, tmp_path
+@pytest.mark.parametrize("status_code", [422, 500])
+async def test_mac_ocr_service_reports_file_rejection_without_capacity_loop(
+    monkeypatch, tmp_path, status_code
 ):
     endpoint = "https://ocr-one.example/funnel"
     monkeypatch.setenv("MAC_OCR__SERVICE_ENDPOINTS", endpoint)
@@ -156,10 +157,13 @@ async def test_mac_ocr_service_reports_file_specific_500_without_capacity_timeou
         return_value=Response(201, json={"reservation_id": "reserved"})
     )
     respx.post(f"{endpoint}/ocr", params={"reservation_id": "reserved"}).mock(
-        return_value=Response(500, text="cannot render PDF")
+        return_value=Response(status_code, text="unsupported or unrenderable file")
     )
 
-    with pytest.raises(RuntimeError, match="HTTP 500.*cannot render PDF"):
+    with pytest.raises(
+        RuntimeError,
+        match=rf"HTTP {status_code}.*unsupported or unrenderable file",
+    ):
         await _ocr_with_mac_ocr_service(str(image_path))
 
 

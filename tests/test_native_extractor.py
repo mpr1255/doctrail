@@ -6,6 +6,7 @@ native build). The rest of the suite runs the Python path via the
 Rust path is active.
 """
 
+import hashlib
 import json
 import io
 import sqlite3
@@ -78,6 +79,17 @@ def test_extract_batch_rejects_login_placeholder(tmp_path, native_enabled):
     assert not native_extractor.is_complete_extraction(doc, str(page))
 
 
+def test_invalid_legacy_doc_is_not_sent_to_image_ocr(tmp_path, native_enabled):
+    path = tmp_path / "broken.doc"
+    path.write_bytes(b"\x00\x01\x02\x03broken binary" * 100)
+
+    doc = native_extractor.extract_batch([str(path)], 1)[0]
+
+    assert doc["status"] == "fallback_required"
+    assert doc["ocr_needed"] is False
+    assert doc["fallback_kind"] == "legacy_doc_antiword_libreoffice_or_ocr"
+
+
 def test_extract_batch_preserves_order_and_count(tmp_path, native_enabled):
     paths = []
     for i in range(6):
@@ -91,6 +103,26 @@ def test_extract_batch_preserves_order_and_count(tmp_path, native_enabled):
     for i, (path, doc) in enumerate(zip(paths, docs)):
         assert doc["path"] == path
         assert f"number {i}" in doc["content"]
+
+
+def test_hash_batch_streams_in_parallel_and_preserves_order(tmp_path, native_enabled):
+    first = tmp_path / "first.bin"
+    second = tmp_path / "second.bin"
+    missing = tmp_path / "missing.bin"
+    first.write_bytes(b"abc")
+    second.write_bytes(b"second" * 100_000)
+
+    results = native_extractor.hash_batch(
+        [str(first), str(second), str(missing)], threads=2
+    )
+
+    assert [result["path"] for result in results] == [
+        str(first), str(second), str(missing)
+    ]
+    assert results[0]["sha1"] == hashlib.sha1(first.read_bytes()).hexdigest()
+    assert results[1]["sha1"] == hashlib.sha1(second.read_bytes()).hexdigest()
+    assert results[2]["sha1"] is None
+    assert "opening" in results[2]["error"]
 
 
 @pytest.mark.parametrize(
