@@ -1073,25 +1073,30 @@ async def process_ingest(
 
             if deferred_mac_ocr:
                 ocr_queue: asyncio.Queue[tuple[str, Dict[str, Any]]] = asyncio.Queue()
+                ocr_in_flight = 0
                 for item in deferred_mac_ocr:
                     ocr_queue.put_nowait(item)
 
                 async def drain_mac_ocr_queue() -> None:
+                    nonlocal ocr_in_flight
                     while True:
                         try:
                             path, doc = ocr_queue.get_nowait()
                         except asyncio.QueueEmpty:
                             return
+                        ocr_in_flight += 1
                         progress.update(
                             task,
                             description=(
                                 f"[magenta]Mac OCR queue ({ocr_queue.qsize()} remaining): "
+                                f"{ocr_in_flight} in flight; "
                                 f"{_short_display_name(Path(path), input_path)}[/magenta]"
                             ),
                         )
                         try:
                             handle_result(await run_native_mac_ocr(path, doc))
                         finally:
+                            ocr_in_flight -= 1
                             ocr_queue.task_done()
 
                 progress.update(

@@ -144,6 +144,29 @@ async def test_mac_ocr_service_uses_configured_funnel_reservation(monkeypatch, t
 
 @pytest.mark.asyncio
 @respx.mock
+async def test_mac_ocr_service_normalizes_misnamed_image_to_png(monkeypatch, tmp_path):
+    endpoint = "https://ocr-one.example/funnel"
+    monkeypatch.setenv("MAC_OCR__SERVICE_ENDPOINTS", endpoint)
+    image_path = tmp_path / "thumbnail.html"
+    image_path.write_bytes((ASSET_DIR / "federalist_fixture.png").read_bytes())
+
+    respx.post(f"{endpoint}/reserve").mock(
+        return_value=Response(201, json={"reservation_id": "reserved"})
+    )
+    upload = respx.post(f"{endpoint}/ocr", params={"reservation_id": "reserved"}).mock(
+        return_value=Response(200, json={"text": "Image OCR text"})
+    )
+
+    text = await _ocr_with_mac_ocr_service(str(image_path))
+
+    assert text == "Image OCR text"
+    body = upload.calls[0].request.content
+    assert b'filename="thumbnail.png"' in body
+    assert b"\x89PNG\r\n\x1a\n" in body
+
+
+@pytest.mark.asyncio
+@respx.mock
 @pytest.mark.parametrize("status_code", [422, 500])
 async def test_mac_ocr_service_reports_file_rejection_without_capacity_loop(
     monkeypatch, tmp_path, status_code

@@ -278,6 +278,25 @@ def _mac_ocr_service_endpoints() -> Tuple[str, ...]:
     )
 
 
+def _mac_ocr_upload(file_path: str):
+    """Return an OCR upload path, normalizing any detected raster to PNG."""
+    from PIL import Image, UnidentifiedImageError
+
+    source_path = Path(file_path)
+    try:
+        with Image.open(source_path) as image:
+            image.load()
+            if image.mode not in {"1", "L", "LA", "RGB", "RGBA"}:
+                image = image.convert("RGBA" if "transparency" in image.info else "RGB")
+            temporary = tempfile.NamedTemporaryFile(suffix=".png")
+            image.save(temporary, format="PNG")
+            temporary.flush()
+    except (UnidentifiedImageError, OSError):
+        return source_path, source_path.name, None
+
+    return Path(temporary.name), f"{source_path.stem}.png", temporary
+
+
 async def _ocr_with_mac_ocr_service(file_path: str) -> str:
     endpoints = _mac_ocr_service_endpoints()
     if not endpoints:
@@ -288,41 +307,50 @@ async def _ocr_with_mac_ocr_service(file_path: str) -> str:
 
     wait_seconds = float(os.environ.get("DOCTRAIL_MAC_OCR_CAPACITY_WAIT_SECONDS", "0"))
     poll_seconds = float(os.environ.get("DOCTRAIL_MAC_OCR_POLL_SECONDS", "2"))
-    request_seconds = float(os.environ.get("DOCTRAIL_MAC_OCR_REQUEST_TIMEOUT_SECONDS", "300"))
+    request_seconds = float(os.environ.get("DOCTRAIL_MAC_OCR_REQUEST_TIMEOUT_SECONDS", "0"))
     deadline = time.monotonic() + wait_seconds if wait_seconds > 0 else None
     errors = []
-    timeout = httpx.Timeout(request_seconds, connect=10.0)
+    timeout = (
+        httpx.Timeout(request_seconds, connect=10.0)
+        if request_seconds > 0
+        else httpx.Timeout(None, connect=10.0)
+    )
+    upload_path, upload_name, temporary_upload = _mac_ocr_upload(file_path)
 
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        while deadline is None or time.monotonic() < deadline:
-            for endpoint in endpoints:
-                try:
-                    response = await client.post(f"{endpoint}/reserve", timeout=10.0)
-                    if response.status_code != 201:
-                        continue
-                    reservation_id = response.json()["reservation_id"]
-                    with open(file_path, "rb") as file_handle:
-                        response = await client.post(
-                            f"{endpoint}/ocr",
-                            params={"reservation_id": reservation_id},
-                            files={"file": (Path(file_path).name, file_handle)},
-                            timeout=timeout,
-                        )
-                    if response.status_code >= 400:
-                        raise RuntimeError(
-                            f"Mac OCR rejected {Path(file_path).name}: "
-                            f"HTTP {response.status_code} {response.text[:200]}"
-                        )
-                    response.raise_for_status()
-                    text = response.json().get("text", "").strip()
-                    if not text:
-                        raise RuntimeError(f"Mac OCR returned empty text for {file_path}")
-                    return text
-                except RuntimeError:
-                    raise
-                except Exception as exc:
-                    errors.append(f"{endpoint}: {exc}")
-            await asyncio.sleep(poll_seconds)
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            while deadline is None or time.monotonic() < deadline:
+                for endpoint in endpoints:
+                    try:
+                        response = await client.post(f"{endpoint}/reserve", timeout=10.0)
+                        if response.status_code != 201:
+                            continue
+                        reservation_id = response.json()["reservation_id"]
+                        with upload_path.open("rb") as file_handle:
+                            response = await client.post(
+                                f"{endpoint}/ocr",
+                                params={"reservation_id": reservation_id},
+                                files={"file": (upload_name, file_handle)},
+                                timeout=timeout,
+                            )
+                        if response.status_code >= 400:
+                            raise RuntimeError(
+                                f"Mac OCR rejected {Path(file_path).name}: "
+                                f"HTTP {response.status_code} {response.text[:200]}"
+                            )
+                        response.raise_for_status()
+                        text = response.json().get("text", "").strip()
+                        if not text:
+                            raise RuntimeError(f"Mac OCR returned empty text for {file_path}")
+                        return text
+                    except RuntimeError:
+                        raise
+                    except Exception as exc:
+                        errors.append(f"{endpoint}: {exc}")
+                await asyncio.sleep(poll_seconds)
+    finally:
+        if temporary_upload is not None:
+            temporary_upload.close()
 
     detail = errors[-1] if errors else "no endpoint accepted a reservation"
     raise TimeoutError(f"Timed out waiting for Mac OCR capacity: {detail}")
