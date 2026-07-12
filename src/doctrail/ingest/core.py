@@ -840,6 +840,7 @@ async def process_ingest(
             native_paths: List[str] = []
             native_ocr_semaphore = asyncio.Semaphore(worker_count)
             deferred_mac_ocr: List[tuple[str, Dict[str, Any]]] = []
+            deferred_mhtml_fallback: List[str] = []
 
             async def run_native_mac_ocr(path: str, doc: Dict[str, Any]) -> Dict[str, Any]:
                 try:
@@ -847,10 +848,20 @@ async def process_ingest(
                         ocr_text = await ocr_with_mac_ocr(path)
                 except Exception as exc:
                     ocr_reason = doc.get("ocr_reason") or "unspecified OCR signal"
+                    if (
+                        ocr_reason == "zero_pages"
+                        and "No PNG files generated from PDF" in str(exc)
+                    ):
+                        error = (
+                            "Damaged/unrenderable PDF: MuPDF found zero pages and the "
+                            "Mac OCR renderer could not generate any page images"
+                        )
+                    else:
+                        error = f"Mac OCR failed after {ocr_reason}: {exc}"
                     return {
                         "success": False,
                         "file_path": path,
-                        "error": f"Mac OCR failed after {ocr_reason}: {exc}",
+                        "error": error,
                         "elapsed": (doc.get("extraction_ms") or 0) / 1000.0,
                     }
                 source_format = doc.get("source_format") or Path(path).suffix.lower().lstrip(".")
@@ -910,8 +921,9 @@ async def process_ingest(
                 progress.update(
                     task,
                     description=(
-                        f"[cyan]Rust extracting {len(batch_paths)} file(s): "
-                        f"{_short_display_name(Path(batch_paths[0]), input_path)}[/cyan]"
+                        f"[cyan]Rust batch: {len(batch_paths)} queued, "
+                        f"{_short_display_name(Path(batch_paths[0]), input_path)} "
+                        f"({worker_count} workers)[/cyan]"
                     ),
                 )
                 # Per-file Rust panics come back as status=failed. A recoverable
@@ -936,6 +948,26 @@ async def process_ingest(
                     if doc.get("ocr_needed") and ocr_engine == "mac-ocr":
                         deferred_mac_ocr.append((p, doc))
                         continue
+                    suffix = Path(p).suffix.lower()
+                    is_mhtml = (
+                        doc.get("source_format") == "mhtml"
+                        or str(doc.get("mime_type") or "").startswith("multipart/related")
+                        or suffix in {".mht", ".mhtml"}
+                    )
+                    error = doc.get("error") or ""
+                    if is_mhtml and (not error or "timed out" in error):
+                        deferred_mhtml_fallback.append(p)
+                        continue
+                    if doc.get("status") == "extracted" and (
+                        suffix in {".htm", ".html"} or is_mhtml
+                    ):
+                        handle_result({
+                            "success": None,
+                            "file_path": p,
+                            "error": f"Skipped: {error or 'HTML contained no usable document text'}",
+                            "elapsed": (doc.get("extraction_ms") or 0) / 1000.0,
+                        })
+                        continue
                     reason = (
                         doc.get("error")
                         or doc.get("ocr_reason")
@@ -947,6 +979,51 @@ async def process_ingest(
                         "error": f"Native extraction incomplete: {reason}",
                         "elapsed": (doc.get("extraction_ms") or 0) / 1000.0,
                     })
+            if deferred_mhtml_fallback:
+                progress.update(
+                    task,
+                    description=(
+                        f"[yellow]Recovering {len(deferred_mhtml_fallback)} timed-out "
+                        "MHTML file(s)[/yellow]"
+                    ),
+                )
+
+                async def run_mhtml_fallback(path: str) -> Dict[str, Any]:
+                    result = await asyncio.to_thread(
+                        _extract_document_worker,
+                        {
+                            "file_path": path,
+                            "file_sha1": path_to_sha[path],
+                            "readability": readability,
+                            "html_extractor": html_extractor,
+                            "skip_garbage_check": skip_garbage_check,
+                            "pdf_engine": pdf_engine,
+                            "ocr_engine": ocr_engine,
+                        },
+                    )
+                    if result.get("success") is True:
+                        result["metadata"]["processing_method"] = "rust-mhtml-bounded-fallback"
+                    return result
+
+                fallback_queue: asyncio.Queue[str] = asyncio.Queue()
+                for path in deferred_mhtml_fallback:
+                    fallback_queue.put_nowait(path)
+
+                async def drain_mhtml_fallback() -> None:
+                    while True:
+                        try:
+                            path = fallback_queue.get_nowait()
+                        except asyncio.QueueEmpty:
+                            return
+                        try:
+                            handle_result(await run_mhtml_fallback(path))
+                        finally:
+                            fallback_queue.task_done()
+
+                await asyncio.gather(
+                    *(drain_mhtml_fallback() for _ in range(min(2, len(deferred_mhtml_fallback))))
+                )
+
             if deferred_mac_ocr:
                 ocr_queue: asyncio.Queue[tuple[str, Dict[str, Any]]] = asyncio.Queue()
                 for item in deferred_mac_ocr:

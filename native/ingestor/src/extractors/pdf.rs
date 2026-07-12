@@ -25,6 +25,7 @@ static CHAPTER_MARKER_RE: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r"^第[一二三四五六七八九十0-9]+[章节部分条]").expect("chapter marker regex")
 });
 static PDF_EXTRACTION_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
+const MIN_TEXT_CHARS_PER_PAGE: usize = 80;
 
 struct PdfTextExtraction {
     raw_text: String,
@@ -310,8 +311,14 @@ fn add_python_style_page_markers(raw_text: &str) -> String {
 
 fn clean_text(text: &str) -> String {
     text.lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
+        .filter_map(|line| {
+            let without_controls: String = line
+                .chars()
+                .filter(|character| !character.is_control() || *character == '\t')
+                .collect();
+            let cleaned = without_controls.trim();
+            (!cleaned.is_empty()).then(|| cleaned.to_string())
+        })
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -476,12 +483,12 @@ fn needs_ocr(
                 || (0x7f..=0x9f).contains(&value)
         })
         .count();
-    if replacement.saturating_mul(20) >= non_space || control.saturating_mul(10) >= non_space {
+    if replacement.saturating_mul(100) >= non_space || control.saturating_mul(10) >= non_space {
         return (true, "corrupt_text_layer");
     }
     if let Some(page_count) = page_count.filter(|count| *count > 0) {
         let character_count = content.chars().count();
-        if character_count < page_count.saturating_mul(40) {
+        if character_count < page_count.saturating_mul(MIN_TEXT_CHARS_PER_PAGE) {
             return (true, "sparse_text_layer");
         }
     }
@@ -522,6 +529,11 @@ mod tests {
 
         assert!(cleaned.contains("这是一个中文测试"));
         assert!(cleaned.contains("第二段结束。\n\n第三段开始"));
+    }
+
+    #[test]
+    fn clean_text_removes_unexpected_pdf_control_characters() {
+        assert_eq!(clean_text("Useful\u{0085} text\n\u{0001}Second line"), "Useful text\nSecond line");
     }
 
     #[test]
@@ -614,5 +626,26 @@ mod tests {
 
         assert!(attempt.ocr_needed);
         assert_eq!(attempt.ocr_reason, "corrupt_text_layer");
+    }
+
+    #[test]
+    fn doi_only_image_text_layer_requires_ocr() {
+        let (ocr_needed, reason) = needs_ocr(
+            "https://doi.org/10.1016/j.example.2024.123456",
+            Some(1),
+            false,
+        );
+
+        assert!(ocr_needed);
+        assert_eq!(reason, "sparse_text_layer");
+    }
+
+    #[test]
+    fn one_percent_replacement_chars_require_ocr() {
+        let content = format!("{}�", "readable".repeat(12));
+        let (ocr_needed, reason) = needs_ocr(&content, Some(1), false);
+
+        assert!(ocr_needed);
+        assert_eq!(reason, "corrupt_text_layer");
     }
 }

@@ -8,8 +8,8 @@
 #![allow(clippy::useless_conversion)] // PyO3 wrapper expansion around PyResult.
 
 use crate::{
-    classify_extraction_failure, extract_bytes, extract_file, ExtractOptions, ExtractedDocument,
-    HtmlKind,
+    classify_extraction_failure, extract_bytes, extract_file, low_value_content_rejection,
+    ExtractOptions, ExtractedDocument, HtmlKind,
 };
 use anyhow::{bail, Context, Result};
 use pyo3::exceptions::PyRuntimeError;
@@ -85,14 +85,22 @@ fn doc_out_from_extracted(path: &str, doc: ExtractedDocument, started: Instant) 
         .clone()
         .or_else(|| meta_str(meta, "language_detection", "final_language"))
         .or_else(|| meta_str(meta, "language_detection", "detected_language"));
-    let content_chars = doc.content.chars().count();
+    let quality_rejection = matches!(doc.source_format.as_str(), "html" | "mhtml")
+        .then(|| low_value_content_rejection(&doc.content, &doc.title))
+        .flatten();
+    let content = if quality_rejection.is_some() {
+        String::new()
+    } else {
+        doc.content
+    };
+    let content_chars = content.chars().count();
     let extraction_metadata = doc.extraction_metadata.clone();
     DocOut {
         path: path.to_string(),
         status: "extracted".to_string(),
         source_format: Some(doc.source_format),
         title: Some(doc.title),
-        content: doc.content,
+        content,
         content_chars,
         language,
         language_confidence: meta_f64(meta, "language_detection", "confidence"),
@@ -102,7 +110,7 @@ fn doc_out_from_extracted(path: &str, doc: ExtractedDocument, started: Instant) 
         ocr_needed,
         ocr_reason: meta_str(meta, "content_extraction", "ocr_reason"),
         fallback_kind: None,
-        error: None,
+        error: quality_rejection,
         extraction_ms: started.elapsed().as_millis() as u64,
     }
 }
@@ -154,6 +162,7 @@ fn extract_one(path: &str) -> DocOut {
                 .as_deref()
                 .map(|k| k.contains("ocr"))
                 .unwrap_or(false);
+            let ocr_reason = ocr_needed.then(|| "image_requires_ocr".to_string());
             DocOut {
                 path: path.to_string(),
                 status: failure.extraction_status().to_string(),
@@ -167,7 +176,7 @@ fn extract_one(path: &str) -> DocOut {
                 extraction_method: None,
                 extraction_metadata: None,
                 ocr_needed,
-                ocr_reason: None,
+                ocr_reason,
                 fallback_kind: failure.fallback_kind,
                 error: Some(failure.message),
                 extraction_ms: started.elapsed().as_millis() as u64,

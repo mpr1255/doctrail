@@ -477,6 +477,19 @@ async def test_process_document_returns_plain_string_html_title(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_process_document_sniffs_mhtml_saved_with_html_extension(tmp_path):
+    html_path = tmp_path / "saved-page.html"
+    shutil.copyfile(ASSET_DIR / "federalist_fixture.mhtml", html_path)
+    sha1 = _sha1_for(html_path)
+
+    result_sha1, content, metadata = await process_document(str(html_path), sha1)
+
+    assert result_sha1 == sha1
+    assert "Federalist fixture" in content
+    assert metadata["file_type"] == "mhtml"
+
+
+@pytest.mark.asyncio
 async def test_process_document_handles_csv_real(tmp_path):
     csv_path = tmp_path / "sample.csv"
     csv_path.write_text(

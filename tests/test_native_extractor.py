@@ -62,6 +62,22 @@ def test_extract_batch_html_uses_readability(tmp_path, native_enabled):
     assert "Some paragraph text here." in doc["content"]
 
 
+def test_extract_batch_rejects_login_placeholder(tmp_path, native_enabled):
+    page = tmp_path / "login.html"
+    page.write_text(
+        "<html><body>"
+        + ("会员登录 立即注册 用户名 密码 服务热线：400-810-9888 " * 20)
+        + "</body></html>",
+        encoding="utf-8",
+    )
+
+    doc = native_extractor.extract_batch([str(page)])[0]
+
+    assert doc["status"] == "extracted"
+    assert doc["content"] == ""
+    assert not native_extractor.is_complete_extraction(doc, str(page))
+
+
 def test_extract_batch_preserves_order_and_count(tmp_path, native_enabled):
     paths = []
     for i in range(6):
@@ -491,6 +507,52 @@ async def test_native_zero_page_pdf_still_tries_mac_ocr_and_preserves_failure(
     output = capsys.readouterr().out
     assert "Mac OCR failed after zero_pages" in output
     assert "renderer returned HTTP 500" in output
+
+
+@pytest.mark.asyncio
+async def test_native_zero_page_pdf_classifies_confirmed_renderer_failure_as_damage(
+    tmp_path, native_enabled, monkeypatch, capsys
+):
+    source = tmp_path / "source"
+    source.mkdir()
+    broken_pdf = source / "truncated.pdf"
+    broken_pdf.write_bytes(b"%PDF-1.6\ntruncated")
+
+    monkeypatch.setattr(
+        native_extractor,
+        "extract_batch",
+        lambda paths, threads: [{
+            "path": paths[0],
+            "status": "extracted",
+            "content": "",
+            "source_format": "pdf",
+            "extraction_method": "mupdf_smart_paragraphs",
+            "extraction_ms": 1,
+            "ocr_needed": True,
+            "ocr_reason": "zero_pages",
+        }],
+    )
+
+    async def unrenderable_ocr(path):
+        raise RuntimeError(
+            "HTTP 500 No PNG files generated from PDF after trying all resolutions"
+        )
+
+    monkeypatch.setattr("doctrail.ingest.core.ocr_with_mac_ocr", unrenderable_ocr)
+    result = await process_ingest(
+        db_path=str(tmp_path / "documents.db"),
+        input_dir=str(source),
+        table="documents",
+        extractor="rust",
+        ocr_engine="mac-ocr",
+        workers=1,
+        yes=True,
+    )
+
+    assert result["failed"] == 1
+    output = capsys.readouterr().out
+    assert "Damaged/unrenderable PDF" in output
+    assert "MuPDF found zero pages" in output
 
 
 @pytest.mark.asyncio

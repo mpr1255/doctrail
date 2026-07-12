@@ -122,6 +122,18 @@ def _looks_like_html_bytes(prefix: bytes) -> bool:
     )
 
 
+def _looks_like_mhtml_bytes(prefix: bytes) -> bool:
+    sample = prefix.lower()
+    return (
+        b'mime-version:' in sample
+        and b'content-type: multipart/related' in sample
+        and (
+            b'snapshot-content-location:' in sample
+            or b'content-location:' in sample
+        )
+    )
+
+
 def _decode_sniff_text(prefix: bytes) -> str:
     if not prefix:
         return ""
@@ -368,6 +380,9 @@ async def process_document(
 
     # Handle plain text files directly (TXT, MD)
     file_extension = Path(file_path).suffix.lower()
+    if file_extension in SUPPORTED_EXTENSION_FAMILIES["html"]:
+        if _looks_like_mhtml_bytes(_read_prefix(file_path, 65_536)):
+            file_extension = '.mhtml'
     if file_extension in SUPPORTED_EXTENSION_FAMILIES["text"]:
         return await _process_text_file(file_path, file_sha1, original_file_path, file_extension)
 
@@ -1370,7 +1385,7 @@ async def _process_html_file(file_path: str, file_sha1: str, original_file_path:
         }
         
         # If this was an MHTML file, merge in the MHTML metadata
-        if Path(original_file_path).suffix.lower() in ['.mhtml', '.mht'] and mhtml_metadata:
+        if mhtml_metadata:
             metadata.update(mhtml_metadata)
             metadata['processing_method'] = extraction_method
         

@@ -75,6 +75,7 @@ pub enum HtmlKind {
 enum ExtractKind {
     Html,
     Mhtml,
+    Image,
     Pdf,
     Document,
     Spreadsheet,
@@ -87,6 +88,7 @@ impl ExtractKind {
         match self {
             ExtractKind::Html => "html",
             ExtractKind::Mhtml => "mhtml",
+            ExtractKind::Image => "image",
             ExtractKind::Pdf => "pdf",
             ExtractKind::Document => "document",
             ExtractKind::Spreadsheet => "spreadsheet",
@@ -1559,7 +1561,12 @@ fn strip_known_boilerplate_html(html: &str) -> (String, usize) {
 
 pub fn detect_content_type(bytes: &[u8]) -> ContentTypeDetection {
     let detected = detect_mime_type(bytes);
-    let mime_type = detected.mime().to_string();
+    let mhtml_signature = looks_like_mhtml_signature(bytes);
+    let mime_type = if mhtml_signature {
+        "multipart/related".to_string()
+    } else {
+        detected.mime().to_string()
+    };
     let normalized_mime_type = normalize_mime_type(&mime_type);
     let extract_kind = detected_extract_kind(&normalized_mime_type)
         .or_else(|| detected_text_extract_kind(&normalized_mime_type))
@@ -1568,9 +1575,21 @@ pub fn detect_content_type(bytes: &[u8]) -> ContentTypeDetection {
 
     ContentTypeDetection {
         mime_type,
-        name: detected.name().to_string(),
-        extension: detected.extension().to_string(),
-        kind: detected.kind().to_string(),
+        name: if mhtml_signature {
+            "MHTML".to_string()
+        } else {
+            detected.name().to_string()
+        },
+        extension: if mhtml_signature {
+            "mhtml".to_string()
+        } else {
+            detected.extension().to_string()
+        },
+        kind: if mhtml_signature {
+            "MHTML".to_string()
+        } else {
+            detected.kind().to_string()
+        },
         extract_kind,
         is_generic: is_generic_detected_mime(&normalized_mime_type),
     }
@@ -1670,6 +1689,9 @@ fn extract_by_kind(
     match kind {
         ExtractKind::Html => extract_html_bytes(bytes, options.source_path),
         ExtractKind::Mhtml => extract_mhtml_bytes(bytes, options.source_path),
+        ExtractKind::Image => anyhow::bail!(
+            "detected image content requires OCR; fallback_required=configured_ocr_backend"
+        ),
         ExtractKind::Pdf => {
             extractors::pdf::extract_pdf_bytes(bytes, options.source_path, options.mime_type)
                 .map(general_to_extracted)
@@ -1704,6 +1726,9 @@ fn detected_extract_kind(normalized_mime_type: &str) -> Option<ExtractKind> {
     if is_html_mime(normalized_mime_type) {
         return Some(ExtractKind::Html);
     }
+    if normalized_mime_type.starts_with("image/") {
+        return Some(ExtractKind::Image);
+    }
     if is_pdf_mime(normalized_mime_type) {
         return Some(ExtractKind::Pdf);
     }
@@ -1717,6 +1742,14 @@ fn detected_extract_kind(normalized_mime_type: &str) -> Option<ExtractKind> {
         return Some(ExtractKind::Ebook);
     }
     None
+}
+
+fn looks_like_mhtml_signature(bytes: &[u8]) -> bool {
+    let prefix = &bytes[..bytes.len().min(65_536)];
+    let lower = String::from_utf8_lossy(prefix).to_ascii_lowercase();
+    lower.contains("mime-version:")
+        && lower.contains("content-type: multipart/related")
+        && (lower.contains("snapshot-content-location:") || lower.contains("content-location:"))
 }
 
 fn detected_text_extract_kind(normalized_mime_type: &str) -> Option<ExtractKind> {
@@ -2483,7 +2516,10 @@ fn is_low_value_container(element: &ElementRef<'_>) -> bool {
     .any(|needle| attrs.contains(needle))
 }
 
-fn low_value_content_rejection(content: &str, title: &str) -> Option<String> {
+pub(crate) fn low_value_content_rejection(content: &str, title: &str) -> Option<String> {
+    if looks_like_login_placeholder(content) {
+        return Some("low-value extracted content: login placeholder".to_string());
+    }
     if looks_like_http_error_template(content) {
         return Some("low-value extracted content: http error template".to_string());
     }
@@ -2494,6 +2530,14 @@ fn low_value_content_rejection(content: &str, title: &str) -> Option<String> {
         return Some("low-value extracted content: script/form dump".to_string());
     }
     None
+}
+
+fn looks_like_login_placeholder(content: &str) -> bool {
+    let lower = content.to_ascii_lowercase();
+    lower.contains("this is login.htm from the docs subdirectory")
+        || (content.contains("会员登录")
+            && content.contains("立即注册")
+            && content.contains("400-810-9888"))
 }
 
 fn looks_like_script_or_form_dump(content: &str) -> bool {
@@ -3201,6 +3245,24 @@ mod tests {
     }
 
     #[test]
+    fn content_quality_rejects_cnki_login_placeholder() {
+        let content = "会员登录 立即注册 用户名 密码 服务热线：400-810-9888".repeat(20);
+        assert_eq!(
+            content_quality_rejection(&content, "会员登录").as_deref(),
+            Some("low-value extracted content: login placeholder")
+        );
+    }
+
+    #[test]
+    fn content_quality_rejects_ezproxy_login_placeholder() {
+        let content = "This is login.htm from the docs subdirectory. ".repeat(20);
+        assert_eq!(
+            content_quality_rejection(&content, "Login").as_deref(),
+            Some("low-value extracted content: login placeholder")
+        );
+    }
+
+    #[test]
     fn server_error_rule_rejects_short_apache_not_found_template_without_footer() {
         let content = "Not Found\nThe requested URL /V20/gw/nybk/202007/t20200708_7449277.htm was not found on this server.\nAdditionally, a 404 Not Found error was encountered while trying to use an ErrorDocument to handle the request.";
 
@@ -3434,6 +3496,47 @@ mod tests {
                 &detection
             ),
             Some(ExtractKind::Pdf)
+        );
+    }
+
+    #[test]
+    fn detected_image_bytes_override_html_extension() {
+        let png = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00";
+        let detection = detect_content_type(png);
+        assert_eq!(normalize_mime_type(&detection.mime_type), "image/png");
+        assert_eq!(detection.extract_kind.as_deref(), Some("image"));
+        assert_eq!(
+            resolve_extract_kind(
+                ExtractOptions {
+                    mime_type: None,
+                    source_path: Some("thumbnail.html"),
+                    kind: HtmlKind::Auto,
+                },
+                &detection,
+            ),
+            Some(ExtractKind::Image)
+        );
+    }
+
+    #[test]
+    fn mhtml_signature_overrides_html_extension() {
+        let bytes = b"From: saved\r\nSnapshot-Content-Location: https://example.test/\r\nMIME-Version: 1.0\r\nContent-Type: multipart/related; boundary=x\r\n\r\n--x--\r\n";
+        let detection = detect_content_type(bytes);
+        assert_eq!(
+            normalize_mime_type(&detection.mime_type),
+            "multipart/related"
+        );
+        assert_eq!(detection.extract_kind.as_deref(), Some("mhtml"));
+        assert_eq!(
+            resolve_extract_kind(
+                ExtractOptions {
+                    mime_type: None,
+                    source_path: Some("snapshot.html"),
+                    kind: HtmlKind::Auto,
+                },
+                &detection,
+            ),
+            Some(ExtractKind::Mhtml)
         );
     }
 
