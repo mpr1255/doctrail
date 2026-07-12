@@ -321,6 +321,7 @@ async def _ocr_with_mac_ocr_service(file_path: str) -> str:
         upload_sha1 = hashlib.file_digest(upload_handle, "sha1").hexdigest()
     preferred_index = int(upload_sha1, 16) % len(endpoints)
     ordered_endpoints = endpoints[preferred_index:] + endpoints[:preferred_index]
+    server_failures = 0
 
     try:
         async with httpx.AsyncClient(timeout=timeout) as client:
@@ -340,6 +341,19 @@ async def _ocr_with_mac_ocr_service(file_path: str) -> str:
                                 files={"file": (upload_name, file_handle)},
                                 timeout=timeout,
                             )
+                        if response.status_code >= 500:
+                            detail = (
+                                f"{endpoint}: HTTP {response.status_code} "
+                                f"{response.text[:200]}"
+                            )
+                            errors.append(detail)
+                            server_failures += 1
+                            if server_failures >= len(endpoints):
+                                raise RuntimeError(
+                                    f"Mac OCR failed on {server_failures} node(s) for "
+                                    f"{Path(file_path).name}: {detail}"
+                                )
+                            continue
                         if response.status_code >= 400:
                             raise RuntimeError(
                                 f"Mac OCR rejected {Path(file_path).name}: "

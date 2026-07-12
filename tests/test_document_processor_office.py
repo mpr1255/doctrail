@@ -214,9 +214,8 @@ async def test_mac_ocr_service_waits_on_full_sha_assigned_node(monkeypatch, tmp_
 
 @pytest.mark.asyncio
 @respx.mock
-@pytest.mark.parametrize("status_code", [422, 500])
 async def test_mac_ocr_service_reports_file_rejection_without_capacity_loop(
-    monkeypatch, tmp_path, status_code
+    monkeypatch, tmp_path
 ):
     endpoint = "https://ocr-one.example/funnel"
     monkeypatch.setenv("MAC_OCR__SERVICE_ENDPOINTS", endpoint)
@@ -227,14 +226,47 @@ async def test_mac_ocr_service_reports_file_rejection_without_capacity_loop(
         return_value=Response(201, json={"reservation_id": "reserved"})
     )
     respx.post(f"{endpoint}/ocr", params={"reservation_id": "reserved"}).mock(
-        return_value=Response(status_code, text="unsupported or unrenderable file")
+        return_value=Response(422, text="unsupported or unrenderable file")
     )
 
     with pytest.raises(
         RuntimeError,
-        match=rf"HTTP {status_code}.*unsupported or unrenderable file",
+        match=r"HTTP 422.*unsupported or unrenderable file",
     ):
         await _ocr_with_mac_ocr_service(str(image_path))
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_mac_ocr_service_fails_over_after_transient_textra_500(
+    monkeypatch, tmp_path
+):
+    first = "https://ocr-one.example/funnel"
+    second = "https://ocr-two.example/funnel"
+    monkeypatch.setenv("MAC_OCR__SERVICE_ENDPOINTS", f"{first},{second}")
+    image_path = tmp_path / "page.png"
+    image_path.write_bytes(b"x")  # SHA-1 modulo two selects first.
+
+    respx.post(f"{first}/reserve").mock(
+        return_value=Response(201, json={"reservation_id": "first-job"})
+    )
+    respx.post(f"{first}/ocr", params={"reservation_id": "first-job"}).mock(
+        return_value=Response(
+            500,
+            json={"detail": "textra error: textra output file not found"},
+        )
+    )
+    respx.post(f"{second}/reserve").mock(
+        return_value=Response(201, json={"reservation_id": "second-job"})
+    )
+    second_upload = respx.post(
+        f"{second}/ocr", params={"reservation_id": "second-job"}
+    ).mock(return_value=Response(200, json={"text": "Recovered OCR text"}))
+
+    text = await _ocr_with_mac_ocr_service(str(image_path))
+
+    assert text == "Recovered OCR text"
+    assert second_upload.called
 
 
 @pytest.mark.asyncio
