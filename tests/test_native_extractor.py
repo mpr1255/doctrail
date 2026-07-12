@@ -18,7 +18,7 @@ from openpyxl import Workbook
 from PIL import Image, ImageDraw, ImageFont
 
 from doctrail.ingest import native_extractor
-from doctrail.ingest.core import process_ingest
+from doctrail.ingest.core import _expand_zip_inputs, process_ingest
 
 
 pytestmark = pytest.mark.skipif(
@@ -335,6 +335,51 @@ def test_expand_zip_materializes_safe_members(tmp_path, native_enabled):
     assert [member["member_path"] for member in members] == ["docs/one.txt", "two.html"]
     assert Path(members[0]["path"]).read_text(encoding="utf-8") == "first member"
     assert members[1]["uncompressed_bytes"] == len("<p>second member</p>")
+
+
+def test_expand_zip_skips_oversized_archive_without_aborting_corpus(
+    tmp_path, native_enabled, monkeypatch
+):
+    ordinary = tmp_path / "ordinary.txt"
+    ordinary.write_text("ordinary document", encoding="utf-8")
+    first = tmp_path / "first.zip"
+    oversized = tmp_path / "oversized.zip"
+    second = tmp_path / "second.zip"
+    for archive in (first, oversized, second):
+        archive.write_bytes(b"test archive placeholder")
+
+    def fake_expand_zip(archive_path, destination):
+        archive_name = Path(archive_path).name
+        destination_path = Path(destination)
+        destination_path.mkdir(parents=True)
+        member_path = destination_path / f"{archive_name}.txt"
+        member_path.write_text(archive_name, encoding="utf-8")
+        return [{
+            "member_path": member_path.name,
+            "path": str(member_path),
+            "uncompressed_bytes": 11 if archive_name == "oversized.zip" else 7,
+        }]
+
+    monkeypatch.setattr(native_extractor, "expand_zip", fake_expand_zip)
+    monkeypatch.setattr(native_extractor, "ZIP_MAX_TOTAL_BYTES", 10)
+    monkeypatch.setattr(native_extractor, "ZIP_MAX_TOTAL_ENTRIES", 10)
+
+    leaves, logical_paths, _, staging, failures = _expand_zip_inputs(
+        [ordinary, first, oversized, second]
+    )
+    try:
+        assert ordinary in leaves
+        assert sorted(Path(path).read_text(encoding="utf-8") for path in logical_paths) == [
+            "first.zip",
+            "second.zip",
+        ]
+        assert failures == [(
+            str(oversized),
+            "expansion tree would reach 11 bytes, above safety limit 10",
+        )]
+    finally:
+        assert staging is not None
+        staging.cleanup()
 
 
 @pytest.mark.asyncio

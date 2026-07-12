@@ -61,8 +61,10 @@ def _expand_zip_inputs(
     """Expand ZIP inputs through Rust and return leaf paths plus provenance.
 
     One temporary tree is owned by the caller for the duration of ingestion.
-    Nested ZIPs are expanded breadth-first with global entry and byte budgets so
-    individually valid inner archives cannot multiply into an aggregate bomb.
+    Nested ZIPs are expanded breadth-first with per-top-level-archive entry and
+    byte budgets so individually valid inner archives cannot multiply into an
+    aggregate bomb. A bad archive is reported and skipped without aborting the
+    rest of the corpus.
     """
     zip_paths = [path for path in paths if path.suffix.lower() == ".zip"]
     if not zip_paths:
@@ -83,8 +85,9 @@ def _expand_zip_inputs(
     archive_metadata: Dict[str, Dict[str, Any]] = {}
     archive_failures: List[tuple[str, str]] = []
     archive_index = 0
-    total_entries = 0
     total_expanded_bytes = 0
+    tree_entries: Dict[str, int] = {}
+    tree_expanded_bytes: Dict[str, int] = {}
 
     for path in paths:
         if path.suffix.lower() == ".zip":
@@ -95,10 +98,13 @@ def _expand_zip_inputs(
     while pending:
         archive_path, logical_archive, top_archive, member_prefix, depth = pending.popleft()
         if depth > native_extractor.ZIP_MAX_NESTING_DEPTH:
-            raise RuntimeError(
+            error = (
                 f"ZIP nesting exceeds depth {native_extractor.ZIP_MAX_NESTING_DEPTH}: "
                 f"{logical_archive}"
             )
+            logger.warning(f"Skipping ZIP archive {logical_archive}: {error}")
+            archive_failures.append((logical_archive, error))
+            continue
         destination = staging_root / f"archive-{archive_index:06}"
         archive_index += 1
         try:
@@ -108,18 +114,30 @@ def _expand_zip_inputs(
             logger.warning(f"Skipping unreadable ZIP archive {logical_archive}: {error}")
             archive_failures.append((logical_archive, error))
             continue
-        total_entries += len(members)
-        total_expanded_bytes += sum(member["uncompressed_bytes"] for member in members)
-        if total_entries > native_extractor.ZIP_MAX_TOTAL_ENTRIES:
-            raise RuntimeError(
-                f"nested ZIPs expanded to {total_entries} entries, exceeding global limit "
+        archive_entries = len(members)
+        archive_expanded_bytes = sum(member["uncompressed_bytes"] for member in members)
+        candidate_entries = tree_entries.get(top_archive, 0) + archive_entries
+        candidate_bytes = tree_expanded_bytes.get(top_archive, 0) + archive_expanded_bytes
+        if candidate_entries > native_extractor.ZIP_MAX_TOTAL_ENTRIES:
+            error = (
+                f"expansion tree would reach {candidate_entries} entries, above safety limit "
                 f"{native_extractor.ZIP_MAX_TOTAL_ENTRIES}"
             )
-        if total_expanded_bytes > native_extractor.ZIP_MAX_TOTAL_BYTES:
-            raise RuntimeError(
-                f"nested ZIPs expanded to {total_expanded_bytes} bytes, exceeding global limit "
+            logger.warning(f"Skipping ZIP archive {logical_archive}: {error}")
+            archive_failures.append((logical_archive, error))
+            continue
+        if candidate_bytes > native_extractor.ZIP_MAX_TOTAL_BYTES:
+            error = (
+                f"expansion tree would reach {candidate_bytes} bytes, above safety limit "
                 f"{native_extractor.ZIP_MAX_TOTAL_BYTES}"
             )
+            logger.warning(f"Skipping ZIP archive {logical_archive}: {error}")
+            archive_failures.append((logical_archive, error))
+            continue
+
+        tree_entries[top_archive] = candidate_entries
+        tree_expanded_bytes[top_archive] = candidate_bytes
+        total_expanded_bytes += archive_expanded_bytes
 
         for member in members:
             member_path = member["member_path"]
