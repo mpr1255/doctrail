@@ -1,0 +1,43 @@
+[package]
+name = "ingestor"
+version = "0.1.0"
+edition = "2021"
+description = "doctrail native document extraction core"
+
+[lib]
+name = "_ingest_native"
+crate-type = ["cdylib", "rlib"]
+
+[features]
+extension-module = ["pyo3/extension-module"]
+
+[dependencies]
+anyhow = "1.0"
+base64 = "0.22"
+chardetng = "0.1"
+encoding_rs = "0.8"
+html2text = "0.17"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "bmp", "tiff"] }
+kuchikikiki = "0.9"
+mail-parser = { version = "0.11", features = ["full_encoding"] }
+mimetype-detector = "0.3.10"
+once_cell = "1.20"
+readabilityrs = { path = "vendor/readabilityrs" }
+regex = "1.11"
+scraper = "0.27"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+urlencoding = "2.1"
+zip = { version = "2", default-features = false, features = ["deflate"] }
+quick-xml = "0.41.0"
+calamine = "0.35.0"
+langdetect-rs = "0.2.3"
+mupdf = { version = "0.8.0", default-features = false, features = ["base14-fonts", "bundled-fonts-droid"] }
+office_oxide = "0.1.2"
+pyo3 = { version = "0.22", features = ["abi3-py312"] }
+rayon = "1"
+
+[profile.release]
+lto = true
+codegen-units = 1
+opt-level = 3

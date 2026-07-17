@@ -384,11 +384,23 @@ async def process_document(
         
         return result
 
-    # Image OCR (prefer Textra when available)
+    # Image OCR: honor --ocr-engine mac-ocr (the distributed farm, Chinese-capable)
+    # when requested, otherwise local Textra then Tesseract. Routing images to the
+    # farm matters at scale — tens of thousands of screenshots across 5 nodes.
     if file_extension in SUPPORTED_EXTENSION_FAMILIES["image_ocr"]:
-        text = _try_ocr_image_with_textra(file_path, file_sha1)
-        extraction_method = 'textra_ocr'
-        ocr_engine_used = 'textra'
+        text = None
+        extraction_method = None
+        ocr_engine_used = None
+        if ocr_engine == 'mac-ocr':
+            mac_ocr_text = await _try_ocr_with_mac_ocr(file_path)
+            if mac_ocr_text:
+                text = clean_ocr_text(mac_ocr_text)
+                extraction_method = 'mac_ocr'
+                ocr_engine_used = 'mac-ocr'
+        if text is None:
+            text = _try_ocr_image_with_textra(file_path, file_sha1)
+            extraction_method = 'textra_ocr'
+            ocr_engine_used = 'textra'
         if text is None:
             text = _try_ocr_image_with_tesseract(file_path)
             extraction_method = 'tesseract_ocr'
@@ -529,11 +541,15 @@ async def _process_pdf_file(file_path: str, file_sha1: str, original_file_path: 
 
         if not content:
             logger.info("PDF text extraction did not produce usable text, attempting OCR...")
-            allow_ocrmypdf_fallback = ocr_engine in {'auto', 'ocrmypdf'}
-            resolved_ocr_engine = ocr_engine
-            if resolved_ocr_engine == 'auto':
-                resolved_ocr_engine = 'textra'
+            resolved_ocr_engine = 'textra' if ocr_engine == 'auto' else ocr_engine
 
+            # OCR is a fallback cascade, not a single exclusive engine. The
+            # requested engine only picks which step runs FIRST; every cheaper,
+            # local step still runs while we have nothing, so a busy mac-ocr
+            # farm (503 'no capacity') degrades to local Apple Vision instead of
+            # storing a scanned PDF with empty content (silent data loss).
+
+            # 1. mac-ocr farm (distributed Apple Vision) — only when requested.
             if resolved_ocr_engine == 'mac-ocr':
                 mac_ocr_text = await _try_ocr_with_mac_ocr(file_path)
                 if mac_ocr_text:
@@ -541,15 +557,22 @@ async def _process_pdf_file(file_path: str, file_sha1: str, original_file_path: 
                     extraction_method = 'mac_ocr'
                     metadata_update['ocr_applied'] = True
                     metadata_update['ocr_engine'] = 'mac-ocr'
-            elif resolved_ocr_engine == 'textra':
+
+            # 2. Local textra (Apple Vision, Chinese-capable) — the default OCR
+            #    engine for 'auto'/'textra', and the fallback when the farm is busy.
+            if not content and resolved_ocr_engine in {'mac-ocr', 'textra'}:
                 textra_result = _try_ocr_with_textra(file_path, file_sha1)
                 if textra_result is not None:
                     content = clean_ocr_text(textra_result)
                     extraction_method = 'textra_ocr'
                     metadata_update['ocr_applied'] = True
                     metadata_update['ocr_engine'] = 'textra'
+                    if resolved_ocr_engine == 'mac-ocr':
+                        metadata_update['ocr_fallback'] = 'mac-ocr->textra'
 
-            if not content and allow_ocrmypdf_fallback:
+            # 3. ocrmypdf (tesseract) — universal last resort so no scanned PDF
+            #    is ever stored empty, whatever engine was requested.
+            if not content:
                 try:
                     ocr_pdf_path = ocr_pdf_with_ocrmypdf(file_path)
                     ocr_content = extract_text_with_pymupdf(ocr_pdf_path)
@@ -560,6 +583,8 @@ async def _process_pdf_file(file_path: str, file_sha1: str, original_file_path: 
                         extraction_method = 'ocrmypdf'
                         metadata_update['ocr_applied'] = True
                         metadata_update['ocr_file_path'] = ocr_pdf_path
+                        if resolved_ocr_engine != 'ocrmypdf':
+                            metadata_update['ocr_fallback'] = f'{resolved_ocr_engine}->ocrmypdf'
                     else:
                         raise ValueError("OCR extraction failed")
                 except Exception as ocr_e:
@@ -703,7 +728,13 @@ def _try_ocr_with_textra(file_path: str, file_sha1: str) -> Optional[str]:
 
 
 async def _try_ocr_with_mac_ocr(file_path: str) -> Optional[str]:
-    """OCR a file via the local Mac OCR cluster skill."""
+    """OCR a file via the distributed Mac OCR cluster skill.
+
+    Builds a more patient client than the skill default (DOCTRAIL_MAC_OCR_RETRIES,
+    default 5) so a bulk backfill rides out transient 503 'no capacity' responses
+    — all farm slots momentarily reserved — instead of dropping the document.
+    On any failure returns None; the caller then falls back to local textra.
+    """
     try:
         ocr_client = _load_mac_ocr_module()
         node = os.environ.get("DOCTRAIL_MAC_OCR_NODE") or None
@@ -711,7 +742,12 @@ async def _try_ocr_with_mac_ocr(file_path: str) -> Optional[str]:
             logger.info(f"Using Mac OCR cluster on node {node}")
         else:
             logger.info("Using Mac OCR cluster with automatic node selection")
-        text = await ocr_client.ocr_async(file_path, node=node)
+        retries = int(os.environ.get("DOCTRAIL_MAC_OCR_RETRIES", "5"))
+        client_cls = getattr(ocr_client, "OCRClient", None)
+        if client_cls is not None:
+            text = await client_cls(max_retries=retries).ocr_async(file_path, node=node)
+        else:
+            text = await ocr_client.ocr_async(file_path, node=node)
         cleaned = text.strip()
         return cleaned or None
     except Exception as e:

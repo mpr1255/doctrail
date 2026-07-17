@@ -104,6 +104,7 @@ def get_zotero_config(config_data: Optional[dict]) -> dict:
 @click.option('--workers', type=click.IntRange(1, None), help='Number of extraction worker threads')
 @click.option('--pdf-engine', type=click.Choice(['auto', 'pymupdf', 'pdftotext', 'mutool', 'mac-ocr']), help='PDF extraction strategy')
 @click.option('--ocr-engine', type=click.Choice(['auto', 'textra', 'ocrmypdf', 'mac-ocr']), help='OCR backend when OCR is needed')
+@click.option('--extractor', type=click.Choice(['auto', 'rust', 'python']), default='auto', help='Extraction engine: rust (native), python, or auto (rust if installed)')
 @click.option('--readability', is_flag=True, help='Use readability for HTML')
 @click.option('--html-extractor', type=click.Choice(['default', 'smart']), default='default')
 @click.option('--skip-garbage-check', is_flag=True, help='Skip garbage detection')
@@ -136,6 +137,7 @@ def ingest(
     workers: Optional[int],
     pdf_engine: Optional[str],
     ocr_engine: Optional[str],
+    extractor: str,
     readability: bool,
     html_extractor: str,
     skip_garbage_check: bool,
@@ -198,6 +200,8 @@ def ingest(
     ocr_engine = ocr_engine or os.environ.get('DOCTRAIL_OCR_ENGINE') or 'auto'
     if pdf_engine == 'mac-ocr' and ocr_engine == 'auto':
         ocr_engine = 'mac-ocr'
+    if extractor == 'auto':
+        extractor = os.environ.get('DOCTRAIL_EXTRACTOR') or 'auto'
 
     # Default to documents_path from config
     if not input_dir and not zotero and not plugin:
@@ -269,6 +273,7 @@ def ingest(
             include_pattern=include_pattern,
             exclude_pattern=exclude_pattern,
             workers=workers,
+            extractor=extractor,
             pdf_engine=pdf_engine,
             ocr_engine=ocr_engine,
             readability=readability,

@@ -72,6 +72,7 @@ async def run_ingest(
     pdf_engine: str = 'auto',
     ocr_engine: str = 'auto',
     workers: Optional[int] = None,
+    extractor: str = 'auto',
     verbose: bool = False,
     yes: bool = False,  # Skip confirmation prompts
     # Plugin-specific options
@@ -204,6 +205,7 @@ async def run_ingest(
                 pdf_engine=pdf_engine,
                 ocr_engine=ocr_engine,
                 workers=workers,
+                extractor=extractor,
             )
 
             total_processed += 1

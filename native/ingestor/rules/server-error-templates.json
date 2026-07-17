@@ -1,0 +1,122 @@
+[
+  {
+    "name": "apache_php_short_http_error",
+    "max_chars": 2000,
+    "max_nonempty_lines": 12,
+    "titles": [],
+    "error_phrases_any": [
+      "bad request",
+      "unauthorized",
+      "not authorized",
+      "not found",
+      "forbidden",
+      "method not allowed",
+      "request timeout",
+      "too many requests",
+      "internal error",
+      "not implemented",
+      "bad gateway",
+      "service unavailable",
+      "gateway timeout"
+    ],
+    "content_markers_all": [
+      "server at ",
+      " port "
+    ],
+    "content_markers_any": [
+      "apache/",
+      "php/",
+      "mod_fcgid/"
+    ],
+    "apply_during_fallback_selection": false
+  },
+  {
+    "name": "apache_short_not_found_template",
+    "max_chars": 2000,
+    "max_nonempty_lines": 12,
+    "titles": [],
+    "error_phrases_any": [
+      "not found"
+    ],
+    "content_markers_all": [
+      "the requested url",
+      "was not found on this server."
+    ],
+    "content_markers_any": [],
+    "apply_during_fallback_selection": false
+  },
+  {
+    "name": "chinese_short_not_found_template",
+    "max_chars": 500,
+    "max_nonempty_lines": 5,
+    "titles": [
+      "404 Not Found"
+    ],
+    "error_phrases_any": [
+      "抱歉，您访问的页面不存在",
+      "您访问的页面资源可能不存在",
+      "æ¨è®¿é®çé¡µé¢èµæºå¯è½ä¸å­å¨",
+      "æ±æ­ï¼æ¨è®¿é®çé¡µé¢ä¸å­å¨"
+    ],
+    "content_markers_all": [],
+    "content_markers_any": [
+      "返回首页",
+      "è¿åé¦é¡µ",
+      "javascript:void"
+    ],
+    "apply_during_fallback_selection": false
+  },
+  {
+    "name": "english_short_not_found_template",
+    "max_chars": 500,
+    "max_nonempty_lines": 5,
+    "titles": [
+      "404 Not Found"
+    ],
+    "error_phrases_any": [
+      "page you visited does not exist"
+    ],
+    "content_markers_all": [
+      "access link is wrong"
+    ],
+    "content_markers_any": [],
+    "apply_during_fallback_selection": false
+  },
+  {
+    "name": "litespeed_short_error_template",
+    "max_chars": 500,
+    "max_nonempty_lines": 5,
+    "titles": [
+      "404 Not Found"
+    ],
+    "error_phrases_any": [
+      "litespeed web server"
+    ],
+    "content_markers_all": [
+      "proudly powered by"
+    ],
+    "content_markers_any": [
+      "litespeed technologies inc."
+    ],
+    "apply_during_fallback_selection": false
+  },
+  {
+    "name": "nginx_short_404_template",
+    "max_chars": 500,
+    "max_nonempty_lines": 5,
+    "titles": [
+      "404 Not Found"
+    ],
+    "error_phrases_any": [
+      "status code: 404 not found"
+    ],
+    "content_markers_all": [
+      "server: nginx"
+    ],
+    "content_markers_any": [
+      "此网页已被删除",
+      "redirecting..."
+    ],
+    "apply_during_fallback_selection": false
+  }
+]

@@ -28,7 +28,7 @@ from loguru import logger
 from .database import insert_document, check_db_schema, setup_fts, clean_metadata
 from .document_processor import process_document, SkippedFileException
 from ..db_operations import _quote_identifier
-from ..file_filters import should_skip_file, apply_file_patterns
+from ..file_filters import should_skip_file, apply_file_patterns, check_for_manual_override
 from .manifest import load_manifest, get_file_metadata, find_manifest_in_directory
 
 # Initialize Rich console for pretty output
@@ -257,6 +257,7 @@ async def process_ingest(
     ocr_engine: str = 'auto',
     workers: Optional[int] = None,
     override_filepaths: Optional[Dict[str, str]] = None,
+    extractor: str = 'auto',
 ):
     """
     Process files from directory and insert into database.
@@ -348,6 +349,18 @@ async def process_ingest(
         # Directory mode - find all files recursively
         all_files = list(input_path.rglob("*"))
         all_files = [f for f in all_files if f.is_file()]
+        # Never descend into hidden directories (.git, .unison, .stversions,
+        # .svn, ...). rglob walks into them, and their contents (e.g. Unison
+        # conflict copies) have non-hidden names that should_skip_file would let
+        # through. Prune any file that passes through a dotted directory below
+        # the input root; the root's own ancestors are not considered.
+        pre_hidden = len(all_files)
+        all_files = [
+            f for f in all_files
+            if not any(part.startswith('.') for part in f.relative_to(input_path).parts[:-1])
+        ]
+        if pre_hidden != len(all_files):
+            logger.info(f"Skipped {pre_hidden - len(all_files)} file(s) inside hidden directories")
         logger.info(f"Found {len(all_files)} total files in {input_dir}")
     
     # Apply include/exclude patterns
@@ -430,7 +443,24 @@ async def process_ingest(
             except Exception as e:
                 logger.warning(f"Could not read file {file_path}: {e}")
                 continue
-    
+
+    # Deduplicate by sha1 (the ingest row key): identical bytes are the same
+    # document. Keep the first occurrence in input order so the winning row is
+    # deterministic regardless of extractor (native vs python) or route (clean
+    # vs OCR fallback), and duplicate files are never extracted/OCR'd twice.
+    if files_to_process:
+        seen_keys = set()
+        deduped = []
+        for dup_fp, dup_sha in files_to_process:
+            if dup_sha in seen_keys:
+                continue
+            seen_keys.add(dup_sha)
+            deduped.append((dup_fp, dup_sha))
+        dup_removed = len(files_to_process) - len(deduped)
+        if dup_removed:
+            logger.info(f"Skipping {dup_removed} duplicate-content file(s) with an already-seen sha1")
+        files_to_process = deduped
+
     if not files_to_process:
         console.print("[yellow]No new files to process.[/yellow]")
         return {
@@ -575,6 +605,65 @@ async def process_ingest(
                     logger.debug("Performed WAL checkpoint")
                 except Exception as exc:
                     logger.warning(f"WAL checkpoint failed: {exc}")
+
+        # Native (Rust) extractor: Rust does the multicore extraction in-process,
+        # this loop only writes rows and routes OCR/fallback files to the Python
+        # path below. When active, it consumes the direct-extractable files and
+        # narrows files_to_process to the ones that still need Python (OCR etc.).
+        from . import native_extractor
+        native_active = extractor in ('auto', 'rust') and native_extractor.available()
+        if extractor == 'rust' and not native_active:
+            raise RuntimeError(
+                "--extractor rust requested but the native extension "
+                "(doctrail._ingest_native) is not installed"
+            )
+        if native_active:
+            console.print("[cyan]Using native Rust extractor[/cyan] (multicore in-process)")
+            path_to_sha = {str(fp): sha for fp, sha in files_to_process}
+            fallback_items: List = []
+            # Files with a manual-override sidecar (--good/--ocr/--manual.txt) must go
+            # through the Python path: the Rust core has no knowledge of these sidecars,
+            # so extracting them natively would silently write the inferior auto
+            # extraction and defeat the override.
+            native_paths: List[str] = []
+            for fp, sha in files_to_process:
+                p = str(fp)
+                if check_for_manual_override(p):
+                    fallback_items.append((fp, sha))
+                else:
+                    native_paths.append(p)
+            native_chunk = 512
+            for start in range(0, len(native_paths), native_chunk):
+                if shutdown_requested:
+                    break
+                batch_paths = native_paths[start:start + native_chunk]
+                # The Rust binding contains per-file panics (each bad file comes back
+                # status=failed), but a batch-level failure — an ABI/import error, OOM,
+                # or a C-level abort inside a native lib — can still take down the whole
+                # call. Never let that abort the ingest: propagate Ctrl+C, otherwise
+                # route the chunk to the Python extractor so those files still get a try.
+                try:
+                    docs = native_extractor.extract_batch(batch_paths, workers)
+                except KeyboardInterrupt:
+                    raise
+                except BaseException as exc:
+                    logger.warning(
+                        f"Native extract_batch failed for {len(batch_paths)} file(s); "
+                        f"routing chunk to the Python extractor: {exc}"
+                    )
+                    fallback_items.extend((Path(p), path_to_sha[p]) for p in batch_paths)
+                    continue
+                for p, doc in zip(batch_paths, docs):
+                    if native_extractor.needs_python_fallback(doc, p):
+                        fallback_items.append((Path(p), path_to_sha[p]))
+                    else:
+                        handle_result(native_extractor.to_result(p, path_to_sha[p], doc))
+            files_to_process = fallback_items
+            if fallback_items:
+                console.print(
+                    f"[cyan]Routing {len(fallback_items)} file(s) to the Python extractor "
+                    "(OCR / fallback).[/cyan]"
+                )
 
         submission_batch_size = max(worker_count * 4, 1)
         loop = asyncio.get_running_loop()

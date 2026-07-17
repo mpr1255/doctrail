@@ -1,0 +1,17 @@
+# Build metadata for the local doctrail native extraction extension.
+# `scripts/build_native.sh` builds this project and installs its abi3 module in
+# `src/doctrail/` for the editable checkout.
+[build-system]
+requires = ["maturin>=1.7,<2"]
+build-backend = "maturin"
+
+[project]
+name = "doctrail-ingest-native"
+version = "0.1.0"
+description = "doctrail native document extraction core"
+requires-python = ">=3.12"
+license = { text = "MIT" }
+
+[tool.maturin]
+module-name = "_ingest_native"
+features = ["extension-module"]

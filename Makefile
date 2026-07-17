@@ -1,7 +1,8 @@
-.PHONY: help generated docs docs-fresh generated-clean package-docs-check test deploy release-check
+.PHONY: help native generated docs docs-fresh generated-clean package-docs-check test deploy release-check
 
 help:
 	@printf "%s\n" \
+		"make native              Build the Rust extraction extension and install its .so into the package." \
 		"make generated           Rebuild generated docs artifacts." \
 		"make docs                Rebuild generated docs artifacts and the MkDocs site." \
 		"make docs-fresh          Verify generated docs match the current worktree." \
@@ -10,6 +11,9 @@ help:
 		"make test                Run the non-integration test suite." \
 		"make deploy              Prepare the tree for the GitHub Pages deploy workflow." \
 		"make release-check       Run the generated-docs gates for a tagged release."
+
+native:
+	bash scripts/build_native.sh
 
 generated:
 	uv run python scripts/build_llms_full.py
