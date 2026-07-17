@@ -47,6 +47,18 @@ doctrail enrich <name> --limit 5
 
 If you would rather not learn the commands, you do not have to: install doctrail, then tell your agent to run `doctrail` and order it around.
 
+### Scanned documents and OCR
+
+Ingest sends scanned PDFs and images through OCR. By default it uses local tools (`textra` on macOS, `ocrmypdf` elsewhere). If you run your own OCR service — for example Apple Vision OCR served from Macs you control — point doctrail at it with `--ocr-engine mac-ocr` and a comma-separated endpoint list:
+
+```dotenv
+MAC_OCR__SERVICE_ENDPOINTS=https://ocr-1.example.com,https://ocr-2.example.com
+```
+
+An endpoint is any HTTP service implementing two routes: `POST /reserve` answers `201` with `{"reservation_id": ...}` when the node has capacity, and `POST /ocr?reservation_id=...` accepts a multipart `file` upload and returns `{"text": ...}`. Doctrail shards uploads across endpoints by content hash and retries busy nodes; when the service fails or is not configured, ingest continues with the rest of its extraction cascade instead of dropping the file. The endpoints can be anything reachable over HTTPS, such as Tailscale Funnel URLs.
+
+To replace the transport entirely, set `DOCTRAIL_MAC_OCR_CLIENT_PATH` to a local Python file exposing `ocr_async(file_path, node=None)`; doctrail loads that client in place of the built-in HTTP one.
+
 ## Before real model calls
 
 The tutorial above uses saved replay responses, so it does not need an API key. Your own enrichments do. Put the key in the project folder's `.env` file, which is usually the cleanest option:
@@ -66,7 +78,7 @@ You only need the line for the provider you plan to use. Doctrail reads the near
 Doctrail can use a vLLM, Ollama, or other server that exposes the OpenAI-compatible chat completions API. Point Doctrail at the server's `/v1` base URL:
 
 ```dotenv
-OPENAI_COMPATIBLE_BASE_URL=http://h100:8000/v1
+OPENAI_COMPATIBLE_BASE_URL=http://your-gpu-server:8000/v1
 # Optional when the server requires authentication:
 OPENAI_COMPATIBLE_API_KEY=...
 ```
