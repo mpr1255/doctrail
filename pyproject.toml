@@ -106,6 +106,7 @@ exclude = [
     "_paper/**",
     "agents/**",
     "data/**",
+    "native/**",
     "notes/**",
     "out/**",
     "scratch/**",
