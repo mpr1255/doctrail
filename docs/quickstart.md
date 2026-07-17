@@ -59,6 +59,22 @@ An endpoint is any HTTP service implementing two routes: `POST /reserve` answers
 
 To replace the transport entirely, set `DOCTRAIL_MAC_OCR_CLIENT_PATH` to a local Python file exposing `ocr_async(file_path, node=None)`; doctrail loads that client in place of the built-in HTTP one.
 
+### Fast native extraction (optional)
+
+Doctrail has two extraction engines. Every install has the Python engine: a plain `uv tool install doctrail` (or `uvx doctrail`) uses it, and `doctrail ingest` works out of the box. The optional native engine is a Rust extension, vendored in the repository, that does multicore extraction in-process. `--extractor auto` (the default) uses the native build when present and otherwise falls back to the Python engine with a printed notice; `--extractor rust` requires the native build and fails if it is missing; `--extractor python` forces the Python engine. Setting `DOCTRAIL_DISABLE_NATIVE=1` disables the native engine at runtime.
+
+Building it requires a source checkout and a Rust toolchain:
+
+```bash
+git clone https://github.com/mpr1255/doctrail && cd doctrail && make native
+```
+
+This compiles the extension and drops it into the package. It is never shipped in the wheel: the build statically embeds MuPDF, which is licensed under the AGPL-3.0 while the published package is MIT, so the native engine is a local build rather than a distributed binary.
+
+Measured on an Apple M1 Max (10 cores), both engines on the identical corpus, with no external OCR service configured in either run. On a mixed 1,000-file corpus (500 PDF, 300 HTML, 150 DOCX, 50 DOC), the extraction phase took approximately 34s native against 64s for the Python engine with 8 workers — about 1.9x — with comparable peak memory, roughly 0.7 GB against 0.5 GB. An earlier measurement of the extraction step alone, on a 968-file PDF-heavy sample, took 5.7s native on all cores against 83.5s Python on 8 threads, about 14.6x.
+
+The two numbers differ because end-to-end ingest time is bounded by work both engines share: file hashing, SQLite writes, and embedded Office media handling. The wall-clock advantage on mixed corpora is therefore modest, and it grows with corpus size and with the share of text-layer PDFs, where the extraction step dominates. The native engine is also stricter: it fails fast on unreadable files and flags them for OCR instead of retrying, which is the behavior you want at the scale of hundreds of thousands of messy files.
+
 ## Before real model calls
 
 The tutorial above uses saved replay responses, so it does not need an API key. Your own enrichments do. Put the key in the project folder's `.env` file, which is usually the cleanest option:
