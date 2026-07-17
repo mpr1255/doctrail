@@ -109,7 +109,7 @@ def get_zotero_config(config_data: Optional[dict]) -> dict:
 @click.option('--workers', type=click.IntRange(1, None), help='Number of extraction worker threads')
 @click.option('--pdf-engine', type=click.Choice(['auto', 'pymupdf', 'pdftotext', 'mutool', 'mac-ocr']), help='PDF extraction strategy')
 @click.option('--ocr-engine', type=click.Choice(['auto', 'textra', 'ocrmypdf', 'mac-ocr']), help='OCR backend when OCR is needed')
-@click.option('--extractor', type=click.Choice(['auto', 'rust', 'python']), default='auto', help='Extraction engine: auto/rust requires native; python is the explicit backup')
+@click.option('--extractor', type=click.Choice(['auto', 'rust', 'python']), default='auto', help='Extraction engine: auto uses the native build when present, else python; rust requires the native build')
 @click.option('--readability', is_flag=True, help='Use readability for HTML')
 @click.option('--html-extractor', type=click.Choice(['default', 'smart']), default='default')
 @click.option('--skip-garbage-check', is_flag=True, help='Skip garbage detection')

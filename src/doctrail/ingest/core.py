@@ -871,17 +871,25 @@ async def process_ingest(
             if line_delay > 0 and result['success'] is not None:
                 time.sleep(line_delay)
 
-        # Native (Rust) is authoritative for auto/rust mode. Python extraction is
-        # available only through the explicit --extractor python backup switch.
+        # Native (Rust) is authoritative when built. The published wheel is pure
+        # Python, so auto mode falls back to the Python extractors (loudly) when
+        # the compiled extension is absent; --extractor rust fails closed.
         from . import native_extractor
         if extractor == 'auto' and os.environ.get('DOCTRAIL_DISABLE_NATIVE'):
+            extractor = 'python'
+        if extractor == 'auto' and not native_extractor.available():
+            console.print(
+                "[yellow]Native extension not built; using the Python extractors. "
+                "For the multicore fast path, build it with `make native` from a "
+                "source checkout.[/yellow]"
+            )
             extractor = 'python'
         native_active = extractor in ('auto', 'rust')
         if native_active and not native_extractor.available():
             raise RuntimeError(
-                "Native extraction is required for --extractor auto/rust, but "
-                "doctrail._ingest_native is not installed. Run `make native`, or "
-                "use `--extractor python` for the explicit backup path."
+                "Native extraction is required for --extractor rust, but "
+                "doctrail._ingest_native is not installed. Build it with "
+                "`make native` from a source checkout, or use `--extractor python`."
             )
         if native_active:
             console.print("[cyan]Using native Rust extractor[/cyan] (multicore in-process)")

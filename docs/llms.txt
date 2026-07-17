@@ -1082,8 +1082,8 @@ Options:
                                   PDF extraction strategy
   --ocr-engine [auto|textra|ocrmypdf|mac-ocr]
                                   OCR backend when OCR is needed
-  --extractor [auto|rust|python]  Extraction engine: auto/rust requires native; python is the
-                                  explicit backup
+  --extractor [auto|rust|python]  Extraction engine: auto uses the native build when present, else
+                                  python; rust requires the native build
   --readability                   Use readability for HTML
   --html-extractor [default|smart]
   --skip-garbage-check            Skip garbage detection

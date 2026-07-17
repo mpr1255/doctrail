@@ -353,7 +353,32 @@ async def test_process_ingest_records_whole_chunk_failure_without_python_fallbac
 
 
 @pytest.mark.asyncio
-async def test_auto_mode_fails_closed_when_native_extension_is_unavailable(
+async def test_auto_mode_falls_back_to_python_when_native_extension_is_unavailable(
+    tmp_path, native_enabled, monkeypatch
+):
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "document.txt").write_text("pure-Python installs must still ingest", encoding="utf-8")
+    monkeypatch.setattr(native_extractor, "available", lambda: False)
+
+    db_path = tmp_path / "fallback.sqlite"
+    result = await process_ingest(
+        db_path=str(db_path),
+        input_dir=str(source),
+        table="documents",
+        extractor="auto",
+        workers=1,
+        yes=True,
+    )
+
+    assert result["successful"] == 1
+    with sqlite3.connect(db_path) as conn:
+        row_count = conn.execute("SELECT COUNT(*) FROM documents").fetchone()[0]
+    assert row_count == 1
+
+
+@pytest.mark.asyncio
+async def test_rust_mode_fails_closed_when_native_extension_is_unavailable(
     tmp_path, native_enabled, monkeypatch
 ):
     source = tmp_path / "source"
@@ -366,7 +391,7 @@ async def test_auto_mode_fails_closed_when_native_extension_is_unavailable(
             db_path=str(tmp_path / "closed.sqlite"),
             input_dir=str(source),
             table="documents",
-            extractor="auto",
+            extractor="rust",
             workers=1,
             yes=True,
         )
