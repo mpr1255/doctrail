@@ -140,6 +140,43 @@ async def test_skip_existing_anti_joins_filepath_before_hashing(
     assert "Fast resume: skipped 1 exact filepath(s) before hashing" in capsys.readouterr().out
 
 
+def test_setup_fts_trigram_matches_chinese_substring(tmp_path):
+    """Trigram FTS should match CJK substrings that unicode61 cannot tokenize."""
+    from doctrail.ingest.database import setup_fts
+
+    content = "患者接受活体肾移植手术后恢复良好"
+
+    def create_database(name, tokenizer):
+        db_path = tmp_path / name
+        with sqlite3.connect(db_path) as conn:
+            conn.execute(
+                "CREATE TABLE documents (raw_content TEXT, filename TEXT)"
+            )
+            conn.execute(
+                "INSERT INTO documents (raw_content, filename) VALUES (?, ?)",
+                (content, "病历.txt"),
+            )
+        setup_fts(str(db_path), "documents", tokenizer=tokenizer)
+        return db_path
+
+    unicode_db = create_database("unicode.db", "unicode61")
+    trigram_db = create_database("trigram.db", "trigram")
+
+    with sqlite3.connect(unicode_db) as conn:
+        unicode_matches = conn.execute(
+            "SELECT COUNT(*) FROM documents_fts WHERE documents_fts MATCH ?",
+            ("肾移植",),
+        ).fetchone()[0]
+    with sqlite3.connect(trigram_db) as conn:
+        trigram_matches = conn.execute(
+            "SELECT COUNT(*) FROM documents_fts WHERE documents_fts MATCH ?",
+            ("肾移植",),
+        ).fetchone()[0]
+
+    assert unicode_matches == 0
+    assert trigram_matches == 1
+
+
 def test_enrich_help():
     """Test that enrich --help works."""
     runner = CliRunner()

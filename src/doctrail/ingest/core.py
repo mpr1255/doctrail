@@ -423,6 +423,7 @@ async def process_ingest(
     skip_garbage_check: bool = False,
     yes: bool = False,
     fulltext: bool = False,
+    fts_tokenizer: str = 'unicode61',
     manifest_path: Optional[str] = None,
     labels: Optional[List[str]] = None,
     pdf_engine: str = 'auto',
@@ -443,6 +444,7 @@ async def process_ingest(
         force: Force import even if database schema doesn't match
         skip_existing: Skip exact database filepaths before hashing
         fulltext: Create full-text search index
+        fts_tokenizer: FTS5 tokenizer to use for the index
     """
     # Use OS-level termination so Ctrl-C is immediate even while Rust is
     # executing outside the Python interpreter. SQLite WAL protects committed
@@ -1221,6 +1223,7 @@ async def process_ingest(
             workers=worker_count,
             overwrite=overwrite,
             fulltext=fulltext,
+            fts_tokenizer=fts_tokenizer,
             path_overrides=effective_override_filepaths,
         )
         media_failures = embedded_media_stats.get("failed_files", [])
@@ -1249,7 +1252,7 @@ async def process_ingest(
     # Create FTS index if requested
     if fulltext and successful > 0:
         console.print("\n[bold]Creating full-text search index...[/bold]")
-        setup_fts(db_path, table)
+        setup_fts(db_path, table, tokenizer=fts_tokenizer)
     
     # Show results
     console.print(f"\n[bold]Ingestion Complete![/bold]")

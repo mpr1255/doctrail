@@ -396,6 +396,7 @@ def run_media_ingest(
     limit: Optional[int] = None,
     soffice: str = "soffice",
     min_ocr_dim: int = DEFAULT_MIN_OCR_DIM,
+    fts_tokenizer: str = "unicode61",
     fulltext: bool = True,
     path_overrides: Optional[Dict[str, str]] = None,
 ) -> Dict[str, object]:
@@ -569,7 +570,7 @@ def run_media_ingest(
     # Refresh FTS so the new OCR text is searchable.
     if fulltext:
         try:
-            setup_fts(db_path, table_name)
+            setup_fts(db_path, table_name, tokenizer=fts_tokenizer)
             db[f"{table_name}_fts"].populate()  # type: ignore[attr-defined]
         except Exception as exc:
             logger.debug(f"FTS refresh after media ingest: {exc}")

@@ -122,6 +122,12 @@ def get_zotero_config(config_data: Optional[dict]) -> dict:
     type=click.Path(exists=True, dir_okay=False, path_type=Path),
     help='SQLite extension to load for this ingest; may be repeated',
 )
+@click.option(
+    '--fts-tokenizer',
+    type=click.Choice(['unicode61', 'trigram']),
+    default='unicode61',
+    help='FTS5 tokenizer; trigram for CJK substring search',
+)
 @click.option('--manifest', help='Path to manifest.json')
 @click.option('--zotero', is_flag=True, help='Zotero mode')
 @click.option('--collection', help='Zotero collection name')
@@ -157,6 +163,7 @@ def ingest(
     yes: bool,
     fulltext: bool,
     sqlite_extensions: tuple[Path, ...],
+    fts_tokenizer: str,
     manifest: Optional[str],
     zotero: bool,
     collection: Optional[str],
@@ -299,6 +306,7 @@ def ingest(
             html_extractor=html_extractor,
             skip_garbage_check=skip_garbage_check,
             fulltext=fulltext,
+            fts_tokenizer=fts_tokenizer,
             manifest_path=manifest,
             verbose=verbose,
             yes=yes,

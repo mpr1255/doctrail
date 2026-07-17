@@ -68,6 +68,7 @@ async def run_ingest(
     html_extractor: str = 'default',
     skip_garbage_check: bool = False,
     fulltext: bool = False,
+    fts_tokenizer: str = 'unicode61',
     manifest_path: Optional[str] = None,
     labels: Optional[List[str]] = None,
     pdf_engine: str = 'auto',
@@ -102,6 +103,7 @@ async def run_ingest(
         html_extractor: HTML extraction method ('default' or 'smart')
         skip_garbage_check: Skip garbage content detection
         fulltext: Create full-text search index after ingestion
+        fts_tokenizer: FTS5 tokenizer to use for the index
         manifest_path: Path to manifest.json for metadata
         labels: Labels to apply to ingested documents
         pdf_engine: PDF extraction engine
@@ -203,6 +205,7 @@ async def run_ingest(
                 skip_garbage_check=skip_garbage_check,
                 yes=yes,
                 fulltext=fulltext,
+                fts_tokenizer=fts_tokenizer,
                 manifest_path=manifest_path,
                 labels=labels,
                 pdf_engine=pdf_engine,

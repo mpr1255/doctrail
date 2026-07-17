@@ -305,7 +305,7 @@ def check_db_schema(db_path: str, table_name: str) -> bool:
         raise
 
 
-def setup_fts(db_path: str, table_name: str):
+def setup_fts(db_path: str, table_name: str, tokenizer: str = 'unicode61'):
     """Set up full-text search for the given table if requested"""
     try:
         db = configure_ingest_database(sqlite_utils.Database(db_path))
@@ -341,6 +341,7 @@ def setup_fts(db_path: str, table_name: str):
         db[table_name].enable_fts(
             ['raw_content', 'filename', 'filepath'],
             create_triggers=True,
+            tokenize=tokenizer,
         )
         
         logger.info(f"Successfully created FTS index '{fts_table_name}'")
