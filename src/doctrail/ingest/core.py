@@ -421,6 +421,7 @@ async def process_ingest(
     readability: bool = False,
     html_extractor: str = 'default',
     skip_garbage_check: bool = False,
+    skip_embedded_media: bool = False,
     yes: bool = False,
     fulltext: bool = False,
     fts_tokenizer: str = 'unicode61',
@@ -443,6 +444,7 @@ async def process_ingest(
         readability: Use readability library for HTML content extraction
         force: Force import even if database schema doesn't match
         skip_existing: Skip exact database filepaths before hashing
+        skip_embedded_media: Skip embedded Office image extraction and OCR
         fulltext: Create full-text search index
         fts_tokenizer: FTS5 tokenizer to use for the index
     """
@@ -1220,7 +1222,7 @@ async def process_ingest(
         | existing_office_paths
         | resume_office_paths
     )
-    if office_paths:
+    if office_paths and not skip_embedded_media:
         console.print(f"\n[cyan]Extracting embedded images from {len(office_paths)} Office file(s)...[/cyan]")
         embedded_media_stats = await asyncio.to_thread(
             run_media_ingest,

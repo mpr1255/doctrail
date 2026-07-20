@@ -59,6 +59,8 @@ An endpoint is any HTTP service implementing two routes: `POST /reserve` answers
 
 To replace the transport entirely, set `DOCTRAIL_MAC_OCR_CLIENT_PATH` to a local Python file exposing `ocr_async(file_path, node=None)`; doctrail loads that client in place of the built-in HTTP one.
 
+Office files also have embedded images extracted and OCR'd by default. For a routine text-only refresh, use `--skip-embedded-media`; this leaves native document extraction enabled while avoiding LibreOffice conversion processes.
+
 ### Fast native extraction (optional)
 
 Doctrail has two extraction engines. Every install has the Python engine: a plain `uv tool install doctrail` (or `uvx doctrail`) uses it, and `doctrail ingest` works out of the box. The optional native engine is a Rust extension, vendored in the repository, that does multicore extraction in-process. `--extractor auto` (the default) uses the native build when present and otherwise falls back to the Python engine with a printed notice; `--extractor rust` requires the native build and fails if it is missing; `--extractor python` forces the Python engine. Setting `DOCTRAIL_DISABLE_NATIVE=1` disables the native engine at runtime.

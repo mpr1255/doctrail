@@ -546,6 +546,35 @@ async def test_native_ingest_merges_embedded_docx_image_ocr_into_parent(
 
 
 @pytest.mark.asyncio
+async def test_ingest_can_skip_embedded_office_media(monkeypatch, tmp_path):
+    from docx import Document
+
+    source = tmp_path / "source"
+    source.mkdir()
+    docx_path = source / "text-only.docx"
+    document = Document()
+    document.add_paragraph("Document text remains available.")
+    document.save(docx_path)
+
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError("embedded media extraction should be skipped")
+
+    monkeypatch.setattr(embedded_media, "run_media_ingest", fail_if_called)
+    result = await process_ingest(
+        db_path=str(tmp_path / "skip-media.sqlite"),
+        input_dir=str(source),
+        table="documents",
+        extractor="python",
+        workers=1,
+        skip_embedded_media=True,
+        yes=True,
+    )
+
+    assert result["successful"] == 1
+    assert result["embedded_media"] == {}
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("extension", "extractor_name", "title", "expected_type"),
     [

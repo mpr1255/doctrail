@@ -113,6 +113,11 @@ def get_zotero_config(config_data: Optional[dict]) -> dict:
 @click.option('--readability', is_flag=True, help='Use readability for HTML')
 @click.option('--html-extractor', type=click.Choice(['default', 'smart']), default='default')
 @click.option('--skip-garbage-check', is_flag=True, help='Skip garbage detection')
+@click.option(
+    '--skip-embedded-media',
+    is_flag=True,
+    help='Skip embedded Office image extraction and OCR',
+)
 @click.option('--yes', '-y', is_flag=True, help='Skip prompts')
 @click.option('--fulltext', is_flag=True, help='Create FTS index')
 @click.option(
@@ -160,6 +165,7 @@ def ingest(
     readability: bool,
     html_extractor: str,
     skip_garbage_check: bool,
+    skip_embedded_media: bool,
     yes: bool,
     fulltext: bool,
     sqlite_extensions: tuple[Path, ...],
@@ -218,6 +224,8 @@ def ingest(
             ocr_engine = ocr_engine or config_data.get('ocr_engine')
             if not skip_garbage_check and config_data.get('skip_garbage_check', False):
                 skip_garbage_check = True
+            if not skip_embedded_media and config_data.get('skip_embedded_media', False):
+                skip_embedded_media = True
         except Exception as e:
             raise click.UsageError(f"Error loading config: {e}")
 
@@ -305,6 +313,7 @@ def ingest(
             readability=readability,
             html_extractor=html_extractor,
             skip_garbage_check=skip_garbage_check,
+            skip_embedded_media=skip_embedded_media,
             fulltext=fulltext,
             fts_tokenizer=fts_tokenizer,
             manifest_path=manifest,

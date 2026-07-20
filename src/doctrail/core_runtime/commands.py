@@ -67,6 +67,7 @@ async def run_ingest(
     readability: bool = False,
     html_extractor: str = 'default',
     skip_garbage_check: bool = False,
+    skip_embedded_media: bool = False,
     fulltext: bool = False,
     fts_tokenizer: str = 'unicode61',
     manifest_path: Optional[str] = None,
@@ -102,6 +103,7 @@ async def run_ingest(
         readability: Use readability library for HTML extraction
         html_extractor: HTML extraction method ('default' or 'smart')
         skip_garbage_check: Skip garbage content detection
+        skip_embedded_media: Skip embedded Office image extraction and OCR
         fulltext: Create full-text search index after ingestion
         fts_tokenizer: FTS5 tokenizer to use for the index
         manifest_path: Path to manifest.json for metadata
@@ -203,6 +205,7 @@ async def run_ingest(
                 readability=readability,
                 html_extractor=html_extractor,
                 skip_garbage_check=skip_garbage_check,
+                skip_embedded_media=skip_embedded_media,
                 yes=yes,
                 fulltext=fulltext,
                 fts_tokenizer=fts_tokenizer,
