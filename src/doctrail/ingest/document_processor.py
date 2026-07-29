@@ -533,24 +533,28 @@ async def process_document(
         
         return result
 
-    # Image OCR: honor --ocr-engine mac-ocr (the distributed farm, Chinese-capable)
-    # when requested, otherwise local Textra then Tesseract. Routing images to the
-    # farm matters at scale — tens of thousands of screenshots across 5 nodes.
+    # mac-ocr-only is for consumers that must not use local OCR fallbacks.
+    # mac-ocr preserves the existing fallback cascade.
     if file_extension in SUPPORTED_EXTENSION_FAMILIES["image_ocr"]:
         text = None
         extraction_method = None
         ocr_engine_used = None
-        if ocr_engine == 'mac-ocr':
-            mac_ocr_text = await _try_ocr_with_mac_ocr(file_path)
+        mac_ocr_only = ocr_engine == 'mac-ocr-only'
+        if ocr_engine in {'mac-ocr', 'mac-ocr-only'}:
+            mac_ocr_text = (
+                await ocr_with_mac_ocr(file_path)
+                if mac_ocr_only
+                else await _try_ocr_with_mac_ocr(file_path)
+            )
             if mac_ocr_text:
                 text = clean_ocr_text(mac_ocr_text)
                 extraction_method = 'mac_ocr'
                 ocr_engine_used = 'mac-ocr'
-        if text is None:
+        if text is None and not mac_ocr_only:
             text = _try_ocr_image_with_textra(file_path, file_sha1)
             extraction_method = 'textra_ocr'
             ocr_engine_used = 'textra'
-        if text is None:
+        if text is None and not mac_ocr_only:
             text = _try_ocr_image_with_tesseract(file_path)
             extraction_method = 'tesseract_ocr'
             ocr_engine_used = 'tesseract'
@@ -625,7 +629,8 @@ async def _process_pdf_file(file_path: str, file_sha1: str, original_file_path: 
 
     Args:
         pdf_engine: 'auto' (default), 'pymupdf', 'pdftotext', 'textra'
-        ocr_engine: 'auto' (default), 'textra', 'ocrmypdf'
+        ocr_engine: 'auto' (default), 'textra', 'ocrmypdf', 'mac-ocr', or
+            'mac-ocr-only' (never falls back to local OCR)
     """
     try:
         logger.info(f"Processing PDF file: {file_path}")
@@ -690,7 +695,8 @@ async def _process_pdf_file(file_path: str, file_sha1: str, original_file_path: 
 
         if not content:
             logger.info("PDF text extraction did not produce usable text, attempting OCR...")
-            resolved_ocr_engine = 'textra' if ocr_engine == 'auto' else ocr_engine
+            mac_ocr_only = ocr_engine == 'mac-ocr-only'
+            resolved_ocr_engine = 'mac-ocr' if mac_ocr_only else ('textra' if ocr_engine == 'auto' else ocr_engine)
 
             # OCR is a fallback cascade, not a single exclusive engine. The
             # requested engine only picks which step runs FIRST; every cheaper,
@@ -700,7 +706,11 @@ async def _process_pdf_file(file_path: str, file_sha1: str, original_file_path: 
 
             # 1. mac-ocr farm (distributed Apple Vision) — only when requested.
             if resolved_ocr_engine == 'mac-ocr':
-                mac_ocr_text = await _try_ocr_with_mac_ocr(file_path)
+                mac_ocr_text = (
+                    await ocr_with_mac_ocr(file_path)
+                    if mac_ocr_only
+                    else await _try_ocr_with_mac_ocr(file_path)
+                )
                 if mac_ocr_text:
                     content = clean_ocr_text(mac_ocr_text)
                     extraction_method = 'mac_ocr'
@@ -709,7 +719,7 @@ async def _process_pdf_file(file_path: str, file_sha1: str, original_file_path: 
 
             # 2. Local textra (Apple Vision, Chinese-capable) — the default OCR
             #    engine for 'auto'/'textra', and the fallback when the farm is busy.
-            if not content and resolved_ocr_engine in {'mac-ocr', 'textra'}:
+            if not content and not mac_ocr_only and resolved_ocr_engine in {'mac-ocr', 'textra'}:
                 textra_result = _try_ocr_with_textra(file_path, file_sha1)
                 if textra_result is not None:
                     content = clean_ocr_text(textra_result)
@@ -721,7 +731,7 @@ async def _process_pdf_file(file_path: str, file_sha1: str, original_file_path: 
 
             # 3. ocrmypdf (tesseract) — universal last resort so no scanned PDF
             #    is ever stored empty, whatever engine was requested.
-            if not content:
+            if not content and not mac_ocr_only:
                 try:
                     ocr_pdf_path = ocr_pdf_with_ocrmypdf(file_path)
                     ocr_content = extract_text_with_pymupdf(ocr_pdf_path)

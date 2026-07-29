@@ -815,6 +815,54 @@ async def test_process_document_respects_mac_ocr_engine(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_process_document_mac_ocr_only_skips_local_pdf_fallbacks(monkeypatch, tmp_path):
+    pdf_path = tmp_path / "sample.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4\nfake scanned pdf\n")
+    sha1 = _sha1_for(pdf_path)
+
+    monkeypatch.setattr("doctrail.ingest.document_processor.extract_text_with_pymupdf", lambda path: "")
+    monkeypatch.setattr("doctrail.ingest.document_processor.extract_text_with_pdftotext", lambda path: "")
+    monkeypatch.setattr("doctrail.ingest.document_processor.extract_text_with_mutool", lambda path: "")
+    monkeypatch.setattr("doctrail.ingest.document_processor.ocr_with_mac_ocr", _async_return("==== Page 1 ====\nCluster OCR text"))
+    monkeypatch.setattr(
+        "doctrail.ingest.document_processor.ocr_pdf_with_ocrmypdf",
+        lambda path: pytest.fail("mac-ocr-only must not invoke OCRmyPDF"),
+    )
+    monkeypatch.setattr(
+        "doctrail.ingest.document_processor._try_ocr_with_textra",
+        lambda path, file_sha1: pytest.fail("mac-ocr-only must not invoke Textra"),
+    )
+
+    _, content, metadata = await process_document(str(pdf_path), sha1, ocr_engine="mac-ocr-only")
+
+    assert "Cluster OCR text" in content
+    assert metadata["extraction_method"] == "mac_ocr"
+    assert metadata["ocr_engine"] == "mac-ocr"
+
+
+@pytest.mark.asyncio
+async def test_process_document_mac_ocr_only_skips_local_image_fallbacks(monkeypatch):
+    image_path = ASSET_DIR / "federalist_fixture.png"
+    sha1 = _sha1_for(image_path)
+
+    monkeypatch.setattr("doctrail.ingest.document_processor.ocr_with_mac_ocr", _async_return("Cluster image OCR text"))
+    monkeypatch.setattr(
+        "doctrail.ingest.document_processor._try_ocr_image_with_textra",
+        lambda path, file_sha1: pytest.fail("mac-ocr-only must not invoke Textra"),
+    )
+    monkeypatch.setattr(
+        "doctrail.ingest.document_processor._try_ocr_image_with_tesseract",
+        lambda path: pytest.fail("mac-ocr-only must not invoke Tesseract"),
+    )
+
+    _, content, metadata = await process_document(str(image_path), sha1, ocr_engine="mac-ocr-only")
+
+    assert "Cluster image OCR text" in content
+    assert metadata["extraction_method"] == "mac_ocr"
+    assert metadata["ocr_engine"] == "mac-ocr"
+
+
+@pytest.mark.asyncio
 async def test_process_document_handles_pptx_real(tmp_path):
     from pptx import Presentation
 
