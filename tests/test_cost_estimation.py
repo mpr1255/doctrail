@@ -491,6 +491,10 @@ def test_validate_model_accepts_known_openai_model():
     assert validate_model("gpt-5-mini")
 
 
+def test_validate_model_accepts_arbitrary_codex_cli_model():
+    assert get_model_validation_error("cli/codex/gpt-5.6-luna") is None
+
+
 def test_validate_model_accepts_openai_compatible_model_for_sync_only():
     model = "openai-compatible/Qwen/Qwen3-32B"
 

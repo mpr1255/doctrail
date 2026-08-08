@@ -59,6 +59,8 @@ CLI_DEFAULTS = {
     "codex": "gpt-5.5",
 }
 
+CODEX_REASONING_EFFORT_VALUES = {"minimal", "low", "medium", "high"}
+
 # Subprocess timeout (seconds)
 DEFAULT_TIMEOUT = 300
 
@@ -169,6 +171,24 @@ class CLIProvider:
             "codex": 200000,
         }
 
+    def supports_reasoning_effort(self) -> bool:
+        """Return whether this CLI supports reasoning effort."""
+        return self.cli_tool == "codex"
+
+    def _resolve_reasoning_effort(self, reasoning_effort: Optional[str]) -> Optional[str]:
+        """Normalize Codex reasoning effort and apply a safe default."""
+        if not self.supports_reasoning_effort():
+            return None
+        if reasoning_effort is None:
+            return "low"
+        normalized = str(reasoning_effort).strip().lower()
+        if normalized not in CODEX_REASONING_EFFORT_VALUES:
+            raise ValueError(
+                f"Invalid reasoning_effort '{reasoning_effort}'. "
+                f"Expected one of: {', '.join(sorted(CODEX_REASONING_EFFORT_VALUES))}"
+            )
+        return normalized
+
     def _build_prompt_text(self, messages: List[Dict[str, str]]) -> str:
         """Convert OpenAI-style messages into a single prompt string for CLI stdin."""
         parts = []
@@ -275,7 +295,12 @@ class CLIProvider:
 
     # ── Codex CLI ─────────────────────────────────────────────────────
 
-    async def _call_codex(self, prompt: str, schema_json: str = None) -> str:
+    async def _call_codex(
+        self,
+        prompt: str,
+        schema_json: str = None,
+        reasoning_effort: Optional[str] = None,
+    ) -> str:
         """Call codex exec in non-interactive mode.
 
         Key flags:
@@ -288,7 +313,7 @@ class CLIProvider:
         - -o: Write final message to file (more reliable than stdout parsing).
         - --skip-git-repo-check: Don't require a git repo.
         - --disable overrides: remove interactive/browser/shell tool surfaces.
-        - -c overrides: set low reasoning and no personality.
+        - -c overrides: set reasoning and no personality.
         """
         cmd = [
             "codex", "exec",
@@ -313,7 +338,7 @@ class CLIProvider:
             "--disable", "plugins",
             "--disable", "memories",
             "--disable", "multi_agent",
-            "-c", 'model_reasoning_effort="low"',
+            "-c", f'model_reasoning_effort="{self._resolve_reasoning_effort(reasoning_effort)}"',
             "-c", 'personality="none"',
         ]
 
@@ -373,6 +398,7 @@ class CLIProvider:
         temperature: float = 0.0,
         max_tokens: Optional[int] = None,
         return_usage: bool = False,
+        reasoning_effort: Optional[str] = None,
     ) -> Union[BaseModel, Tuple[BaseModel, Optional[TokenUsage]]]:
         """Generate structured output via CLI subprocess."""
         logger.debug(f"CLI structured output: tool={self.cli_tool}, model={self.model}, "
@@ -400,7 +426,11 @@ class CLIProvider:
             prompt = f"{prompt}\n\n{schema_instruction}"
             raw = await self._call_gemini(prompt)
         elif self.cli_tool == "codex":
-            raw = await self._call_codex(prompt, schema_json=schema_json)
+            raw = await self._call_codex(
+                prompt,
+                schema_json=schema_json,
+                reasoning_effort=reasoning_effort,
+            )
         else:
             raise ValueError(f"Unknown CLI tool: {self.cli_tool}")
 
@@ -424,6 +454,7 @@ class CLIProvider:
         messages: List[Dict[str, str]],
         temperature: float = 0.0,
         max_tokens: Optional[int] = None,
+        reasoning_effort: Optional[str] = None,
     ) -> str:
         """Generate unstructured text via CLI subprocess."""
         system_prompt, prompt = self._extract_system_prompt(messages)
@@ -436,7 +467,7 @@ class CLIProvider:
                 prompt = f"{system_prompt}\n\n{prompt}"
             return await self._call_gemini(prompt)
         elif self.cli_tool == "codex":
-            return await self._call_codex(prompt)
+            return await self._call_codex(prompt, reasoning_effort=reasoning_effort)
         else:
             raise ValueError(f"Unknown CLI tool: {self.cli_tool}")
 

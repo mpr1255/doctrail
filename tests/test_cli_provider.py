@@ -353,6 +353,17 @@ class TestGeminiCLI:
 # --- Codex CLI tests ---
 
 class TestCodexCLI:
+    def test_reasoning_effort_support_and_default(self):
+        provider = CLIProvider(cli_tool="codex", model="gpt-5.6-luna")
+        assert provider.supports_reasoning_effort()
+        assert provider._resolve_reasoning_effort(None) == "low"
+        assert provider._resolve_reasoning_effort("medium") == "medium"
+
+    def test_reasoning_effort_rejects_unknown_value(self):
+        provider = CLIProvider(cli_tool="codex", model="gpt-5.6-luna")
+        with pytest.raises(ValueError, match="Invalid reasoning_effort"):
+            provider._resolve_reasoning_effort("extreme")
+
     @pytest.mark.asyncio
     async def test_structured_output(self):
         raw_json = json.dumps({"category": "economics", "confidence": 0.92})
@@ -382,7 +393,22 @@ class TestCodexCLI:
             assert "browser_use" in cmd_str
             assert "multi_agent" in cmd_str
             assert "model_reasoning_effort" in cmd_str
+            assert 'model_reasoning_effort="low"' in cmd_str
             assert "personality" in cmd_str
+
+    @pytest.mark.asyncio
+    async def test_reasoning_effort_is_passed_to_codex(self):
+        mock_proc = _make_mock_process(stdout='{"category":"economics","confidence":0.92}')
+        with patch("doctrail.llm_providers.cli_provider.asyncio.create_subprocess_exec", return_value=mock_proc) as mock_exec, \
+             patch("os.path.exists", return_value=False):
+            provider = CLIProvider(cli_tool="codex", model="gpt-5.6-luna")
+            await provider.generate_structured(
+                messages=[{"role": "user", "content": "Classify"}],
+                pydantic_model=SimpleResult,
+                reasoning_effort="medium",
+            )
+            cmd_str = " ".join(str(a) for a in mock_exec.call_args[0])
+            assert 'model_reasoning_effort="medium"' in cmd_str
 
     @pytest.mark.asyncio
     async def test_generate_text(self):

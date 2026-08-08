@@ -502,7 +502,9 @@ def _validate_cli_model(model: str) -> Optional[str]:
         return None if not cli_model else _validate_gemini_model(cli_model)
 
     if cli_tool == "codex":
-        return None if not cli_model else _validate_openai_model(cli_model)
+        # Codex CLI model IDs are resolved by the installed CLI, not the
+        # OpenAI API catalog. This permits subscription-only aliases.
+        return None
 
     return f"Unknown CLI tool '{cli_tool}' in model '{model}'."
 
