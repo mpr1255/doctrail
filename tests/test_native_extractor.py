@@ -206,7 +206,7 @@ def test_scanned_pdf_returns_ocr_signal_without_running_local_ocr(tmp_path, nati
 
     assert doc["status"] == "extracted"
     assert doc["source_format"] == "pdf"
-    assert doc["extraction_method"] == "mupdf_smart_paragraphs"
+    assert doc["extraction_method"] == "pdftotext_smart_paragraphs"
     assert doc["ocr_needed"] is True
 
 
@@ -249,7 +249,7 @@ def test_native_scanned_pdf_defers_to_configured_ocr_backend(tmp_path, native_en
     assert doc["status"] == "extracted", doc
     assert doc["source_format"] == "pdf"
     assert doc["ocr_needed"] is True
-    assert doc["extraction_method"] == "mupdf_smart_paragraphs"
+    assert doc["extraction_method"] == "pdftotext_smart_paragraphs"
 
 
 def test_native_image_defers_to_configured_ocr_backend(native_enabled):
@@ -609,7 +609,7 @@ async def test_native_zero_page_pdf_classifies_confirmed_renderer_failure_as_dam
     assert result["failed"] == 1
     output = capsys.readouterr().out
     assert "Damaged/unrenderable PDF" in output
-    assert "MuPDF found zero pages" in output
+    assert "PDF text extraction found zero pages" in output
 
 
 @pytest.mark.asyncio

@@ -925,3 +925,12 @@ async def test_process_document_ppt_missing_soffice(monkeypatch, tmp_path):
         await process_document(str(ppt_path), sha1)
 
     assert "soffice" in str(excinfo.value)
+
+
+def test_missing_pdftotext_names_install_and_env_var(monkeypatch):
+    from doctrail.extractors.pdf_extractor import find_pdftotext, require_pdftotext
+
+    monkeypatch.setenv("DOCTRAIL_PDFTOTEXT", "/nonexistent/pdftotext")
+    assert find_pdftotext() is None
+    with pytest.raises(RuntimeError, match="brew install poppler.*DOCTRAIL_PDFTOTEXT"):
+        require_pdftotext()

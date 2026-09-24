@@ -621,14 +621,14 @@ async def _process_pdf_file(file_path: str, file_sha1: str, original_file_path: 
     """
     Process PDF files with multiple extraction methods.
 
-    Extraction order (Python-first approach):
-    1. pymupdf (pure Python, fast) - PRIMARY
-    2. pdftotext (system tool) - FALLBACK
+    Extraction order:
+    1. pdftotext (Poppler system tool) - PRIMARY
+    2. pymupdf (bundled MuPDF) - FALLBACK
     3. mutool (system tool) - FALLBACK
     4. OCR (textra or ocrmypdf) - LAST RESORT for scanned PDFs
 
     Args:
-        pdf_engine: 'auto' (default), 'pymupdf', 'pdftotext', 'textra'
+        pdf_engine: 'auto' (default), 'pdftotext', 'pymupdf', 'mutool', 'mac-ocr'
         ocr_engine: 'auto' (default), 'textra', 'ocrmypdf', 'mac-ocr', or
             'mac-ocr-only' (never falls back to local OCR)
     """
@@ -673,18 +673,18 @@ async def _process_pdf_file(file_path: str, file_sha1: str, original_file_path: 
                 content = add_page_markers(mutool_content)
                 extraction_method = 'mutool'
         else:
-            pymupdf_content = extract_text_with_pymupdf(file_path)
-            if pymupdf_content and not is_text_garbage(pymupdf_content):
-                content = add_page_markers(pymupdf_content)
-                extraction_method = 'pymupdf'
-                logger.info("PDF extracted successfully with pymupdf")
+            pdftotext_content = extract_text_with_pdftotext(file_path)
+            if pdftotext_content and not is_text_garbage(pdftotext_content):
+                content = add_page_markers(pdftotext_content)
+                extraction_method = 'pdftotext'
+                logger.info("PDF extracted successfully with pdftotext")
 
             if not content:
-                pdftotext_content = extract_text_with_pdftotext(file_path)
-                if pdftotext_content and not is_text_garbage(pdftotext_content):
-                    content = add_page_markers(pdftotext_content)
-                    extraction_method = 'pdftotext'
-                    logger.info("PDF extracted successfully with pdftotext")
+                pymupdf_content = extract_text_with_pymupdf(file_path)
+                if pymupdf_content and not is_text_garbage(pymupdf_content):
+                    content = add_page_markers(pymupdf_content)
+                    extraction_method = 'pymupdf'
+                    logger.info("PDF extracted successfully with pymupdf")
 
             if not content:
                 mutool_content = extract_text_with_mutool(file_path)
@@ -734,9 +734,9 @@ async def _process_pdf_file(file_path: str, file_sha1: str, original_file_path: 
             if not content and not mac_ocr_only:
                 try:
                     ocr_pdf_path = ocr_pdf_with_ocrmypdf(file_path)
-                    ocr_content = extract_text_with_pymupdf(ocr_pdf_path)
+                    ocr_content = extract_text_with_pdftotext(ocr_pdf_path)
                     if not ocr_content:
-                        ocr_content = extract_text_with_pdftotext(ocr_pdf_path)
+                        ocr_content = extract_text_with_pymupdf(ocr_pdf_path)
                     if ocr_content:
                         content = clean_ocr_text(ocr_content)
                         extraction_method = 'ocrmypdf'
@@ -750,7 +750,7 @@ async def _process_pdf_file(file_path: str, file_sha1: str, original_file_path: 
                     logger.error(f"OCR failed: {ocr_e}")
 
             if not content:
-                content = pymupdf_content or pdftotext_content or mutool_content or ""
+                content = pdftotext_content or pymupdf_content or mutool_content or ""
                 extraction_method = 'extraction_failed'
                 metadata_update['text_quality_issue'] = 'extraction_failed'
 

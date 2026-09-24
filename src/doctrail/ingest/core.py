@@ -44,6 +44,7 @@ from .document_processor import (
     ocr_with_mac_ocr,
 )
 from .text_processing import clean_ocr_text
+from ..extractors.pdf_extractor import require_pdftotext
 from ..db_operations import _quote_identifier
 from ..file_filters import should_skip_file, apply_file_patterns, check_for_manual_override
 from .manifest import load_manifest, get_file_metadata, find_manifest_in_directory
@@ -733,6 +734,16 @@ async def process_ingest(
             'failed': 0,
         }
     
+    # pdftotext is the default PDF engine. Fail before extraction rather than
+    # silently falling back to MuPDF, and tell the native extractor which
+    # backend and binary to use.
+    pdf_backend = 'pdftotext' if pdf_engine in ('auto', 'pdftotext') else 'mupdf'
+    if pdf_backend == 'pdftotext' and any(
+        Path(fp).suffix.lower() == '.pdf' for fp, _ in files_to_process
+    ):
+        os.environ['DOCTRAIL_PDFTOTEXT'] = require_pdftotext()
+    os.environ['DOCTRAIL_PDF_BACKEND'] = pdf_backend
+
     # Show summary and confirm
     worker_count = min(_default_worker_count() if workers is None else workers, max(1, len(files_to_process)))
     console.print(f"\n[bold]Ingestion Summary:[/bold]")
@@ -912,7 +923,7 @@ async def process_ingest(
                         and "No PNG files generated from PDF" in str(exc)
                     ):
                         error = (
-                            "Damaged/unrenderable PDF: MuPDF found zero pages and the "
+                            "Damaged/unrenderable PDF: PDF text extraction found zero pages and the "
                             "Mac OCR renderer could not generate any page images"
                         )
                     else:

@@ -1,13 +1,14 @@
 """PDF file extraction module with OCR support.
 
 Extraction priority:
-1. pymupdf (Python, no system deps) - PRIMARY
-2. pdftotext (system tool) - FALLBACK
+1. pdftotext (Poppler system tool) - PRIMARY
+2. pymupdf (Python, no system deps) - FALLBACK
 3. mutool (system tool) - FALLBACK
 4. OCR via ocrmypdf (requires tesseract) - LAST RESORT
 """
 
 import os
+import shutil
 import subprocess
 import tempfile
 import logging
@@ -19,10 +20,41 @@ logger = logging.getLogger(__name__)
 _pymupdf_warning_shown = False
 
 
+PDFTOTEXT_INSTALL_HINT = (
+    "pdftotext is the default PDF extractor but was not found. Install Poppler "
+    "(macOS: `brew install poppler`; Debian/Ubuntu: `apt install poppler-utils`), "
+    "or set DOCTRAIL_PDFTOTEXT to the pdftotext binary. "
+    "To use the bundled MuPDF instead, pass --pdf-engine pymupdf."
+)
+
+
+def find_pdftotext() -> Optional[str]:
+    """Return the pdftotext binary: $DOCTRAIL_PDFTOTEXT, then PATH, then common install dirs."""
+    configured = os.environ.get("DOCTRAIL_PDFTOTEXT")
+    if configured:
+        return configured if os.access(configured, os.X_OK) else None
+    found = shutil.which("pdftotext")
+    if found:
+        return found
+    for directory in ("/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"):
+        candidate = os.path.join(directory, "pdftotext")
+        if os.access(candidate, os.X_OK):
+            return candidate
+    return None
+
+
+def require_pdftotext() -> str:
+    """Return the pdftotext binary or raise with install instructions."""
+    path = find_pdftotext()
+    if not path:
+        raise RuntimeError(PDFTOTEXT_INSTALL_HINT)
+    return path
+
+
 def extract_text_with_pymupdf(pdf_path: str) -> str:
     """
     Extract text from PDF using pymupdf (fitz).
-    This is the PRIMARY extraction method - pure Python, no system dependencies.
+    FALLBACK method when pdftotext fails - pure Python, no system dependencies.
 
     Args:
         pdf_path: Path to the PDF file
@@ -63,8 +95,8 @@ def extract_text_with_pymupdf(pdf_path: str) -> str:
 
 def extract_text_with_pdftotext(pdf_path: str) -> str:
     """
-    Extract text from PDF using pdftotext (system tool).
-    FALLBACK method when pymupdf fails or isn't available.
+    Extract text from PDF using pdftotext (Poppler system tool).
+    This is the PRIMARY extraction method.
 
     Args:
         pdf_path: Path to the PDF file
@@ -75,8 +107,12 @@ def extract_text_with_pdftotext(pdf_path: str) -> str:
     try:
         logger.info(f"Attempting text extraction with pdftotext: {pdf_path}")
 
+        pdftotext = find_pdftotext()
+        if not pdftotext:
+            logger.warning(PDFTOTEXT_INSTALL_HINT)
+            return ""
         result = subprocess.run(
-            ['pdftotext', pdf_path, '-'],
+            [pdftotext, '-enc', 'UTF-8', pdf_path, '-'],
             capture_output=True,
             text=True,
             timeout=60

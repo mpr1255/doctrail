@@ -2,9 +2,12 @@ use anyhow::Context;
 use once_cell::sync::Lazy;
 use regex::Regex;
 use serde_json::{json, Map, Value};
+use std::io::Write;
 use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::process::{Command, Stdio};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
+use wait_timeout::ChildExt;
 
 use super::language::{detect_language, language_detection_metadata};
 use super::types::LanguageDetectionReport;
@@ -26,6 +29,10 @@ static CHAPTER_MARKER_RE: Lazy<Regex> = Lazy::new(|| {
 });
 static PDF_EXTRACTION_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 const MIN_TEXT_CHARS_PER_PAGE: usize = 80;
+const PDFTOTEXT_TIMEOUT: Duration = Duration::from_secs(120);
+const PDFTOTEXT_INSTALL_HINT: &str = "pdftotext not found: install Poppler \
+(macOS: brew install poppler; Debian/Ubuntu: apt install poppler-utils), set \
+DOCTRAIL_PDFTOTEXT to the binary, or pass --pdf-engine pymupdf";
 
 struct PdfTextExtraction {
     raw_text: String,
@@ -38,6 +45,7 @@ struct PdfTextExtraction {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum PdfBackend {
+    Pdftotext,
     Mupdf,
 }
 
@@ -72,9 +80,6 @@ pub(crate) fn extract_pdf_bytes(
     {
         anyhow::bail!("damaged PDF: missing %PDF header in first 1024 bytes");
     }
-    let _guard = PDF_EXTRACTION_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let total_started_at = Instant::now();
 
     let backend_request = requested_pdf_backend();
@@ -113,6 +118,7 @@ pub(crate) fn extract_pdf_bytes(
         content_extraction.insert("page_count_method".to_string(), json!(method));
     }
     let extraction_method = match attempt.backend {
+        Some("pdftotext") => "pdftotext_smart_paragraphs",
         Some("mupdf") => "mupdf_smart_paragraphs",
         _ => "pdf_text_smart_paragraphs",
     };
@@ -193,13 +199,18 @@ pub(crate) fn extract_pdf_bytes(
     })
 }
 
+/// pdftotext unless the caller set DOCTRAIL_PDF_BACKEND=mupdf.
 fn requested_pdf_backend() -> PdfBackend {
-    PdfBackend::Mupdf
+    match std::env::var("DOCTRAIL_PDF_BACKEND").as_deref() {
+        Ok("mupdf") => PdfBackend::Mupdf,
+        _ => PdfBackend::Pdftotext,
+    }
 }
 
 impl PdfBackend {
     fn as_str(self) -> &'static str {
         match self {
+            PdfBackend::Pdftotext => "pdftotext",
             PdfBackend::Mupdf => "mupdf",
         }
     }
@@ -207,23 +218,81 @@ impl PdfBackend {
 
 fn extract_pdf_text_attempt(
     bytes: &[u8],
-    _backend: PdfBackend,
+    backend: PdfBackend,
 ) -> anyhow::Result<PdfExtractionAttempt> {
     let started_at = Instant::now();
-    let result = match catch_unwind(AssertUnwindSafe(|| extract_with_mupdf(bytes))) {
-        Ok(result) => result,
-        Err(payload) => {
-            let message = payload
-                .downcast_ref::<&str>()
-                .copied()
-                .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
-                .unwrap_or("unknown panic");
-            return Err(anyhow::anyhow!(
-                "mupdf panicked on malformed pdf: {message}"
-            ));
-        }
+    if backend == PdfBackend::Mupdf {
+        let result = extract_with_mupdf_guarded(bytes)?;
+        return Ok(process_pdf_extraction_result(result, started_at.elapsed()));
+    }
+    // A missing binary is a setup error, not a damaged PDF: never mask it.
+    let result = match extract_with_pdftotext(bytes) {
+        Err(error) if is_not_found(&error) => anyhow::bail!(PDFTOTEXT_INSTALL_HINT),
+        Err(error) => extract_with_mupdf_guarded(bytes)?.map(|mut extraction| {
+            extraction.fallback_from = Some("pdftotext");
+            extraction.fallback_error = Some(error.to_string());
+            extraction
+        }),
+        ok => ok,
     };
     Ok(process_pdf_extraction_result(result, started_at.elapsed()))
+}
+
+fn is_not_found(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<std::io::Error>()
+        .is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound)
+}
+
+fn extract_with_pdftotext(bytes: &[u8]) -> anyhow::Result<PdfTextExtraction> {
+    let program = std::env::var("DOCTRAIL_PDFTOTEXT").unwrap_or_else(|_| "pdftotext".to_string());
+    let mut input = tempfile::NamedTempFile::new().context("creating pdftotext input file")?;
+    input.write_all(bytes).context("writing pdftotext input file")?;
+    let output = tempfile::NamedTempFile::new().context("creating pdftotext output file")?;
+    let stderr = tempfile::NamedTempFile::new().context("creating pdftotext stderr file")?;
+    let mut child = Command::new(&program)
+        .args(["-enc", "UTF-8"])
+        .arg(input.path())
+        .arg(output.path())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::from(stderr.reopen()?))
+        .spawn()?;
+    let Some(status) = child.wait_timeout(PDFTOTEXT_TIMEOUT)? else {
+        let _ = child.kill();
+        let _ = child.wait();
+        anyhow::bail!("pdftotext timed out after {PDFTOTEXT_TIMEOUT:?}");
+    };
+    if !status.success() {
+        let message = std::fs::read_to_string(stderr.path()).unwrap_or_default();
+        anyhow::bail!("pdftotext exited with {status}: {}", message.trim());
+    }
+    let raw_text = String::from_utf8_lossy(&std::fs::read(output.path())?).into_owned();
+    // pdftotext ends every page with a form feed.
+    let page_count = raw_text.matches('\x0c').count();
+    Ok(PdfTextExtraction {
+        raw_text,
+        page_count: Some(page_count),
+        page_count_method: Some("pdftotext_form_feeds"),
+        backend: "pdftotext",
+        fallback_from: None,
+        fallback_error: None,
+    })
+}
+
+/// MuPDF is not thread-safe, so calls are serialized and panics become errors.
+fn extract_with_mupdf_guarded(bytes: &[u8]) -> anyhow::Result<anyhow::Result<PdfTextExtraction>> {
+    let _guard = PDF_EXTRACTION_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    catch_unwind(AssertUnwindSafe(|| extract_with_mupdf(bytes))).map_err(|payload| {
+        let message = payload
+            .downcast_ref::<&str>()
+            .copied()
+            .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+            .unwrap_or("unknown panic");
+        anyhow::anyhow!("mupdf panicked on malformed pdf: {message}")
+    })
 }
 
 fn process_pdf_extraction_result(
@@ -592,10 +661,10 @@ mod tests {
         assert_eq!(content_extraction["page_count"], 2);
         assert_eq!(
             content_extraction["extraction_method"],
-            "mupdf_smart_paragraphs"
+            "pdftotext_smart_paragraphs"
         );
-        assert_eq!(content_extraction["pdf_text_backend_requested"], "mupdf");
-        assert_eq!(content_extraction["pdf_text_backend"], "mupdf");
+        assert_eq!(content_extraction["pdf_text_backend_requested"], "pdftotext");
+        assert_eq!(content_extraction["pdf_text_backend"], "pdftotext");
         assert_eq!(
             content_extraction["ocr_needed"],
             false,
@@ -604,6 +673,22 @@ mod tests {
             extracted.content.chars().count(),
             extracted.content.chars().take(500).collect::<String>()
         );
+    }
+
+    #[test]
+    fn pdftotext_and_mupdf_backends_agree_on_fixture() {
+        let bytes = std::fs::read(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../tests/assets/files/federalist_fixture.pdf"),
+        )
+        .unwrap();
+        for backend in [PdfBackend::Pdftotext, PdfBackend::Mupdf] {
+            let attempt = extract_pdf_text_attempt(&bytes, backend).unwrap();
+            assert_eq!(attempt.backend, Some(backend.as_str()));
+            assert_eq!(attempt.page_count, Some(1));
+            assert!(attempt.content.contains("Federalist fixture"));
+            assert!(!attempt.ocr_needed, "{backend:?}: {}", attempt.ocr_reason);
+        }
     }
 
     #[test]
@@ -616,7 +701,7 @@ mod tests {
         let content_extraction = &extracted.extraction_metadata["content_extraction"];
 
         assert!(extracted.content.chars().count() > 1_000_000);
-        assert_eq!(content_extraction["pdf_text_backend"], "mupdf");
+        assert_eq!(content_extraction["pdf_text_backend"], "pdftotext");
         assert_eq!(
             content_extraction["ocr_needed"],
             false,

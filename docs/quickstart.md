@@ -47,6 +47,10 @@ doctrail enrich <name> --limit 5
 
 If you would rather not learn the commands, you do not have to: install doctrail, then tell your agent to run `doctrail` and order it around.
 
+### PDF text extraction
+
+PDF text is extracted with `pdftotext` from Poppler, which doctrail cannot bundle. Install it before ingesting PDFs: `brew install poppler` on macOS, `apt install poppler-utils` on Debian or Ubuntu. Doctrail looks for it on `PATH` and in `/opt/homebrew/bin`, `/usr/local/bin`, and `/usr/bin`; if it lives elsewhere, set `DOCTRAIL_PDFTOTEXT` to the binary. Ingest stops with these instructions when PDFs are present and `pdftotext` cannot be found. To use the bundled MuPDF instead, pass `--pdf-engine pymupdf`. Both engines record which extractor produced each row in `extraction_method`.
+
 ### Scanned documents and OCR
 
 Ingest sends scanned PDFs and images through OCR. By default it uses local tools (`textra` on macOS, `ocrmypdf` elsewhere). If you run your own OCR service — for example Apple Vision OCR served from Macs you control — point doctrail at it with `--ocr-engine mac-ocr` and a comma-separated endpoint list:
