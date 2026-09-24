@@ -20,7 +20,7 @@ from doctrail.ingest.document_processor import (
     format_supported_extensions_for_help,
     process_document,
 )
-from doctrail.ingest import embedded_media
+from doctrail.ingest import embedded_media, native_extractor
 from doctrail.ingest.core import process_ingest
 from doctrail.ingest.text_processing import clean_extracted_text
 from doctrail.extractors import spreadsheet_extractor
@@ -470,6 +470,10 @@ def test_embedded_media_ocr_creates_parent_for_image_only_office_file(monkeypatc
 
 
 @pytest.mark.asyncio
+@pytest.mark.skipif(
+    native_extractor._native() is None,
+    reason="native extraction extension (doctrail._ingest_native) is not built",
+)
 async def test_native_ingest_merges_embedded_docx_image_ocr_into_parent(
     monkeypatch, tmp_path
 ):
