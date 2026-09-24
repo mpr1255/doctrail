@@ -14,7 +14,9 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 
 2. Install doctrail: `uv tool install doctrail`
 
-3. Tell your agent to run `doctrail` — it prints how to operate itself and points to `doctrail agent`, the full operating guide.
+3. If you will ingest PDFs, install Poppler, which provides `pdftotext`: `brew install poppler` on macOS, `apt install poppler-utils` on Debian or Ubuntu. See [PDF text extraction](#pdf-text-extraction).
+
+4. Tell your agent to run `doctrail` — it prints how to operate itself and points to `doctrail agent`, the full operating guide.
 
 (Alternatively, don't install anything. Just point your agent at https://doctrail.org/llms.txt and tell it you want to install uv, doctrail, and start enriching)
 
@@ -77,7 +79,7 @@ git clone https://github.com/mpr1255/doctrail && cd doctrail && make native
 
 This compiles the extension and drops it into the package. It is never shipped in the wheel: the build statically embeds MuPDF, which is licensed under the AGPL-3.0 while the published package is MIT, so the native engine is a local build rather than a distributed binary.
 
-In practice the native engine is between about 2x and 15x faster, depending on the corpus mix. Measured on an Apple M1 Max (10 cores), both engines on the identical corpus, with no external OCR service configured in either run. On a mixed 1,000-file corpus (500 PDF, 300 HTML, 150 DOCX, 50 DOC), the extraction phase took approximately 34s native against 64s for the Python engine with 8 workers — about 1.9x — with comparable peak memory, roughly 0.7 GB against 0.5 GB. An earlier measurement of the extraction step alone, on a 968-file PDF-heavy sample, took 5.7s native on all cores against 83.5s Python on 8 threads, about 14.6x.
+In practice the native engine is between about 2x and 15x faster, depending on the corpus mix. Measured on an Apple M1 Max (10 cores), both engines on the identical corpus, with no external OCR service configured in either run. On a mixed 1,000-file corpus (500 PDF, 300 HTML, 150 DOCX, 50 DOC), the extraction phase took approximately 34s native against 64s for the Python engine with 8 workers — about 1.9x — with comparable peak memory, roughly 0.7 GB against 0.5 GB. An earlier measurement of the extraction step alone, on a 968-file PDF-heavy sample, took 5.7s native on all cores against 83.5s Python on 8 threads, about 14.6x. Both measurements predate pdftotext becoming the default PDF extractor; they used MuPDF in both engines, so PDF-heavy timings will differ now.
 
 The two numbers differ because end-to-end ingest time is bounded by work both engines share: file hashing, SQLite writes, and embedded Office media handling. The wall-clock advantage on mixed corpora is therefore modest, and it grows with corpus size and with the share of text-layer PDFs, where the extraction step dominates. The native engine is also stricter: it fails fast on unreadable files and flags them for OCR instead of retrying, which is the behavior you want at the scale of hundreds of thousands of messy files.
 

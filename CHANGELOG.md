@@ -1,5 +1,41 @@
 # Changelog
 
+## 0.3.5 - pdftotext by default, native ingest, OCR routing
+
+### pdftotext is the default PDF extractor
+
+- PDF text now comes from `pdftotext` (Poppler) in both extraction engines, because in the maintainer's use it gives consistently better text than MuPDF. The Python engine tries pdftotext, then pymupdf, then mutool; the native engine runs pdftotext per file and falls back to its bundled MuPDF only when pdftotext fails on that file, recording `pdf_text_fallback_from` in the row metadata.
+- Poppler cannot be bundled with the package, so it is now a system requirement for PDF ingest. Doctrail looks for `pdftotext` on `PATH`, then in `/opt/homebrew/bin`, `/usr/local/bin`, and `/usr/bin`; set `DOCTRAIL_PDFTOTEXT` to point at another location. When the batch contains PDFs and the binary cannot be found, ingest stops before extraction with install instructions instead of silently switching engines.
+- `--pdf-engine pymupdf` selects MuPDF in both engines. Previously the native engine ignored `--pdf-engine` entirely.
+- Native PDF extraction no longer serializes every file behind MuPDF's global lock; only MuPDF fallbacks take it.
+- `extraction_method` now reads `pdftotext` (Python engine) or `pdftotext_smart_paragraphs` (native engine) for PDFs. Rows ingested earlier keep their MuPDF-derived text; re-ingest with `--overwrite` to replace it.
+- The offline tutorial (`doctrail init test`) still pins MuPDF, so it runs without Poppler.
+
+### Native ingest engine
+
+- Added an optional Rust extraction engine (`--extractor rust`, or `auto` when built with `make native` from a source checkout) that extracts in parallel in-process, with per-file panic containment and bounded batches. It is never shipped in the wheel because it statically links AGPL-licensed MuPDF; `--extractor auto` falls back to the Python engine with a notice when it is absent.
+- The native engine covers the same formats as the Python engine, expands ZIP archives with size and entry limits, resumes interrupted ingests, and records per-file failures in the ingest log.
+- Ingest adds immutable ingestion timestamps, sanitizes all text at the storage boundary, recovers mislabeled and damaged legacy documents without OCR where text is recoverable, and waits for SQLite writer locks instead of failing under concurrent readers.
+- `--skip-embedded-media` ingests Office files as text only, without LibreOffice conversion or embedded-image OCR.
+- `--fts-tokenizer trigram` builds a full-text index that can search CJK text; the default `unicode61` tokenizer cannot.
+
+### OCR
+
+- Embedded Office images are OCR'd and merged into their parent document's text.
+- A self-hosted OCR service can be used with `--ocr-engine mac-ocr` and `MAC_OCR__SERVICE_ENDPOINTS`, or a custom client via `DOCTRAIL_MAC_OCR_CLIENT_PATH`; the protocol is documented in the quickstart. Uploads are idempotent, retries return to the node holding the cached file, and transient server errors fail over to the next node or to local OCR.
+- `DOCTRAIL_OCR_ENGINE=mac-ocr-only` uses only the OCR service and never falls back to local OCR.
+- False OCR and legacy-text candidates are rejected before they replace real text.
+
+### Models
+
+- Added self-hosted OpenAI-compatible endpoints, including direct vLLM and Ollama, with provider-native JSON schemas.
+- `cli/codex/<model>` accepts any Codex CLI model name and passes `reasoning_effort` through to Codex.
+
+### Fixes
+
+- CI now installs Poppler, and the one native-only test that ran without the native extension now skips like the others.
+- Third-party debug logging is filtered at the log handlers.
+
 ## 0.3.4 - provider batch schema enforcement
 
 ### Batch structured output enforcement
