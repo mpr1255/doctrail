@@ -180,11 +180,12 @@ fn extract_one(path: &str, html: &HtmlConfig) -> DocOut {
         .and_then(|value| value.to_str())
         .unwrap_or_default()
         .to_ascii_lowercase();
-    // Crawls save images and videos under web-page names, and reading those as
-    // text stores binary noise, so for these names trust the bytes instead.
+    // Crawls and recovered folders save images, videos, compressed pages, and
+    // Word files under web-page or .txt names. Reading those as text stores
+    // binary noise, so for these names trust the bytes instead.
     let sniffed = matches!(
         extension.as_str(),
-        "html" | "htm" | "shtml" | "jhtml" | "mht" | "mhtml"
+        "html" | "htm" | "shtml" | "jhtml" | "mht" | "mhtml" | "txt"
     )
     .then(|| sniff_content(Path::new(path)))
     .flatten();
@@ -195,13 +196,21 @@ fn extract_one(path: &str, html: &HtmlConfig) -> DocOut {
     if matches!(sniffed_mime.as_str(), "application/gzip" | "application/x-gzip") {
         return extract_gzipped_page(path, html, started);
     }
+    if matches!(sniffed_mime.as_str(), "application/msword" | "application/x-ole-storage") {
+        let mut doc = match external_doc(Path::new(path)) {
+            Ok(document) => return doc_out_from_extracted(path, document, started, html),
+            Err(error) => failed_doc(path, format!("the file is a legacy Office document: {error:#}")),
+        };
+        doc.extraction_ms = started.elapsed().as_millis() as u64;
+        return doc;
+    }
     if sniffed_mime.starts_with("video/")
         || sniffed_mime.starts_with("audio/")
         || is_compressed_archive_mime(&sniffed_mime)
     {
         let mut doc = failed_doc(
             path,
-            format!("the file holds {sniffed_mime} data, not a web page"),
+            format!("the file holds {sniffed_mime} data, not text or a web page"),
         );
         doc.extraction_ms = started.elapsed().as_millis() as u64;
         return doc;
@@ -314,7 +323,7 @@ fn extract_gzipped_page(path: &str, html: &HtmlConfig, started: Instant) -> DocO
             "the file is gzip data that decompresses to more than {MAX_GZIP_PAGE_BYTES} bytes"
         )),
         Ok(_) if !(inner.starts_with("text/") || inner.contains("xml") || inner == "multipart/related") => {
-            Err(anyhow::anyhow!("the file holds gzip-compressed {inner} data, not a web page"))
+            Err(anyhow::anyhow!("the file holds gzip-compressed {inner} data, not text or a web page"))
         }
         Ok(_) => {
             let opts = ExtractOptions {
@@ -1331,6 +1340,12 @@ mod tests {
         let failed = extract_one(binary.to_str().unwrap(), &config);
         assert_eq!(failed.status, "failed");
         assert!(failed.error.unwrap().contains("gzip-compressed image/"));
+
+        let text = root.path().join("forecast.txt");
+        fs::write(&text, gzip(b"Rain is expected across the region on Tuesday.\n")).unwrap();
+        let doc = extract_one(text.to_str().unwrap(), &config);
+        assert_eq!(doc.status, "extracted", "{:?}", doc.error);
+        assert_eq!(doc.content, "Rain is expected across the region on Tuesday.");
     }
 
     #[test]
