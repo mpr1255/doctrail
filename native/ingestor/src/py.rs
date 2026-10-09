@@ -8,11 +8,11 @@
 #![allow(clippy::useless_conversion)] // PyO3 wrapper expansion around PyResult.
 
 use crate::{
-    classify_extraction_failure, extract_bytes, extract_file, low_value_content_rejection,
-    ExtractOptions, ExtractedDocument, HtmlKind,
+    classify_extraction_failure, extract_bytes, extract_file, extract_file_with,
+    low_value_content_rejection, ExtractOptions, ExtractedDocument, HtmlConfig, HtmlKind, HtmlMode,
 };
 use anyhow::{bail, Context, Result};
-use pyo3::exceptions::PyRuntimeError;
+use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use rayon::prelude::*;
 use serde::Serialize;
@@ -115,7 +115,22 @@ fn meta_f64(meta: &Value, section: &str, key: &str) -> Option<f64> {
     meta.get(section)?.get(key)?.as_f64()
 }
 
-fn doc_out_from_extracted(path: &str, doc: ExtractedDocument, started: Instant) -> DocOut {
+fn doc_out_from_extracted(
+    path: &str,
+    mut doc: ExtractedDocument,
+    started: Instant,
+    html: &HtmlConfig,
+) -> DocOut {
+    let low_value_reason = matches!(doc.source_format.as_str(), "html" | "mhtml")
+        .then(|| low_value_content_rejection(&doc.content, &doc.title))
+        .flatten();
+    if !html.rejects_low_value() {
+        if let Some(reason) = &low_value_reason {
+            doc.extraction_metadata["content_extraction"]["low_value_reason"] =
+                Value::String(reason.clone());
+        }
+    }
+    let quality_rejection = low_value_reason.filter(|_| html.rejects_low_value());
     let meta = &doc.extraction_metadata;
     let ocr_needed = meta_bool(meta, "content_extraction", "ocr_needed")
         || meta_bool(meta, "content_extraction", "requires_full_pdf_ocr");
@@ -124,9 +139,6 @@ fn doc_out_from_extracted(path: &str, doc: ExtractedDocument, started: Instant) 
         .clone()
         .or_else(|| meta_str(meta, "language_detection", "final_language"))
         .or_else(|| meta_str(meta, "language_detection", "detected_language"));
-    let quality_rejection = matches!(doc.source_format.as_str(), "html" | "mhtml")
-        .then(|| low_value_content_rejection(&doc.content, &doc.title))
-        .flatten();
     let content = if quality_rejection.is_some() {
         String::new()
     } else {
@@ -154,19 +166,20 @@ fn doc_out_from_extracted(path: &str, doc: ExtractedDocument, started: Instant) 
     }
 }
 
-fn extract_one(path: &str) -> DocOut {
+fn extract_one(path: &str, html: &HtmlConfig) -> DocOut {
     let started = Instant::now();
     let extension = Path::new(path)
         .extension()
         .and_then(|value| value.to_str())
         .unwrap_or_default()
         .to_ascii_lowercase();
-    if matches!(extension.as_str(), "html" | "htm")
-        && fs::metadata(path)
-            .is_ok_and(|metadata| metadata.len() >= LARGE_HTML_EXTERNAL_BYTES)
+    // Full mode renders large pages itself so its selectors and line filters apply.
+    if html.mode == HtmlMode::Article
+        && matches!(extension.as_str(), "html" | "htm")
+        && fs::metadata(path).is_ok_and(|metadata| metadata.len() >= LARGE_HTML_EXTERNAL_BYTES)
     {
         if let Ok(document) = external_html(Path::new(path)) {
-            return doc_out_from_extracted(path, document, started);
+            return doc_out_from_extracted(path, document, started, html);
         }
     }
     if matches!(
@@ -197,13 +210,28 @@ fn extract_one(path: &str) -> DocOut {
         source_path: Some(path),
         kind: HtmlKind::Auto,
     };
-    match extract_file(Path::new(path), opts) {
-        Ok(doc) => doc_out_from_extracted(path, doc, started),
+    match extract_file_with(Path::new(path), opts, html) {
+        Ok(doc) => doc_out_from_extracted(path, doc, started, html),
         Err(e) => {
-            if let Ok(doc) = external_extract(Path::new(path)) {
-                return doc_out_from_extracted(path, doc, started);
+            let mut profile_blocked = false;
+            if let Ok(mut doc) = external_extract(Path::new(path)) {
+                let is_html = matches!(doc.source_format.as_str(), "html" | "mhtml");
+                // w3m dumps the whole page, so it would store text the profile excludes.
+                profile_blocked = is_html && html.has_rules();
+                if !profile_blocked {
+                    if is_html && html.mode == HtmlMode::Full {
+                        doc.extraction_metadata["content_extraction"]["html_mode"] =
+                            Value::String("full".to_string());
+                    }
+                    return doc_out_from_extracted(path, doc, started, html);
+                }
             }
-            let failure = classify_extraction_failure(&e);
+            let mut failure = classify_extraction_failure(&e);
+            if profile_blocked {
+                failure.message.push_str(
+                    "; the w3m fallback was skipped because it cannot apply the HTML profile",
+                );
+            }
             let ocr_needed = failure.fallback_kind.as_deref() == Some("configured_ocr_backend");
             let ocr_reason = ocr_needed.then(|| "image_requires_ocr".to_string());
             DocOut {
@@ -433,12 +461,13 @@ fn external_text_is_usable(content: &str) -> bool {
         return false;
     }
     let total = content.chars().count().max(1);
-    let replacement = content.chars().filter(|character| *character == '\u{fffd}').count();
+    let replacement = content
+        .chars()
+        .filter(|character| *character == '\u{fffd}')
+        .count();
     let controls = content
         .chars()
-        .filter(|character| {
-            character.is_control() && !matches!(*character, '\n' | '\r' | '\t')
-        })
+        .filter(|character| character.is_control() && !matches!(*character, '\n' | '\r' | '\t'))
         .count();
     let mut longest_repeated_run: usize = 0;
     let mut current_run: usize = 0;
@@ -454,8 +483,7 @@ fn external_text_is_usable(content: &str) -> bool {
     }
     replacement.saturating_mul(100) < total
         && controls.saturating_mul(100) < total
-        && !(longest_repeated_run >= 128
-            && longest_repeated_run.saturating_mul(4) >= total)
+        && !(longest_repeated_run >= 128 && longest_repeated_run.saturating_mul(4) >= total)
 }
 
 fn external_ppt(path: &Path) -> Result<ExtractedDocument> {
@@ -591,13 +619,13 @@ fn panic_to_string(panic: Box<dyn std::any::Any + Send>) -> String {
     }
 }
 
-fn extract_one_json(path: &str) -> String {
+fn extract_one_json(path: &str, html: &HtmlConfig) -> String {
     // Contain per-file Rust panics: a panic in one document must become a
     // `status=failed` result for that file, never propagate out of the rayon
     // closure (which would surface as a PyO3 PanicException and kill the whole
     // batch/CLI). A C-level abort/segfault in a native lib still cannot be
     // caught in-process; that is a known limitation.
-    let doc = match catch_unwind(AssertUnwindSafe(|| extract_one(path))) {
+    let doc = match catch_unwind(AssertUnwindSafe(|| extract_one(path, html))) {
         Ok(doc) => doc,
         Err(panic) => failed_doc(path, format!("panic: {}", panic_to_string(panic))),
     };
@@ -785,17 +813,41 @@ fn expand_zip(
         .map_err(|error| PyRuntimeError::new_err(format!("{error:#}")))
 }
 
+fn parse_html_config(html_config: Option<&str>) -> PyResult<HtmlConfig> {
+    html_config
+        .map(HtmlConfig::from_json)
+        .transpose()
+        .map(Option::unwrap_or_default)
+        .map_err(|error| PyValueError::new_err(format!("{error:#}")))
+}
+
+/// Validate an HTML config JSON string and return the settings in effect.
+#[pyfunction]
+fn normalize_html_config(html_config: &str) -> PyResult<String> {
+    Ok(parse_html_config(Some(html_config))?
+        .effective_json()
+        .to_string())
+}
+
 /// Extract a batch of paths in parallel (rayon, GIL released). Returns one JSON
 /// string per input path, order-preserving. `threads` sizes the rayon pool
-/// (default: rayon's global pool = num_cpus).
+/// (default: rayon's global pool = num_cpus). `html_config` is a JSON object
+/// with the HTML settings (see `HtmlConfig`); it is validated before any file
+/// is read.
 #[pyfunction]
-#[pyo3(signature = (paths, threads=None))]
-fn extract_batch(py: Python<'_>, paths: Vec<String>, threads: Option<usize>) -> Vec<String> {
-    py.allow_threads(|| {
+#[pyo3(signature = (paths, threads=None, html_config=None))]
+fn extract_batch(
+    py: Python<'_>,
+    paths: Vec<String>,
+    threads: Option<usize>,
+    html_config: Option<&str>,
+) -> PyResult<Vec<String>> {
+    let html = parse_html_config(html_config)?;
+    Ok(py.allow_threads(|| {
         let run = || {
             paths
                 .par_iter()
-                .map(|p| extract_one_json(p))
+                .map(|p| extract_one_json(p, &html))
                 .collect::<Vec<String>>()
         };
         match threads {
@@ -806,7 +858,7 @@ fn extract_batch(py: Python<'_>, paths: Vec<String>, threads: Option<usize>) -> 
                 .unwrap_or_else(|_| run()),
             _ => run(),
         }
-    })
+    }))
 }
 
 /// Hash paths in parallel with streaming SHA-1 reads. Results are ordered and
@@ -834,8 +886,10 @@ fn hash_batch(py: Python<'_>, paths: Vec<String>, threads: Option<usize>) -> Vec
 
 /// Extract a single path (GIL released). Returns one JSON string.
 #[pyfunction]
-fn extract_path(py: Python<'_>, path: String) -> String {
-    py.allow_threads(|| extract_one_json(&path))
+#[pyo3(signature = (path, html_config=None))]
+fn extract_path(py: Python<'_>, path: String, html_config: Option<&str>) -> PyResult<String> {
+    let html = parse_html_config(html_config)?;
+    Ok(py.allow_threads(|| extract_one_json(&path, &html)))
 }
 
 #[pymodule]
@@ -843,6 +897,7 @@ fn _ingest_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(extract_batch, m)?)?;
     m.add_function(wrap_pyfunction!(hash_batch, m)?)?;
     m.add_function(wrap_pyfunction!(extract_path, m)?)?;
+    m.add_function(wrap_pyfunction!(normalize_html_config, m)?)?;
     m.add_function(wrap_pyfunction!(expand_zip, m)?)?;
     Ok(())
 }
@@ -941,6 +996,42 @@ mod tests {
             "binary-looking fallback output with a few accidental words"
         );
         assert!(!external_text_is_usable(&garbage));
+    }
+
+    #[test]
+    fn low_value_rejection_follows_the_html_mode() {
+        let page = b"<html><body><p>This is login.htm from the docs subdirectory. Please sign in to continue to the archive of notices.</p></body></html>";
+        let options = ExtractOptions {
+            mime_type: Some("text/html"),
+            source_path: Some("login.html"),
+            kind: HtmlKind::Html,
+        };
+        let full = HtmlConfig::from_json(r#"{"mode": "full"}"#).unwrap();
+        let doc = crate::extract_bytes_with(page, options, &full).unwrap();
+        let out = doc_out_from_extracted("login.html", doc, Instant::now(), &full);
+        assert!(out.content.contains("login.htm"));
+        assert!(out.error.is_none());
+        assert!(
+            out.extraction_metadata.unwrap()["content_extraction"]["low_value_reason"]
+                .as_str()
+                .unwrap()
+                .contains("login placeholder")
+        );
+
+        let article = HtmlConfig::default();
+        let doc = crate::extract_bytes_with(page, options, &article).unwrap();
+        let out = doc_out_from_extracted("login.html", doc, Instant::now(), &article);
+        assert!(out.content.is_empty());
+        assert!(out.error.unwrap().contains("login placeholder"));
+    }
+
+    #[test]
+    fn invalid_html_config_is_rejected_before_extraction() {
+        assert!(
+            parse_html_config(Some(r#"{"mode": "full", "keep_selectors": ["div["]}"#)).is_err()
+        );
+        assert!(parse_html_config(Some("not json")).is_err());
+        assert_eq!(parse_html_config(None).unwrap().mode, HtmlMode::Article);
     }
 
     #[test]

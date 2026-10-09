@@ -16,6 +16,7 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::Path;
+use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 mod extractors;
@@ -103,6 +104,95 @@ pub struct ExtractOptions<'a> {
     pub mime_type: Option<&'a str>,
     pub source_path: Option<&'a str>,
     pub kind: HtmlKind,
+}
+
+/// How text is taken from HTML and MHTML. `Article` is the readability
+/// pipeline. `Full` renders the whole page with html2text.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum HtmlMode {
+    #[default]
+    Article,
+    Full,
+}
+
+/// HTML extraction settings for one ingest run. The selector and line settings
+/// tune full mode: `drop_selectors` remove elements, `keep_selectors` narrow the
+/// page to the matching elements, and `drop_line_patterns` remove rendered lines.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HtmlConfig {
+    #[serde(default)]
+    pub mode: HtmlMode,
+    #[serde(default)]
+    pub keep_selectors: Vec<String>,
+    #[serde(default)]
+    pub drop_selectors: Vec<String>,
+    #[serde(default)]
+    pub drop_line_patterns: Vec<String>,
+    /// Blank pages that look like login walls, error templates, or link-only
+    /// navigation shells. Defaults to true for article mode and false for full.
+    #[serde(default)]
+    pub reject_low_value: Option<bool>,
+    #[serde(skip)]
+    line_patterns: Vec<Regex>,
+}
+
+static DEFAULT_HTML_CONFIG: Lazy<HtmlConfig> = Lazy::new(HtmlConfig::default);
+
+impl HtmlConfig {
+    /// Parse and validate a JSON config, so a bad selector or regex fails
+    /// before any file is read.
+    pub fn from_json(json: &str) -> Result<Self> {
+        let mut config: HtmlConfig = serde_json::from_str(json).context("invalid HTML config")?;
+        let has_filters = !config.keep_selectors.is_empty()
+            || !config.drop_selectors.is_empty()
+            || !config.drop_line_patterns.is_empty();
+        if config.mode == HtmlMode::Article && has_filters {
+            anyhow::bail!(
+                "keep_selectors, drop_selectors and drop_line_patterns need mode \"full\""
+            );
+        }
+        for selector in config.keep_selectors.iter().chain(&config.drop_selectors) {
+            kuchikikiki::Selectors::compile(selector)
+                .map_err(|()| anyhow!("invalid CSS selector: {selector:?}"))?;
+        }
+        config.line_patterns = config
+            .drop_line_patterns
+            .iter()
+            .map(|pattern| {
+                Regex::new(pattern).with_context(|| format!("invalid line pattern: {pattern:?}"))
+            })
+            .collect::<Result<_>>()?;
+        Ok(config)
+    }
+
+    /// Whether the config selects or filters content, which only the native
+    /// full-mode renderer can do.
+    pub fn has_rules(&self) -> bool {
+        !(self.keep_selectors.is_empty()
+            && self.drop_selectors.is_empty()
+            && self.drop_line_patterns.is_empty())
+    }
+
+    pub fn rejects_low_value(&self) -> bool {
+        self.reject_low_value
+            .unwrap_or(self.mode == HtmlMode::Article)
+    }
+
+    /// The settings in effect, with defaults filled in, for row metadata.
+    pub fn effective_json(&self) -> Value {
+        json!({
+            "mode": match self.mode {
+                HtmlMode::Article => "article",
+                HtmlMode::Full => "full",
+            },
+            "keep_selectors": self.keep_selectors,
+            "drop_selectors": self.drop_selectors,
+            "drop_line_patterns": self.drop_line_patterns,
+            "reject_low_value": self.rejects_low_value(),
+        })
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -249,6 +339,14 @@ pub fn classify_html_candidate(
 }
 
 pub fn extract_file(path: &Path, options: ExtractOptions<'_>) -> Result<ExtractedDocument> {
+    extract_file_with(path, options, &DEFAULT_HTML_CONFIG)
+}
+
+pub fn extract_file_with(
+    path: &Path,
+    options: ExtractOptions<'_>,
+    html: &HtmlConfig,
+) -> Result<ExtractedDocument> {
     let total_started_at = Instant::now();
     let read_started_at = Instant::now();
     let bytes = fs::read(path).with_context(|| format!("reading {}", path.display()))?;
@@ -265,7 +363,7 @@ pub fn extract_file(path: &Path, options: ExtractOptions<'_>) -> Result<Extracte
     })?;
     let resolve_duration = resolve_started_at.elapsed();
 
-    let mut extracted = extract_by_kind(&bytes, options, kind)?;
+    let mut extracted = extract_by_kind(&bytes, options, kind, html)?;
     insert_content_type_detection(&mut extracted, options, &detection, kind);
     insert_timing(&mut extracted, "file_read", read_duration);
     insert_timing(&mut extracted, "kind_resolve", resolve_duration);
@@ -278,6 +376,14 @@ pub fn extract_file(path: &Path, options: ExtractOptions<'_>) -> Result<Extracte
 }
 
 pub fn extract_bytes(bytes: &[u8], options: ExtractOptions<'_>) -> Result<ExtractedDocument> {
+    extract_bytes_with(bytes, options, &DEFAULT_HTML_CONFIG)
+}
+
+pub fn extract_bytes_with(
+    bytes: &[u8],
+    options: ExtractOptions<'_>,
+    html: &HtmlConfig,
+) -> Result<ExtractedDocument> {
     let total_started_at = Instant::now();
     let resolve_started_at = Instant::now();
     let detection = detect_content_type(bytes);
@@ -290,7 +396,7 @@ pub fn extract_bytes(bytes: &[u8], options: ExtractOptions<'_>) -> Result<Extrac
     })?;
     let resolve_duration = resolve_started_at.elapsed();
 
-    let mut extracted = extract_by_kind(bytes, options, kind)?;
+    let mut extracted = extract_by_kind(bytes, options, kind, html)?;
     insert_content_type_detection(&mut extracted, options, &detection, kind);
     insert_timing(&mut extracted, "kind_resolve", resolve_duration);
     insert_timing(
@@ -426,7 +532,11 @@ fn fallback_kind_from_message(message: &str) -> Option<String> {
     None
 }
 
-fn extract_mhtml_bytes(bytes: &[u8], source_path: Option<&str>) -> Result<ExtractedDocument> {
+fn extract_mhtml_bytes(
+    bytes: &[u8],
+    source_path: Option<&str>,
+    html: &HtmlConfig,
+) -> Result<ExtractedDocument> {
     let parse_started_at = Instant::now();
     let repaired_bytes = repair_mhtml_missing_part_separator(bytes);
     let missing_part_separator_repaired = matches!(&repaired_bytes, Cow::Owned(_));
@@ -451,7 +561,7 @@ fn extract_mhtml_bytes(bytes: &[u8], source_path: Option<&str>) -> Result<Extrac
     let body_duration = body_started_at.elapsed();
 
     let body_html = mhtml_body_as_html(decoded.decoded.as_ref(), selected_body_type);
-    let mut result = extract_html_string(&body_html, source_path, "mhtml")?;
+    let mut result = extract_html_string(&body_html, source_path, "mhtml", html)?;
     insert_timing(&mut result, "mhtml_parse", parse_duration);
     insert_timing(&mut result, "mhtml_body_select", body_duration);
     set_decode_metadata(&mut result, &decoded);
@@ -667,14 +777,18 @@ fn decode_mhtml_body_bytes<'a>(
     detected
 }
 
-fn extract_html_bytes(bytes: &[u8], source_path: Option<&str>) -> Result<ExtractedDocument> {
+fn extract_html_bytes(
+    bytes: &[u8],
+    source_path: Option<&str>,
+    html: &HtmlConfig,
+) -> Result<ExtractedDocument> {
     let strip_started_at = Instant::now();
     let stripped = strip_httrack_header(bytes);
     let strip_duration = strip_started_at.elapsed();
     let decode_started_at = Instant::now();
     let decoded = decode_html_bytes(stripped);
     let decode_duration = decode_started_at.elapsed();
-    let mut result = extract_html_string(&decoded.decoded, source_path, "html")?;
+    let mut result = extract_html_string(&decoded.decoded, source_path, "html", html)?;
     set_decode_metadata(&mut result, &decoded);
     insert_timing(&mut result, "httrack_strip", strip_duration);
     insert_timing(&mut result, "html_decode", decode_duration);
@@ -1219,6 +1333,7 @@ fn extract_html_string(
     html: &str,
     source_path: Option<&str>,
     source_format: &str,
+    config: &HtmlConfig,
 ) -> Result<ExtractedDocument> {
     let html_without_nuls = html.replace('\0', "");
     if let Some(reason) = pathological_markup_reason(&html_without_nuls) {
@@ -1228,18 +1343,26 @@ fn extract_html_string(
     let timeout = extract_timeout();
     let bucket_owned = source_path.map(str::to_string);
     let format_owned = source_format.to_string();
+    let config = config.clone();
     let (tx, rx) = std::sync::mpsc::sync_channel(1);
     std::thread::Builder::new()
         .name("html-extract".to_string())
         .stack_size(EXTRACT_THREAD_STACK)
         .spawn(move || {
-            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                extract_html_string_inner(
-                    &html_without_nuls,
-                    bucket_owned.as_deref(),
-                    &format_owned,
-                )
-            }));
+            let outcome =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match config.mode {
+                    HtmlMode::Article => extract_html_string_inner(
+                        &html_without_nuls,
+                        bucket_owned.as_deref(),
+                        &format_owned,
+                    ),
+                    HtmlMode::Full => extract_full_html_string_inner(
+                        &html_without_nuls,
+                        bucket_owned.as_deref(),
+                        &format_owned,
+                        &config,
+                    ),
+                }));
             let _ = tx.send(outcome);
         })
         .context("spawning extraction thread")?;
@@ -1576,6 +1699,251 @@ fn extract_html_string_inner(
     })
 }
 
+/// Full-page text: html2text over the whole document, or over the elements that
+/// match `keep_selectors`, after `drop_selectors` are removed. Rendered lines are
+/// trimmed, blank lines dropped, and lines matching `drop_line_patterns` removed.
+/// Lines are never wrapped, so a sentence stays whole for phrase and trigram search.
+fn extract_full_html_string_inner(
+    html: &str,
+    source_path: Option<&str>,
+    source_format: &str,
+    config: &HtmlConfig,
+) -> Result<ExtractedDocument> {
+    let total_started_at = Instant::now();
+    let basic = extract_basic_metadata(html);
+
+    let select_started_at = Instant::now();
+    let selected = select_full_html(html, config)?;
+    let select_duration = select_started_at.elapsed();
+
+    let render_started_at = Instant::now();
+    let rendered = render_full_text(&selected.html)?;
+    let render_duration = render_started_at.elapsed();
+
+    let mut lines_dropped = 0usize;
+    let mut lines = Vec::new();
+    for line in rendered.lines().map(str::trim) {
+        if line.is_empty() || is_html2text_grid_noise_line(line) {
+            continue;
+        }
+        if config
+            .line_patterns
+            .iter()
+            .any(|pattern| pattern.is_match(line))
+        {
+            lines_dropped += 1;
+            continue;
+        }
+        lines.push(line);
+    }
+    let (content, unicode_escape_repaired) = repair_unicode_escapes(&lines.join("\n"));
+
+    let title = first_meaningful_title(&basic)
+        .or_else(|| title_from_content_text(&content))
+        .map(|title| repair_title(&title))
+        .unwrap_or_default();
+    let language_detection = detect_language(&content);
+    let language = language_detection.language.clone();
+    let content_length = content.chars().count();
+
+    let mut timing_ms = Map::new();
+    timing_ms.insert(
+        "html_select".to_string(),
+        json!(duration_millis(select_duration)),
+    );
+    timing_ms.insert(
+        "html2text_full".to_string(),
+        json!(duration_millis(render_duration)),
+    );
+    timing_ms.insert(
+        "extract_html_string_total".to_string(),
+        json!(duration_millis(total_started_at.elapsed())),
+    );
+
+    let mut content_extraction = Map::new();
+    content_extraction.insert("extractor_type".to_string(), json!("html2text_full"));
+    content_extraction.insert(
+        "extraction_method".to_string(),
+        json!(format!("rust:{source_format}_full")),
+    );
+    content_extraction.insert("html_mode".to_string(), json!("full"));
+    content_extraction.insert("html_config".to_string(), config.effective_json());
+    content_extraction.insert("source_format".to_string(), json!(source_format));
+    content_extraction.insert("content_length".to_string(), json!(content_length));
+    content_extraction.insert(
+        "keep_selectors_matched".to_string(),
+        json!(selected.keep_matched),
+    );
+    content_extraction.insert("nodes_dropped".to_string(), json!(selected.nodes_dropped));
+    content_extraction.insert("lines_dropped".to_string(), json!(lines_dropped));
+    content_extraction.insert(
+        "unicode_escape_repaired".to_string(),
+        json!(unicode_escape_repaired),
+    );
+    content_extraction.insert("timing_ms".to_string(), Value::Object(timing_ms.clone()));
+    if let Some(source_path) = source_path {
+        content_extraction.insert("original_bucket_path".to_string(), json!(source_path));
+    }
+    for (key, value) in basic {
+        content_extraction.insert(key, value);
+    }
+
+    Ok(ExtractedDocument {
+        source_format: source_format.to_string(),
+        title: title.clone(),
+        content_length,
+        html2text_length: content_length,
+        content,
+        language,
+        extraction_metadata: json!({
+            "file": {"size": null, "encoding": null},
+            "content_extraction": content_extraction,
+            "title_extraction": {
+                "method": if title.is_empty() { "none" } else { "metadata_or_content" },
+            },
+            "language_detection": language_detection_metadata(&language_detection),
+        }),
+        timing_ms: Value::Object(timing_ms),
+        used_html2text_fallback: false,
+    })
+}
+
+struct SelectedHtml<'a> {
+    html: Cow<'a, str>,
+    nodes_dropped: usize,
+    /// Outermost elements matched by `keep_selectors`; `None` when none are set.
+    keep_matched: Option<usize>,
+}
+
+/// Remove `drop_selectors` matches, then narrow to the outermost
+/// `keep_selectors` matches in document order. When no keep selector matches,
+/// the whole page is kept and `keep_matched` is `Some(0)`.
+fn select_full_html<'a>(html: &'a str, config: &HtmlConfig) -> Result<SelectedHtml<'a>> {
+    if config.keep_selectors.is_empty() && config.drop_selectors.is_empty() {
+        return Ok(SelectedHtml {
+            html: Cow::Borrowed(html),
+            nodes_dropped: 0,
+            keep_matched: None,
+        });
+    }
+    let document = kuchikikiki::parse_html().one(html);
+    let mut nodes_dropped = 0;
+    for selector in &config.drop_selectors {
+        let Ok(matches) = document.select(selector) else {
+            continue;
+        };
+        let nodes: Vec<_> = matches.map(|matched| matched.as_node().clone()).collect();
+        nodes_dropped += nodes.len();
+        for node in nodes {
+            node.detach();
+        }
+    }
+
+    let mut keep_matched = None;
+    let mut out = Vec::new();
+    if !config.keep_selectors.is_empty() {
+        let mut kept: Vec<kuchikikiki::NodeRef> = Vec::new();
+        if let Ok(matches) = document.select(&config.keep_selectors.join(", ")) {
+            for matched in matches {
+                let node = matched.as_node().clone();
+                // Matches arrive in document order, so a nested match follows
+                // its kept ancestor and is already inside it.
+                let nested = kept
+                    .last()
+                    .is_some_and(|last| node.ancestors().any(|ancestor| &ancestor == last));
+                if !nested {
+                    kept.push(node);
+                }
+            }
+        }
+        keep_matched = Some(kept.len());
+        for node in &kept {
+            // Each kept element is parsed again on its own, and a table part
+            // outside a <table> would lose its row and cell structure.
+            let table_part = node.as_element().is_some_and(|element| {
+                matches!(
+                    &*element.name.local,
+                    "caption"
+                        | "colgroup"
+                        | "col"
+                        | "thead"
+                        | "tbody"
+                        | "tfoot"
+                        | "tr"
+                        | "td"
+                        | "th"
+                )
+            });
+            let (open, close) = if table_part {
+                ("<table>", "</table>\n")
+            } else {
+                ("<div>", "</div>\n")
+            };
+            out.extend_from_slice(open.as_bytes());
+            node.serialize(&mut out)
+                .context("serializing kept element")?;
+            out.extend_from_slice(close.as_bytes());
+        }
+    }
+    if out.is_empty() {
+        document
+            .serialize(&mut out)
+            .context("serializing filtered page")?;
+    }
+    Ok(SelectedHtml {
+        html: Cow::Owned(String::from_utf8_lossy(&out).into_owned()),
+        nodes_dropped,
+        keep_matched,
+    })
+}
+
+/// Render HTML as plain text: no markdown decoration, link footnotes, or table
+/// borders; table cells come out one per line; image alt text is kept. The
+/// width only limits wrapping, and no line can be longer than the input.
+fn render_full_text(html: &str) -> Result<String> {
+    let config = html2text::config::with_decorator(html2text::render::TrivialDecorator::new())
+        .raw_mode(true)
+        .unicode_strikeout(false);
+    let failed = |error| anyhow!("html2text failed to render the page: {error}");
+    let dom = config.parse_html(html.as_bytes()).map_err(failed)?;
+    unwrap_ordered_and_definition_lists(&dom.document);
+    let tree = config.dom_to_render_tree(&dom).map_err(failed)?;
+    config
+        .render_to_string(tree, html.len().max(80))
+        .map_err(failed)
+}
+
+/// html2text renders only the <li> children of <ol> and the <dt>/<dd> children
+/// of <dl>, so a wrapper such as <ol><div><li>... loses everything inside it.
+/// Plain text shows no list numbers, and <li>, <dt> and <dd> render as blocks
+/// on their own, so splicing the children into the parent keeps all the text.
+fn unwrap_ordered_and_definition_lists(document: &html2text::Handle) {
+    let mut stack = vec![document.clone()];
+    while let Some(node) = stack.pop() {
+        let mut children = node.children.borrow_mut();
+        let mut index = 0;
+        while index < children.len() {
+            let child = children[index].clone();
+            let is_list = matches!(
+                &child.data,
+                html2text::Element { name, .. } if matches!(&*name.local, "ol" | "dl")
+            );
+            if !is_list {
+                stack.push(child);
+                index += 1;
+                continue;
+            }
+            // The spliced children are checked from the same index, so a list
+            // directly inside a list is unwrapped too.
+            let grandchildren = std::mem::take(&mut *child.children.borrow_mut());
+            for grandchild in &grandchildren {
+                grandchild.parent.set(Some(Rc::downgrade(&node)));
+            }
+            children.splice(index..=index, grandchildren);
+        }
+    }
+}
+
 fn strip_known_boilerplate_html(html: &str) -> (String, usize) {
     let document = kuchikikiki::parse_html().one(html);
     let selectors = [
@@ -1757,10 +2125,11 @@ fn extract_by_kind(
     bytes: &[u8],
     options: ExtractOptions<'_>,
     kind: ExtractKind,
+    html: &HtmlConfig,
 ) -> Result<ExtractedDocument> {
     match kind {
-        ExtractKind::Html => extract_html_bytes(bytes, options.source_path),
-        ExtractKind::Mhtml => extract_mhtml_bytes(bytes, options.source_path),
+        ExtractKind::Html => extract_html_bytes(bytes, options.source_path, html),
+        ExtractKind::Mhtml => extract_mhtml_bytes(bytes, options.source_path, html),
         ExtractKind::Image => anyhow::bail!(
             "detected image content requires OCR; fallback_required=configured_ocr_backend"
         ),
@@ -3970,7 +4339,8 @@ mod tests {
           <body><article><h1>Example title</h1><p>This is the main article content with enough text to pass the minimum extraction threshold. It has another sentence for readability scoring.</p></article></body>
         </html>
         "#;
-        let extracted = extract_html_bytes(html, Some("sample.html")).unwrap();
+        let extracted =
+            extract_html_bytes(html, Some("sample.html"), &HtmlConfig::default()).unwrap();
         assert_eq!(extracted.title, "Example title");
         assert!(extracted.content.contains("main article content"));
         assert_eq!(extracted.source_format, "html");
@@ -3987,7 +4357,8 @@ mod tests {
             "<html><head><title>Long link page</title></head><body>{repeated}</body></html>"
         );
 
-        let extracted = extract_html_bytes(html.as_bytes(), Some("long.html")).unwrap();
+        let extracted =
+            extract_html_bytes(html.as_bytes(), Some("long.html"), &HtmlConfig::default()).unwrap();
         let content_extraction = extracted
             .extraction_metadata
             .get("content_extraction")
@@ -4096,7 +4467,12 @@ mod tests {
             "#
         );
 
-        let extracted = extract_html_bytes(html.as_bytes(), Some("student-clubs.html")).unwrap();
+        let extracted = extract_html_bytes(
+            html.as_bytes(),
+            Some("student-clubs.html"),
+            &HtmlConfig::default(),
+        )
+        .unwrap();
         let content_extraction = extracted
             .extraction_metadata
             .get("content_extraction")
@@ -4205,7 +4581,12 @@ mod tests {
         "#;
 
         assert!(looks_like_script_or_form_dump(script_dump));
-        let extracted = extract_html_bytes(html.as_bytes(), Some("script-dump.html")).unwrap();
+        let extracted = extract_html_bytes(
+            html.as_bytes(),
+            Some("script-dump.html"),
+            &HtmlConfig::default(),
+        )
+        .unwrap();
         let content_extraction = extracted
             .extraction_metadata
             .get("content_extraction")
@@ -4386,7 +4767,8 @@ Content-Location: http://test
 <html><head><title>MHTML title</title></head><body><article><p>This is a saved page with enough body text to pass the extraction threshold and become useful content for indexing.</p></article></body></html>
 --boundary--
 "#;
-        let extracted = extract_mhtml_bytes(mhtml, Some("sample.mhtml")).unwrap();
+        let extracted =
+            extract_mhtml_bytes(mhtml, Some("sample.mhtml"), &HtmlConfig::default()).unwrap();
         assert_eq!(extracted.source_format, "mhtml");
         assert!(extracted.content.contains("saved page"));
     }
@@ -4408,7 +4790,12 @@ Content-Location: http://test
             "------=_CrawlerBoundary_test--\r\n",
         );
 
-        let extracted = extract_mhtml_bytes(mhtml.as_bytes(), Some("malformed.mhtml")).unwrap();
+        let extracted = extract_mhtml_bytes(
+            mhtml.as_bytes(),
+            Some("malformed.mhtml"),
+            &HtmlConfig::default(),
+        )
+        .unwrap();
         assert_eq!(extracted.source_format, "mhtml");
         assert!(extracted.content.contains("archived page"));
         assert_eq!(
@@ -4435,7 +4822,12 @@ Content-Location: http://example.test/attachment
 --boundary--
 "#;
 
-        let extracted = extract_mhtml_bytes(mhtml.as_bytes(), Some("attachment.mhtml")).unwrap();
+        let extracted = extract_mhtml_bytes(
+            mhtml.as_bytes(),
+            Some("attachment.mhtml"),
+            &HtmlConfig::default(),
+        )
+        .unwrap();
         assert_eq!(extracted.source_format, "mhtml");
         assert!(extracted.content.contains("archived page"));
         assert_eq!(
@@ -4460,7 +4852,12 @@ This plain-text archived page contains enough substantive material to remain use
 --boundary--
 "#;
 
-        let extracted = extract_mhtml_bytes(mhtml.as_bytes(), Some("plain.mhtml")).unwrap();
+        let extracted = extract_mhtml_bytes(
+            mhtml.as_bytes(),
+            Some("plain.mhtml"),
+            &HtmlConfig::default(),
+        )
+        .unwrap();
         assert_eq!(extracted.source_format, "mhtml");
         assert!(extracted.content.contains("plain-text archived page"));
         assert_eq!(
@@ -4481,7 +4878,12 @@ Content-Location: http://example.test/archive.txt
 VGhpcyBpcyBhIHJlY292ZXJlZCBzaW5nbGUtcGFydCB0ZXh0IHBheWxvYWQgZnJvbSBhbiBNSE1MIGFyY2hpdmUu
 "#;
 
-        let extracted = extract_mhtml_bytes(mhtml.as_bytes(), Some("single-part.mht")).unwrap();
+        let extracted = extract_mhtml_bytes(
+            mhtml.as_bytes(),
+            Some("single-part.mht"),
+            &HtmlConfig::default(),
+        )
+        .unwrap();
         assert_eq!(extracted.source_format, "mhtml");
         assert!(extracted.content.contains("recovered single-part text payload"));
         assert_eq!(
@@ -4524,7 +4926,12 @@ Content-Location: http://example.test/
 --boundary--
 "#;
 
-        let extracted = extract_mhtml_bytes(mhtml.as_bytes(), Some("sample.mhtml")).unwrap();
+        let extracted = extract_mhtml_bytes(
+            mhtml.as_bytes(),
+            Some("sample.mhtml"),
+            &HtmlConfig::default(),
+        )
+        .unwrap();
         assert_eq!(extracted.title, "清华大学大型仪器共享服务平台");
         assert!(extracted.content.contains("清华大学大型仪器共享服务平台"));
         assert!(!extracted.content.contains("娓呭崕"));
@@ -4550,7 +4957,12 @@ Content-Location: http://example.test/
 --boundary--
 "#;
 
-        let extracted = extract_mhtml_bytes(mhtml.as_bytes(), Some("sample.mhtml")).unwrap();
+        let extracted = extract_mhtml_bytes(
+            mhtml.as_bytes(),
+            Some("sample.mhtml"),
+            &HtmlConfig::default(),
+        )
+        .unwrap();
         assert_eq!(extracted.title, "中国邮政采购公告");
         assert!(extracted.content.contains("石家庄邮电职业技术学院采购公告"));
         assert!(!extracted.content.contains("çŸ³"));
@@ -4581,7 +4993,8 @@ Content-Location: http://example.test/
         let bytes = utf16_declared_utf8_page(
             "婴幼儿胸腺发育尚未成熟，细胞免疫和体液免疫功能低下，是感染和肿瘤等免疫缺陷性疾病的高发年龄组。这段正文足够长，可以进入索引。",
         );
-        let extracted = extract_html_bytes(&bytes, Some("detail.aspx.html")).unwrap();
+        let extracted =
+            extract_html_bytes(&bytes, Some("detail.aspx.html"), &HtmlConfig::default()).unwrap();
         assert_eq!(extracted.title, "免疫抑制剂研究进展");
         assert!(extracted.content.contains("婴幼儿胸腺发育尚未成熟"));
         assert!(!extracted.content.contains("瑨汭"));
@@ -4627,7 +5040,12 @@ Content-Location: http://example.test/xml
 --boundary--
 "#;
 
-        let extracted = extract_mhtml_bytes(mhtml.as_bytes(), Some("xml-body.mhtml")).unwrap();
+        let extracted = extract_mhtml_bytes(
+            mhtml.as_bytes(),
+            Some("xml-body.mhtml"),
+            &HtmlConfig::default(),
+        )
+        .unwrap();
         assert_eq!(extracted.source_format, "mhtml");
         assert!(extracted.content.contains("盐田区政务公开信息正文"));
         assert_eq!(
@@ -5061,5 +5479,243 @@ Content-Location: http://example.test/xml
         }
         js.push_str("</script><p>ok</p>");
         assert!(pathological_markup_reason(&js).is_none());
+    }
+
+    const FULL_PAGE: &str = r#"<html><head><title>市卫健委通知</title><style>.x { color: red }</style><script>var tracking = 1;</script></head>
+<body>
+<nav class="site-nav"><a href="/">首页</a> <a href="/gk">政务公开</a></nav>
+<div id="content"><h1>关于器官捐献工作的通知</h1>
+<p>各区卫生健康委：为进一步规范人体器官捐献与移植工作，现将有关事项通知如下。<strong>请认真贯彻落实</strong>。</p>
+<img src="chart.png" alt="捐献人数统计图">
+<table><tr><th>年份</th><th>捐献例数</th></tr><tr><td>2019</td><td>5818</td></tr></table>
+<ul><li>第一项要求</li><li>第二项要求</li></ul>
+</div>
+<div class="share">分享到：微信 微博</div>
+<footer>版权所有：某市卫生健康委员会 京ICP备12345678号</footer>
+</body></html>"#;
+
+    fn full_config(json: &str) -> HtmlConfig {
+        HtmlConfig::from_json(json).unwrap()
+    }
+
+    fn full_extract(html: &str, config: &str) -> ExtractedDocument {
+        extract_html_bytes(html.as_bytes(), Some("page.html"), &full_config(config)).unwrap()
+    }
+
+    #[test]
+    fn full_mode_keeps_the_whole_page_as_plain_text() {
+        let extracted = full_extract(FULL_PAGE, r#"{"mode": "full"}"#);
+        let content = &extracted.content;
+        for expected in [
+            "首页",
+            "政务公开",
+            "关于器官捐献工作的通知",
+            "现将有关事项通知如下。请认真贯彻落实。",
+            "捐献人数统计图",
+            "年份",
+            "5818",
+            "第一项要求",
+            "分享到：微信 微博",
+            "京ICP备12345678号",
+        ] {
+            assert!(
+                content.contains(expected),
+                "missing {expected:?} in {content}"
+            );
+        }
+        for unexpected in ["tracking", "color", "**", "[", "# ", "* "] {
+            assert!(
+                !content.contains(unexpected),
+                "found {unexpected:?} in {content}"
+            );
+        }
+        assert_eq!(extracted.title, "市卫健委通知");
+        let meta = &extracted.extraction_metadata["content_extraction"];
+        assert_eq!(meta["extraction_method"], "rust:html_full");
+        assert_eq!(meta["html_mode"], "full");
+        assert_eq!(meta["html_config"]["reject_low_value"], false);
+        assert_eq!(meta["keep_selectors_matched"], Value::Null);
+    }
+
+    #[test]
+    fn full_mode_keeps_wrapped_list_items() {
+        let html = "<html><body><ol start=3><div class=srg><li>first result</li><li>second result</li></div>\
+            <div>loose text</div><li>direct item</li></OL>\
+            <dl><div><dt>term</dt><dd>definition</dd></div></dl><p>after</p></body></html>";
+        let extracted = full_extract(html, r#"{"mode": "full"}"#);
+        assert_eq!(
+            extracted.content,
+            "first result\nsecond result\nloose text\ndirect item\nterm\ndefinition\nafter"
+        );
+    }
+
+    #[test]
+    fn full_mode_leaves_list_tags_in_text_and_attributes_alone() {
+        let html = r#"<html><body><textarea>Use <ol> and </ol> then <dl>.</textarea>
+            <img src="x.png" alt="Use <ol> then <dl>"></body></html>"#;
+        let extracted = full_extract(html, r#"{"mode": "full"}"#);
+        assert!(extracted.content.contains("Use <ol> and </ol> then <dl>."));
+        assert!(extracted.content.contains("Use <ol> then <dl>"));
+    }
+
+    #[test]
+    fn full_mode_kept_table_parts_keep_their_cells() {
+        let html = "<html><body><table><caption>Donations</caption>\
+            <tr><th>Year</th><th>Cases</th></tr><tr><td>2019</td><td>5818</td></tr></table></body></html>";
+        for keep in [r#"["tr"]"#, r#"["tbody"]"#, r#"["td", "th"]"#] {
+            let config = format!(r#"{{"mode": "full", "keep_selectors": {keep}}}"#);
+            let extracted = full_extract(html, &config);
+            assert_eq!(extracted.content, "Year\nCases\n2019\n5818", "{keep}");
+        }
+    }
+
+    #[test]
+    fn full_mode_never_wraps_a_long_paragraph() {
+        let paragraph = "人体器官捐献与移植工作关系人民群众生命健康。".repeat(30);
+        let html = format!("<html><body><p>{paragraph}</p><p>第二段</p></body></html>");
+        let extracted = full_extract(&html, r#"{"mode": "full"}"#);
+        assert!(extracted.content.lines().any(|line| line == paragraph));
+    }
+
+    #[test]
+    fn full_mode_keep_selectors_render_outermost_matches_once() {
+        let extracted = full_extract(
+            FULL_PAGE,
+            r##"{"mode": "full", "keep_selectors": ["#content", "#content p", "footer"]}"##,
+        );
+        let content = &extracted.content;
+        assert_eq!(content.matches("现将有关事项通知如下").count(), 1);
+        assert!(content.contains("京ICP备12345678号"));
+        assert!(!content.contains("政务公开"));
+        assert!(!content.contains("分享到"));
+        assert_eq!(
+            extracted.extraction_metadata["content_extraction"]["keep_selectors_matched"],
+            2
+        );
+    }
+
+    #[test]
+    fn full_mode_unmatched_keep_selector_renders_the_whole_page() {
+        let extracted = full_extract(
+            FULL_PAGE,
+            r##"{"mode": "full", "keep_selectors": ["#missing"]}"##,
+        );
+        assert!(extracted.content.contains("政务公开"));
+        assert!(extracted.content.contains("现将有关事项通知如下"));
+        assert_eq!(
+            extracted.extraction_metadata["content_extraction"]["keep_selectors_matched"],
+            0
+        );
+    }
+
+    #[test]
+    fn full_mode_drop_selectors_and_line_patterns_remove_cruft() {
+        let extracted = full_extract(
+            FULL_PAGE,
+            r#"{"mode": "full", "drop_selectors": [".site-nav", ".share"], "drop_line_patterns": ["ICP备\\d+号"]}"#,
+        );
+        let content = &extracted.content;
+        assert!(!content.contains("政务公开"));
+        assert!(!content.contains("分享到"));
+        assert!(!content.contains("版权所有"));
+        assert!(content.contains("现将有关事项通知如下"));
+        let meta = &extracted.extraction_metadata["content_extraction"];
+        assert_eq!(meta["nodes_dropped"], 2);
+        assert_eq!(meta["lines_dropped"], 1);
+    }
+
+    #[test]
+    fn full_mode_drop_selectors_apply_inside_kept_elements() {
+        let extracted = full_extract(
+            FULL_PAGE,
+            r##"{"mode": "full", "keep_selectors": ["#content"], "drop_selectors": ["table"]}"##,
+        );
+        assert!(!extracted.content.contains("5818"));
+        assert!(extracted.content.contains("现将有关事项通知如下"));
+    }
+
+    #[test]
+    fn html_config_rejects_invalid_settings() {
+        for (config, message) in [
+            (
+                r#"{"mode": "full", "keep_selectors": ["div["]}"#,
+                "invalid CSS selector",
+            ),
+            (
+                r#"{"mode": "full", "drop_line_patterns": ["("]}"#,
+                "invalid line pattern",
+            ),
+            (
+                r#"{"mode": "full", "drop": ["nav"]}"#,
+                "invalid HTML config",
+            ),
+            (r#"{"mode": "everything"}"#, "invalid HTML config"),
+            (r#"{"drop_selectors": ["nav"]}"#, "need mode \"full\""),
+        ] {
+            let error = HtmlConfig::from_json(config).unwrap_err();
+            assert!(
+                format!("{error:#}").contains(message),
+                "{config}: {error:#}"
+            );
+        }
+    }
+
+    #[test]
+    fn html_config_reject_low_value_defaults_follow_the_mode() {
+        assert!(full_config(r#"{"mode": "article"}"#).rejects_low_value());
+        assert!(!full_config(r#"{"mode": "full"}"#).rejects_low_value());
+        assert!(full_config(r#"{"mode": "full", "reject_low_value": true}"#).rejects_low_value());
+        assert!(HtmlConfig::default().rejects_low_value());
+    }
+
+    #[test]
+    fn article_mode_config_matches_the_default_path() {
+        let options = ExtractOptions {
+            mime_type: Some("text/html"),
+            source_path: Some("page.html"),
+            kind: HtmlKind::Html,
+        };
+        let default = extract_bytes(FULL_PAGE.as_bytes(), options).unwrap();
+        let article = extract_bytes_with(
+            FULL_PAGE.as_bytes(),
+            options,
+            &full_config(r#"{"mode": "article"}"#),
+        )
+        .unwrap();
+        assert_eq!(default.content, article.content);
+        assert_eq!(default.title, article.title);
+        assert!(article.extraction_metadata["content_extraction"]
+            .get("html_mode")
+            .is_none());
+    }
+
+    #[test]
+    fn mhtml_full_mode_renders_the_whole_body() {
+        let mhtml = r#"From: <Saved by Web Archiver>
+Subject: 器官捐献通知
+MIME-Version: 1.0
+Content-Type: multipart/related; type="text/html"; boundary="boundary"
+
+--boundary
+Content-Type: text/html; charset=utf-8
+Content-Transfer-Encoding: 8bit
+Content-Location: http://example.test/
+
+<html><body><nav>首页 政务公开</nav><article><p>为进一步规范人体器官捐献与移植工作，现将有关事项通知如下，这段正文足够长，可以进入索引。</p></article></body></html>
+--boundary--
+"#;
+        let extracted = extract_mhtml_bytes(
+            mhtml.as_bytes(),
+            Some("page.mhtml"),
+            &full_config(r#"{"mode": "full"}"#),
+        )
+        .unwrap();
+        assert_eq!(extracted.source_format, "mhtml");
+        assert!(extracted.content.contains("首页 政务公开"));
+        assert!(extracted.content.contains("现将有关事项通知如下"));
+        assert_eq!(
+            extracted.extraction_metadata["content_extraction"]["extraction_method"],
+            "rust:mhtml_full"
+        );
     }
 }

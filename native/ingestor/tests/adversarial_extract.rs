@@ -2,7 +2,8 @@
 //!
 //! Every case here is malformed / hostile input. The property under test is:
 //! `extract_bytes` must RETURN (Ok or Err) without PANICKING and without
-//! HANGING. Each case runs on a worker thread inside `catch_unwind`; the main
+//! HANGING, in article mode and in both full-mode paths (plain html2text, and
+//! kuchikikiki selectors before html2text). Each case runs on a worker thread inside `catch_unwind`; the main
 //! thread waits with a bounded timeout so a regression that reintroduces an
 //! infinite loop / pathological blowup fails the test fast instead of wedging
 //! the whole test run.
@@ -23,7 +24,7 @@ use std::sync::mpsc;
 use std::sync::Once;
 use std::time::Duration;
 
-use _ingest_native::{extract_bytes, ExtractOptions, HtmlKind};
+use _ingest_native::{extract_bytes, extract_bytes_with, ExtractOptions, HtmlConfig, HtmlKind};
 
 const WATCHDOG: Duration = Duration::from_secs(30);
 
@@ -37,9 +38,36 @@ fn kind_of(k: &str) -> HtmlKind {
     }
 }
 
+const HTML_CONFIGS: [&str; 3] = [
+    r#"{"mode": "article"}"#,
+    r#"{"mode": "full"}"#,
+    r#"{"mode": "full", "keep_selectors": ["body", "td"], "drop_selectors": ["nav", "div > div"], "drop_line_patterns": ["^row \\d+"]}"#,
+];
+
+/// Run one case under every HTML config. Returns the first failure, else
+/// "ok" / "err".
+fn guarded(bytes: Vec<u8>, kind: &str, mime: Option<&str>, ext: Option<&str>) -> &'static str {
+    let mut result = "ok";
+    for config in HTML_CONFIGS {
+        let config = HtmlConfig::from_json(config).expect("valid test config");
+        match guarded_with(bytes.clone(), kind, mime, ext, config) {
+            "ok" => {}
+            "err" => result = "err",
+            failure => return failure,
+        }
+    }
+    result
+}
+
 /// Run one case on a watchdog thread. Returns "ok" / "err" (both acceptable)
 /// or "panic" / "hang" (both failures).
-fn guarded(bytes: Vec<u8>, kind: &str, mime: Option<&str>, ext: Option<&str>) -> &'static str {
+fn guarded_with(
+    bytes: Vec<u8>,
+    kind: &str,
+    mime: Option<&str>,
+    ext: Option<&str>,
+    config: HtmlConfig,
+) -> &'static str {
     SILENCE_PANICS.call_once(|| {
         std::panic::set_hook(Box::new(|_| {}));
         // Keep the wall-clock deadline short so the full-scale hang shapes below
@@ -56,7 +84,9 @@ fn guarded(bytes: Vec<u8>, kind: &str, mime: Option<&str>, ext: Option<&str>) ->
             source_path: ext.as_deref(),
             kind,
         };
-        let outcome = catch_unwind(AssertUnwindSafe(|| extract_bytes(&bytes, opts)));
+        let outcome = catch_unwind(AssertUnwindSafe(|| {
+            extract_bytes_with(&bytes, opts, &config)
+        }));
         let tag = match outcome {
             Ok(Ok(_)) => "ok",
             Ok(Err(_)) => "err",
