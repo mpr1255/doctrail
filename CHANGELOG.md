@@ -1,6 +1,8 @@
 # Changelog
 
-## Unreleased
+## 0.3.7 - text encoding and file-type fixes
+
+The native engine misread some files: text with a few corrupt bytes, and Word, gzip, and image files saved under web-page or `.txt` names. This release reads them correctly and makes repeated ingests into a large database faster.
 
 ### Fixes
 
