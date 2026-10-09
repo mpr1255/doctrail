@@ -8,7 +8,8 @@
 #![allow(clippy::useless_conversion)] // PyO3 wrapper expansion around PyResult.
 
 use crate::{
-    classify_extraction_failure, extract_bytes, extract_file, extract_file_with,
+    classify_extraction_failure, detect_content_type, extract_bytes, extract_file, extract_file_with,
+    ContentTypeDetection,
     low_value_content_rejection, ExtractOptions, ExtractedDocument, HtmlConfig, HtmlKind, HtmlMode,
 };
 use anyhow::{bail, Context, Result};
@@ -175,23 +176,46 @@ fn extract_one(path: &str, html: &HtmlConfig) -> DocOut {
         .and_then(|value| value.to_str())
         .unwrap_or_default()
         .to_ascii_lowercase();
-    // Full mode renders large pages itself so its selectors and line filters apply.
-    if html.mode == HtmlMode::Article
-        && matches!(extension.as_str(), "html" | "htm")
-        && fs::metadata(path).is_ok_and(|metadata| metadata.len() >= LARGE_HTML_EXTERNAL_BYTES)
-    {
-        if let Ok(document) = external_html(Path::new(path)) {
-            return doc_out_from_extracted(path, document, started, html);
-        }
-    }
-    if matches!(
+    // Crawls save images and videos under web-page names, and reading those as
+    // text stores binary noise, so for these names trust the bytes instead.
+    let sniffed = matches!(
         extension.as_str(),
-        "png" | "jpg" | "jpeg" | "gif" | "bmp" | "tif" | "tiff"
-    ) {
+        "html" | "htm" | "shtml" | "jhtml" | "mht" | "mhtml"
+    )
+    .then(|| sniff_content(Path::new(path)))
+    .flatten();
+    let sniffed_mime = sniffed
+        .as_ref()
+        .map(|detection| detection.mime_type.to_ascii_lowercase())
+        .unwrap_or_default();
+    if sniffed_mime.starts_with("video/")
+        || sniffed_mime.starts_with("audio/")
+        || is_compressed_archive_mime(&sniffed_mime)
+    {
+        let mut doc = failed_doc(
+            path,
+            format!("the file holds {sniffed_mime} data, not a web page"),
+        );
+        doc.extraction_ms = started.elapsed().as_millis() as u64;
+        return doc;
+    }
+    let sniffed_image = sniffed_mime.starts_with("image/")
+        && !sniffed_mime.contains("svg")
+        && !sniffed_mime.contains("djvu");
+    if sniffed_image
+        || matches!(
+            extension.as_str(),
+            "png" | "jpg" | "jpeg" | "gif" | "bmp" | "tif" | "tiff"
+        )
+    {
+        let source_format = match sniffed.filter(|_| sniffed_image) {
+            Some(detection) => detection.extension.trim_start_matches('.').to_string(),
+            None => extension,
+        };
         return DocOut {
             path: path.to_string(),
             status: "fallback_required".to_string(),
-            source_format: Some(extension),
+            source_format: Some(source_format),
             title: None,
             content: String::new(),
             content_chars: 0,
@@ -206,6 +230,15 @@ fn extract_one(path: &str, html: &HtmlConfig) -> DocOut {
             error: None,
             extraction_ms: started.elapsed().as_millis() as u64,
         };
+    }
+    // Full mode renders large pages itself so its selectors and line filters apply.
+    if html.mode == HtmlMode::Article
+        && matches!(extension.as_str(), "html" | "htm")
+        && fs::metadata(path).is_ok_and(|metadata| metadata.len() >= LARGE_HTML_EXTERNAL_BYTES)
+    {
+        if let Ok(document) = external_html(Path::new(path)) {
+            return doc_out_from_extracted(path, document, started, html);
+        }
     }
     let opts = ExtractOptions {
         mime_type: None,
@@ -590,6 +623,36 @@ fn read_file_limited(path: &Path) -> Result<String> {
 }
 
 /// Build a `status=failed` result for a path (used when extraction panics).
+/// Bytes read to identify a file's real type before trusting its extension.
+const SNIFF_BYTES: u64 = 64 * 1024;
+
+/// Compressed archives found under web-page names: their bytes are not text,
+/// and expanding them is the job of the archive path, which keys on the name.
+fn is_compressed_archive_mime(mime: &str) -> bool {
+    matches!(
+        mime,
+        "application/zip"
+            | "application/gzip"
+            | "application/x-gzip"
+            | "application/x-bzip2"
+            | "application/x-xz"
+            | "application/x-7z-compressed"
+            | "application/vnd.rar"
+            | "application/x-rar-compressed"
+            | "application/x-tar"
+            | "application/zstd"
+    )
+}
+
+/// The content type that the start of a file shows, or None if it cannot be read.
+fn sniff_content(path: &Path) -> Option<ContentTypeDetection> {
+    let mut head = Vec::new();
+    File::open(path)
+        .and_then(|file| file.take(SNIFF_BYTES).read_to_end(&mut head))
+        .ok()?;
+    Some(detect_content_type(&head))
+}
+
 fn failed_doc(path: &str, error: String) -> DocOut {
     DocOut {
         path: path.to_string(),
@@ -1014,61 +1077,6 @@ mod tests {
         assert_eq!(members[1].uncompressed_bytes, 13);
     }
 
-    #[test]
-    fn rejects_zip_traversal_without_writing_outside_staging() {
-        let root = tempdir().unwrap();
-        let archive = root.path().join("traversal.zip");
-        let destination = root.path().join("out");
-        write_zip(&archive, &[("../escape.txt", b"no")]);
-
-        let error = expand_zip_archive(&archive, &destination, 10, 1024, 2048, 200)
-            .unwrap_err()
-            .to_string();
-
-        assert!(error.contains("unsafe path"));
-        assert!(!root.path().join("escape.txt").exists());
-    }
-
-    #[test]
-    fn rejects_zip_entry_and_total_size_limits() {
-        let root = tempdir().unwrap();
-        let archive = root.path().join("large.zip");
-        write_zip(&archive, &[("large.txt", &[b'x'; 128])]);
-
-        let member_error =
-            expand_zip_archive(&archive, &root.path().join("member"), 10, 64, 1024, 200)
-                .unwrap_err()
-                .to_string();
-        assert!(member_error.contains("per-entry limit"));
-
-        let total_error =
-            expand_zip_archive(&archive, &root.path().join("total"), 10, 1024, 64, 200)
-                .unwrap_err()
-                .to_string();
-        assert!(total_error.contains("total limit"));
-    }
-
-    #[test]
-    fn external_text_gate_keeps_short_real_text() {
-        assert!(external_text_is_usable("PRISMA flow diagram"));
-    }
-
-    #[test]
-    fn external_text_gate_rejects_binary_control_dump() {
-        let garbage = "word\0\u{0001}\u{0002}\u{0003}".repeat(50);
-        assert!(!external_text_is_usable(&garbage));
-    }
-
-    #[test]
-    fn external_text_gate_rejects_recovered_repeated_character_garbage() {
-        let garbage = format!(
-            "{}\n{}",
-            "1".repeat(600),
-            "binary-looking fallback output with a few accidental words"
-        );
-        assert!(!external_text_is_usable(&garbage));
-    }
-
     /// A ZIP whose names are raw bytes without the UTF-8 flag, as old Windows
     /// tools wrote them: placeholder names of the same length are written and
     /// then swapped for the raw bytes in both headers.
@@ -1177,6 +1185,105 @@ mod tests {
             decode_member_name(b"\xb1\xa8\xb8\xe6.htm", Some(GBK)).as_deref(),
             Some("报告.htm")
         );
+    }
+
+    #[test]
+    fn rejects_zip_traversal_without_writing_outside_staging() {
+        let root = tempdir().unwrap();
+        let archive = root.path().join("traversal.zip");
+        let destination = root.path().join("out");
+        write_zip(&archive, &[("../escape.txt", b"no")]);
+
+        let error = expand_zip_archive(&archive, &destination, 10, 1024, 2048, 200)
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("unsafe path"));
+        assert!(!root.path().join("escape.txt").exists());
+    }
+
+    #[test]
+    fn rejects_zip_entry_and_total_size_limits() {
+        let root = tempdir().unwrap();
+        let archive = root.path().join("large.zip");
+        write_zip(&archive, &[("large.txt", &[b'x'; 128])]);
+
+        let member_error =
+            expand_zip_archive(&archive, &root.path().join("member"), 10, 64, 1024, 200)
+                .unwrap_err()
+                .to_string();
+        assert!(member_error.contains("per-entry limit"));
+
+        let total_error =
+            expand_zip_archive(&archive, &root.path().join("total"), 10, 1024, 64, 200)
+                .unwrap_err()
+                .to_string();
+        assert!(total_error.contains("total limit"));
+    }
+
+    #[test]
+    fn binary_files_named_html_are_judged_by_their_bytes() {
+        let root = tempdir().unwrap();
+        let jpeg = root.path().join("photo.html");
+        let mut jpeg_bytes = b"\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x00\x00H\x00H\x00\x00".to_vec();
+        jpeg_bytes.extend(std::iter::repeat(0x5a).take(4096));
+        fs::write(&jpeg, jpeg_bytes).unwrap();
+        // The opening bytes of an M4V video found saved as .html in a crawl.
+        let video = root.path().join("clip.m4v.html");
+        let mut video_bytes = b"\x00\x00\x00\x1cftypM4V \x00\x00\x02\x00isomiso2avc1\x00\x00\x00\x08free".to_vec();
+        video_bytes.extend(std::iter::repeat(0x3c).take(4096));
+        fs::write(&video, video_bytes).unwrap();
+        let page = root.path().join("page.html");
+        fs::write(&page, "<html><body><article><p>A real page about the archive.</p></article></body></html>")
+            .unwrap();
+        let config = HtmlConfig::default();
+
+        let image = extract_one(jpeg.to_str().unwrap(), &config);
+        assert_eq!(image.status, "fallback_required");
+        assert!(image.ocr_needed);
+        assert_eq!(image.source_format.as_deref(), Some("jpg"));
+
+        let clip = extract_one(video.to_str().unwrap(), &config);
+        assert_eq!(clip.status, "failed");
+        assert!(clip.error.unwrap().contains("video/"), "video detected");
+
+        let html = extract_one(page.to_str().unwrap(), &config);
+        assert_eq!(html.status, "extracted");
+        assert!(html.content.contains("real page"));
+    }
+
+    #[test]
+    fn large_images_named_html_go_to_ocr_not_w3m() {
+        let root = tempdir().unwrap();
+        let jpeg = root.path().join("large.html");
+        let mut bytes = b"\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x00\x00H\x00H\x00\x00".to_vec();
+        bytes.resize(LARGE_HTML_EXTERNAL_BYTES as usize + 1024, 0x5a);
+        fs::write(&jpeg, bytes).unwrap();
+
+        let image = extract_one(jpeg.to_str().unwrap(), &HtmlConfig::default());
+        assert_eq!(image.status, "fallback_required");
+        assert!(image.ocr_needed);
+    }
+
+    #[test]
+    fn external_text_gate_keeps_short_real_text() {
+        assert!(external_text_is_usable("PRISMA flow diagram"));
+    }
+
+    #[test]
+    fn external_text_gate_rejects_binary_control_dump() {
+        let garbage = "word\0\u{0001}\u{0002}\u{0003}".repeat(50);
+        assert!(!external_text_is_usable(&garbage));
+    }
+
+    #[test]
+    fn external_text_gate_rejects_recovered_repeated_character_garbage() {
+        let garbage = format!(
+            "{}\n{}",
+            "1".repeat(600),
+            "binary-looking fallback output with a few accidental words"
+        );
+        assert!(!external_text_is_usable(&garbage));
     }
 
     #[test]
