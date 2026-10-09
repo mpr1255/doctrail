@@ -1,7 +1,7 @@
 use anyhow::{anyhow, Context, Result};
 use base64::{engine::general_purpose, Engine as _};
 use chardetng::EncodingDetector;
-use encoding_rs::{Encoding, GBK, UTF_8};
+use encoding_rs::{Encoding, GBK, UTF_16BE, UTF_16LE, UTF_8};
 use kuchikikiki::traits::*;
 use mail_parser::{Encoding as MimeEncoding, Message, MessageParser, MessagePart, MimeHeaders};
 use mimetype_detector::detect as detect_mime_type;
@@ -2176,7 +2176,12 @@ fn decode_html_bytes_with_hint<'a>(
             .map(str::to_string)
     });
     if let Some(label) = declared_encoding.as_deref() {
-        if let Some(encoding) = Encoding::for_label(label.as_bytes()) {
+        if let Some(mut encoding) = Encoding::for_label(label.as_bytes()) {
+            // A <meta> that an ASCII scan can read cannot describe UTF-16 bytes,
+            // so the HTML spec's prescan treats it as UTF-8, as browsers do.
+            if declared_source == "html_meta" && (encoding == UTF_16LE || encoding == UTF_16BE) {
+                encoding = UTF_8;
+            }
             let (text, _, had_errors) = encoding.decode(data);
             if let Some(utf8_text) =
                 should_override_declared_with_utf8(data, &text, had_errors, encoding)
@@ -2212,9 +2217,7 @@ fn decode_html_bytes_with_hint<'a>(
         }
     }
 
-    let mut detector = EncodingDetector::new();
-    detector.feed(&data[..data.len().min(10_000)], true);
-    let encoding = detector.guess(None, true);
+    let encoding = sniff_encoding(data);
     let (text, _, had_errors) = encoding.decode(data);
     HtmlDecodeResult {
         encoding_name: encoding.name(),
@@ -2223,6 +2226,16 @@ fn decode_html_bytes_with_hint<'a>(
         declared_encoding,
         had_errors,
     }
+}
+
+/// Guess an encoding from the first 10,000 bytes. The prefix is marked as the
+/// end of input only when it is the whole file; otherwise a multi-byte UTF-8
+/// character cut at the boundary would rule UTF-8 out.
+fn sniff_encoding(data: &[u8]) -> &'static Encoding {
+    let prefix = &data[..data.len().min(10_000)];
+    let mut detector = EncodingDetector::new();
+    detector.feed(prefix, prefix.len() == data.len());
+    detector.guess(None, true)
 }
 
 fn set_decode_metadata(result: &mut ExtractedDocument, decoded: &HtmlDecodeResult<'_>) {
@@ -2256,9 +2269,7 @@ fn should_override_declared_with_utf8<'a>(
         return Some(utf8_text);
     }
 
-    let mut detector = EncodingDetector::new();
-    detector.feed(&data[..data.len().min(10_000)], true);
-    if detector.guess(None, true) == UTF_8 {
+    if sniff_encoding(data) == UTF_8 {
         return Some(utf8_text);
     }
 
@@ -4547,6 +4558,56 @@ Content-Location: http://example.test/
             extracted.extraction_metadata["content_extraction"]["encoding_source"],
             "valid_utf8"
         );
+    }
+
+    /// A CNKI-shaped page: UTF-8 bytes that declare charset=utf-16, with a CJK
+    /// character cut by the 10,000-byte sniff window.
+    fn utf16_declared_utf8_page(body: &str) -> Vec<u8> {
+        let head = r#"<html><head><META http-equiv="Content-Type" content="text/html; charset=utf-16"><script>var x = '"#;
+        let padding = "a".repeat(9_999 - head.len());
+        let mut bytes = format!(
+            "{head}{padding}中';</script><title>免疫抑制剂研究进展</title></head><body><article><p>{body}</p></article></body></html>"
+        )
+        .into_bytes();
+        // An even length lets the UTF-16 decode finish without errors.
+        if bytes.len() % 2 == 1 {
+            bytes.push(b' ');
+        }
+        bytes
+    }
+
+    #[test]
+    fn html_meta_utf16_on_utf8_bytes_decodes_as_utf8() {
+        let bytes = utf16_declared_utf8_page(
+            "婴幼儿胸腺发育尚未成熟，细胞免疫和体液免疫功能低下，是感染和肿瘤等免疫缺陷性疾病的高发年龄组。这段正文足够长，可以进入索引。",
+        );
+        let extracted = extract_html_bytes(&bytes, Some("detail.aspx.html")).unwrap();
+        assert_eq!(extracted.title, "免疫抑制剂研究进展");
+        assert!(extracted.content.contains("婴幼儿胸腺发育尚未成熟"));
+        assert!(!extracted.content.contains("瑨汭"));
+        assert_eq!(
+            extracted.extraction_metadata["content_extraction"]["encoding"],
+            "UTF-8"
+        );
+    }
+
+    #[test]
+    fn sniff_encoding_keeps_utf8_when_prefix_splits_a_character() {
+        let bytes = format!("{}中文内容", "a".repeat(9_999)).into_bytes();
+        assert_eq!(sniff_encoding(&bytes), UTF_8);
+    }
+
+    #[test]
+    fn html_meta_utf16_with_invalid_utf8_byte_decodes_as_utf8() {
+        let mut bytes = utf16_declared_utf8_page(
+            "婴幼儿胸腺发育尚未成熟，细胞免疫和体液免疫功能低下，是感染和肿瘤等免疫缺陷性疾病的高发年龄组。这段正文足够长，可以进入索引。",
+        );
+        let at = bytes.len() - 20;
+        bytes.insert(at, 0xff);
+        bytes.insert(at, b' ');
+        let decoded = decode_html_bytes(&bytes);
+        assert_eq!(decoded.encoding_name, "UTF-8");
+        assert!(decoded.decoded.contains("婴幼儿胸腺发育尚未成熟"));
     }
 
     #[test]

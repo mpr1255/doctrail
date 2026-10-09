@@ -938,7 +938,7 @@ struct DecodedCsv {
 fn decode_csv_bytes(bytes: &[u8]) -> DecodedCsv {
     let mut detector = EncodingDetector::new();
     let detection_prefix = &bytes[..bytes.len().min(ENCODING_DETECTION_BYTES)];
-    detector.feed(detection_prefix, true);
+    detector.feed(detection_prefix, detection_prefix.len() == bytes.len());
 
     let decoded_bytes = bytes.len().min(CSV_TEXT_DECODE_BYTES);
     let decode_sample = &bytes[..decoded_bytes];

@@ -158,8 +158,9 @@ fn decode_text_bytes<'a>(data: &'a [u8], mime_type: Option<&str>) -> TextDecodeR
         }
     }
 
+    let prefix = &data[..data.len().min(10_000)];
     let mut detector = EncodingDetector::new();
-    detector.feed(&data[..data.len().min(10_000)], true);
+    detector.feed(prefix, prefix.len() == data.len());
     let encoding = detector.guess(None, true);
     let (text, _, had_errors) = encoding.decode(data);
     TextDecodeResult {
