@@ -76,6 +76,7 @@ async def run_ingest(
     ocr_engine: str = 'auto',
     workers: Optional[int] = None,
     extractor: str = 'auto',
+    html_config: Optional[Dict[str, Any]] = None,
     verbose: bool = False,
     yes: bool = False,  # Skip confirmation prompts
     # Plugin-specific options
@@ -111,6 +112,7 @@ async def run_ingest(
         pdf_engine: PDF extraction engine
         ocr_engine: OCR engine to use when needed
         workers: Number of extraction worker processes
+        html_config: HTML settings (mode and full-mode cruft rules)
         verbose: Enable detailed logging
         plugin_name: Name of ingestion plugin to use
         plugin_args: Arguments for the plugin
@@ -215,6 +217,7 @@ async def run_ingest(
                 ocr_engine=ocr_engine,
                 workers=workers,
                 extractor=extractor,
+                html_config=html_config,
             )
 
             total_processed += 1

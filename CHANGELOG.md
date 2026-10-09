@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+### Full-page HTML mode
+
+- `--html-mode full` keeps all visible text on HTML and MHTML pages, where the native engine's default article mode keeps only the main article. Full mode renders with html2text: plain text, no link footnotes, table cells one per line, image alt text kept, and no hard line wrapping, so phrase and trigram searches match across the whole paragraph. It runs about six times faster than article mode on a 5,000-page sample.
+- `--html-profile FILE` applies per-corpus cruft rules in full mode: `keep_selectors`, `drop_selectors`, `drop_line_patterns`, and `reject_low_value`. Rules are validated before any file is read, and each row records the mode, the profile, and how many elements and lines were removed. `examples/html-profiles/cnki-detail.yml` is a worked profile, and `scripts/html_mode_report.py` lists the lines repeated across a corpus to help write one.
+- Full mode keeps login pages, error templates, and navigation-only pages that article mode stores empty, and records why they looked low-value.
+- Profile rules never fall back to an extractor that cannot apply them: a page the native renderer cannot handle is recorded as failed, and a page the rules leave empty is skipped.
+- `--html-mode` also selects the Python engine's HTML path: readability for `article`, BeautifulSoup for `full`. Without the flag both engines keep their previous defaults.
+
+### Fixes
+
+- HTML that declares `charset=utf-16` in a `<meta>` tag but is UTF-8, as on many saved CNKI pages, is decoded as UTF-8, as browsers do. Previously the native engine produced mojibake for these pages. The encoding sniffer also no longer rules out UTF-8 when its 10,000-byte sample ends inside a multi-byte character. Rows ingested earlier keep their misdecoded text until re-ingested with `--overwrite`.
+
 ## 0.3.5 - pdftotext by default, native ingest, OCR routing
 
 ### pdftotext is the default PDF extractor

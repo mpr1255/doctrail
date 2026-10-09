@@ -1,0 +1,23 @@
+# Full-mode rules for CNKI article detail pages (kcms/detail, 2010s layout).
+# Use with: doctrail ingest --html-profile examples/html-profiles/cnki-detail.yml
+#
+# Keep only the record: title, authors, institutions, abstract, keywords,
+# source, and classification. If a page has no #main, the whole page is kept
+# and the row records html_keep_selectors_matched = 0.
+keep_selectors:
+  - "#main"
+# Inside #main, drop the citation-network widget and download buttons.
+drop_selectors:
+  - "#MapTitle"
+  - "#MapArea"
+  - ".nodebar"
+  - ".zwjdown"
+  - ".SnapshotSearch"
+# Lines that survive the selectors but carry no content. Each is a regex
+# matched against one trimmed line.
+drop_line_patterns:
+  - "^不支持迅雷等下载工具"
+  - "^(推荐 )?(CAJ|PDF)下载$"
+  - "^节点文献$"
+  - "^HTML阅读$"
+  - "^切换至优先出版版本$"

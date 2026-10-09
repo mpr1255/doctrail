@@ -433,6 +433,7 @@ async def process_ingest(
     workers: Optional[int] = None,
     override_filepaths: Optional[Dict[str, str]] = None,
     extractor: str = 'auto',
+    html_config: Optional[Dict[str, Any]] = None,
 ):
     """
     Process files from directory and insert into database.
@@ -448,6 +449,9 @@ async def process_ingest(
         skip_embedded_media: Skip embedded Office image extraction and OCR
         fulltext: Create full-text search index
         fts_tokenizer: FTS5 tokenizer to use for the index
+        html_config: HTML settings: mode ('article' or 'full') and, for full
+            mode, keep_selectors, drop_selectors, drop_line_patterns and
+            reject_low_value. Selector and line settings need the native build.
     """
     # Use OS-level termination so Ctrl-C is immediate even while Rust is
     # executing outside the Python interpreter. SQLite WAL protects committed
@@ -477,6 +481,19 @@ async def process_ingest(
 
     if workers is not None and workers < 1:
         raise RuntimeError("workers must be >= 1")
+
+    from . import native_extractor
+    try:
+        html = native_extractor.html_settings(
+            html_config, extractor != 'python' and native_extractor.available()
+        )
+    except ValueError as exc:
+        raise RuntimeError(f"Invalid HTML settings: {exc}") from exc
+    if html:
+        # The Python extractors, including the MHTML fallback, know the mode only.
+        readability = html["mode"] == "article"
+    # Rules exclude content, so no fallback may store a page without them.
+    html_rules = bool(html) and any(html.get(key) for key in native_extractor.HTML_FILTER_KEYS)
 
     # Check if database schema is compatible
     try:
@@ -1000,7 +1017,7 @@ async def process_ingest(
                 # batch-level failure is recorded against every input in the chunk;
                 # native process aborts and segfaults cannot be caught in-process.
                 try:
-                    docs = native_extractor.extract_batch(batch_paths, workers)
+                    docs = native_extractor.extract_batch(batch_paths, workers, html)
                 except Exception as exc:
                     logger.error(f"Native extract_batch failed for {len(batch_paths)} file(s): {exc}")
                     for p in batch_paths:
@@ -1013,7 +1030,7 @@ async def process_ingest(
                     continue
                 for p, doc in zip(batch_paths, docs):
                     if native_extractor.is_complete_extraction(doc, p):
-                        handle_result(native_extractor.to_result(p, path_to_sha[p], doc))
+                        handle_result(native_extractor.to_result(p, path_to_sha[p], doc, html))
                         continue
                     if doc.get("ocr_needed") and ocr_engine == "mac-ocr":
                         deferred_mac_ocr.append((p, doc))
@@ -1025,16 +1042,19 @@ async def process_ingest(
                         or suffix in {".mht", ".mhtml"}
                     )
                     error = doc.get("error") or ""
-                    if is_mhtml and (not error or "timed out" in error):
+                    if is_mhtml and (not error or "timed out" in error) and not html_rules:
                         deferred_mhtml_fallback.append(p)
                         continue
                     if doc.get("status") == "extracted" and (
                         suffix in {".htm", ".html"} or is_mhtml
                     ):
+                        empty = "HTML contained no usable document text"
+                        if html_rules:
+                            empty += " after the HTML profile rules"
                         handle_result({
                             "success": None,
                             "file_path": p,
-                            "error": f"Skipped: {error or 'HTML contained no usable document text'}",
+                            "error": f"Skipped: {error or empty}",
                             "elapsed": (doc.get("extraction_ms") or 0) / 1000.0,
                         })
                         continue

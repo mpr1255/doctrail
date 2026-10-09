@@ -143,7 +143,7 @@ def test_extract_batch_rejects_malformed_native_contract(tmp_path, monkeypatch, 
 
     class FakeNative:
         @staticmethod
-        def extract_batch(paths, threads):
+        def extract_batch(paths, threads, html_config=None):
             return [json.dumps(item) for item in adjusted]
 
     monkeypatch.setattr(native_extractor, "_native_module", FakeNative())
@@ -331,7 +331,7 @@ async def test_process_ingest_records_whole_chunk_failure_without_python_fallbac
     monkeypatch.setattr(
         native_extractor,
         "extract_batch",
-        lambda paths, threads: (_ for _ in ()).throw(RuntimeError("bad batch contract")),
+        lambda paths, threads, html=None: (_ for _ in ()).throw(RuntimeError("bad batch contract")),
     )
 
     result = await process_ingest(
@@ -530,7 +530,7 @@ async def test_native_zero_page_pdf_still_tries_mac_ocr_and_preserves_failure(
     monkeypatch.setattr(
         native_extractor,
         "extract_batch",
-        lambda paths, threads: [{
+        lambda paths, threads, html=None: [{
             "path": paths[0],
             "status": "extracted",
             "content": "",
@@ -578,7 +578,7 @@ async def test_native_zero_page_pdf_classifies_confirmed_renderer_failure_as_dam
     monkeypatch.setattr(
         native_extractor,
         "extract_batch",
-        lambda paths, threads: [{
+        lambda paths, threads, html=None: [{
             "path": paths[0],
             "status": "extracted",
             "content": "",
@@ -624,9 +624,9 @@ async def test_process_ingest_skips_css_before_native_submission(
     submitted = []
     real_extract_batch = native_extractor.extract_batch
 
-    def recording_extract_batch(paths, threads=None):
+    def recording_extract_batch(paths, threads=None, html=None):
         submitted.extend(paths)
-        return real_extract_batch(paths, threads)
+        return real_extract_batch(paths, threads, html)
 
     monkeypatch.setattr(native_extractor, "extract_batch", recording_extract_batch)
     result = await process_ingest(
@@ -657,7 +657,7 @@ async def test_native_ingest_defers_ocr_until_all_rust_batches_finish(
 
     events = []
 
-    def fake_extract_batch(batch_paths, threads=None):
+    def fake_extract_batch(batch_paths, threads=None, html=None):
         events.append("rust")
         docs = []
         for batch_path in batch_paths:
@@ -692,3 +692,183 @@ async def test_native_ingest_defers_ocr_until_all_rust_batches_finish(
 
     assert result["successful"] == 33
     assert events == ["rust", "rust", "ocr"]
+
+
+GOV_PAGE = (
+    "<html><head><title>市卫健委通知</title></head><body>"
+    "<nav>首页 政务公开 政务服务</nav>"
+    "<div id='content'><h1>关于器官捐献工作的通知</h1>"
+    "<p>" + "各区卫生健康委：为进一步规范人体器官捐献与移植工作，现将有关事项通知如下。" * 6
+    + "请按时报送工作进展情况。</p></div>"
+    "<div class='share'>分享到：微信 微博</div>"
+    "<footer>版权所有 京ICP备12345678号</footer></body></html>"
+)
+
+
+def test_extract_batch_full_mode_keeps_page_chrome(tmp_path, native_enabled):
+    page = tmp_path / "notice.html"
+    page.write_text(GOV_PAGE, encoding="utf-8")
+
+    doc = native_extractor.extract_batch([str(page)], html={"mode": "full"})[0]
+
+    assert doc["status"] == "extracted"
+    assert doc["extraction_method"] == "rust:html_full"
+    assert "首页 政务公开 政务服务" in doc["content"]
+    assert "京ICP备12345678号" in doc["content"]
+
+
+def test_extract_batch_full_mode_keeps_low_value_pages(tmp_path, native_enabled):
+    page = tmp_path / "login.html"
+    page.write_text(
+        "<html><body>" + ("会员登录 立即注册 用户名 密码 服务热线：400-810-9888 " * 20) + "</body></html>",
+        encoding="utf-8",
+    )
+
+    doc = native_extractor.extract_batch([str(page)], html={"mode": "full"})[0]
+    result = native_extractor.to_result(str(page), "deadbeef", doc, {"mode": "full"})
+
+    assert "会员登录" in doc["content"]
+    assert result["metadata"]["html_low_value_reason"]
+
+
+def test_html_settings_rejects_bad_rules_before_any_file(native_enabled):
+    with pytest.raises(ValueError, match="invalid CSS selector"):
+        native_extractor.html_settings({"mode": "full", "drop_selectors": ["div["]}, True)
+    with pytest.raises(ValueError, match="need mode"):
+        native_extractor.html_settings({"drop_selectors": ["nav"]}, True)
+
+
+def test_html_settings_fills_defaults(native_enabled):
+    assert native_extractor.html_settings({"mode": "full"}, True) == {
+        "mode": "full",
+        "keep_selectors": [],
+        "drop_selectors": [],
+        "drop_line_patterns": [],
+        "reject_low_value": False,
+    }
+
+
+def test_html_settings_names_a_stale_native_build(monkeypatch, native_enabled):
+    class OldBuild:
+        pass
+
+    monkeypatch.setattr(native_extractor, "_native", lambda: OldBuild())
+    with pytest.raises(RuntimeError, match="make native"):
+        native_extractor.html_settings({"mode": "full"}, True)
+
+
+@pytest.mark.asyncio
+async def test_process_ingest_full_mode_profile_records_settings(tmp_path, native_enabled):
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "notice.html").write_text(GOV_PAGE, encoding="utf-8")
+    db_path = tmp_path / "full.sqlite"
+    profile = {
+        "mode": "full",
+        "drop_selectors": ["nav", ".share"],
+        "drop_line_patterns": [r"ICP备\d+号"],
+    }
+
+    result = await process_ingest(
+        db_path=str(db_path),
+        input_dir=str(source),
+        table="documents",
+        extractor="rust",
+        html_config=profile,
+        fulltext=True,
+        fts_tokenizer="trigram",
+        yes=True,
+    )
+
+    assert result["successful"] == 1
+    with sqlite3.connect(db_path) as conn:
+        content, method, metadata = conn.execute(
+            "SELECT raw_content, extraction_method, metadata FROM documents"
+        ).fetchone()
+        hits = conn.execute(
+            "SELECT count(*) FROM documents_fts WHERE documents_fts MATCH ?",
+            ['"情况。各区卫生" OR "按时报送工作进展"'],
+        ).fetchone()[0]
+    metadata = json.loads(metadata)
+    assert method == "rust:html_full"
+    assert "政务公开" not in content and "分享到" not in content and "ICP备" not in content
+    assert "关于器官捐献工作的通知" in content
+    # The paragraph is one line, so phrase search works across any old wrap point.
+    assert any(line.endswith("请按时报送工作进展情况。") and len(line) > 200 for line in content.splitlines())
+    assert hits == 1
+    assert metadata["html_mode"] == "full"
+    assert json.loads(metadata["html_config"])["drop_selectors"] == ["nav", ".share"]
+    assert metadata["html_nodes_dropped"] == "2"
+    assert metadata["html_lines_dropped"] == "1"
+
+
+@pytest.mark.asyncio
+async def test_process_ingest_default_html_stays_article_mode(tmp_path, native_enabled):
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "notice.html").write_text(GOV_PAGE, encoding="utf-8")
+    db_path = tmp_path / "article.sqlite"
+
+    await process_ingest(
+        db_path=str(db_path), input_dir=str(source), table="documents", extractor="rust", yes=True
+    )
+
+    with sqlite3.connect(db_path) as conn:
+        method, metadata = conn.execute("SELECT extraction_method, metadata FROM documents").fetchone()
+    assert method == "rust:html"
+    assert json.loads(metadata)["html_mode"] == "article"
+
+
+MHTML_PAGE = """From: <Saved by Web Archiver>
+Subject: notice
+MIME-Version: 1.0
+Content-Type: multipart/related; type="text/html"; boundary="b"
+
+--b
+Content-Type: text/html; charset=utf-8
+Content-Transfer-Encoding: 8bit
+Content-Location: http://example.test/
+
+<html><body><p>Excluded paragraph that the profile removes entirely.</p></body></html>
+--b--
+"""
+
+
+@pytest.mark.asyncio
+async def test_profile_that_removes_everything_is_not_undone_by_fallback(tmp_path, native_enabled):
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "page.mhtml").write_text(MHTML_PAGE, encoding="utf-8")
+    db_path = tmp_path / "profile.sqlite"
+
+    result = await process_ingest(
+        db_path=str(db_path),
+        input_dir=str(source),
+        table="documents",
+        extractor="rust",
+        html_config={"mode": "full", "drop_selectors": ["body"]},
+        yes=True,
+    )
+
+    assert result["successful"] == 0
+    with sqlite3.connect(db_path) as conn:
+        tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master")}
+        stored = conn.execute("SELECT count(*) FROM documents").fetchone()[0] if "documents" in tables else 0
+    assert stored == 0
+
+
+def test_profile_rules_block_the_w3m_fallback(tmp_path, monkeypatch, native_enabled):
+    monkeypatch.setenv("DOCTRAIL_INGEST_MAX_NESTING_DEPTH", "2")
+    page = tmp_path / "deep.html"
+    page.write_text(
+        "<html><body><nav>REMOVE ME</nav><div><div><div><p>KEEP THIS CONTENT</p></div></div></div></body></html>",
+        encoding="utf-8",
+    )
+
+    doc = native_extractor.extract_batch(
+        [str(page)], html={"mode": "full", "drop_selectors": ["nav"]}
+    )[0]
+
+    assert "REMOVE ME" not in doc["content"]
+    assert doc["status"] != "extracted"
+    assert "cannot apply the HTML profile" in doc["error"]

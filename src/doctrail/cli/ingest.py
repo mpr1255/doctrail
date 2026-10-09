@@ -46,6 +46,32 @@ def _resolve_ingest_db_path(db_path: Optional[str], config_data: Optional[dict])
     return str(Path.cwd() / DEFAULT_INGEST_DB_NAME)
 
 
+def _html_config(
+    html_mode: Optional[str], html_profile: Optional[Path], readability: bool
+) -> Optional[dict]:
+    """Build HTML settings from --html-mode and an --html-profile YAML file.
+
+    A profile on its own means full mode, since its rules apply only there.
+    """
+    if html_mode is None and html_profile is None:
+        return None
+    config: dict = {}
+    if html_profile:
+        try:
+            loaded = yaml.safe_load(Path(html_profile).read_text(encoding='utf-8'))
+        except (OSError, yaml.YAMLError) as exc:
+            raise click.UsageError(f"Could not read HTML profile {html_profile}: {exc}")
+        if loaded is not None and not isinstance(loaded, dict):
+            raise click.UsageError(f"HTML profile {html_profile} must be a YAML mapping")
+        config.update(loaded or {})
+    if html_mode:
+        config['mode'] = html_mode
+    config.setdefault('mode', 'full')
+    if readability and config['mode'] == 'full':
+        raise click.UsageError("--readability conflicts with full HTML mode")
+    return config
+
+
 def get_zotero_config(config_data: Optional[dict]) -> dict:
     """Get Zotero configuration from config, environment, or raise error."""
     api_key = None
@@ -111,6 +137,17 @@ def get_zotero_config(config_data: Optional[dict]) -> dict:
 @click.option('--ocr-engine', type=click.Choice(['auto', 'textra', 'ocrmypdf', 'mac-ocr']), help='OCR backend when OCR is needed')
 @click.option('--extractor', type=click.Choice(['auto', 'rust', 'python']), default='auto', help='Extraction engine: auto uses the native build when present, else python; rust requires the native build')
 @click.option('--readability', is_flag=True, help='Use readability for HTML')
+@click.option(
+    '--html-mode',
+    type=click.Choice(['article', 'full']),
+    help='HTML text: article (readability; the native default) or full (the whole page)',
+)
+@click.option(
+    '--html-profile',
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    help='YAML file of full-mode cruft rules: keep_selectors, drop_selectors, '
+    'drop_line_patterns, reject_low_value',
+)
 @click.option('--html-extractor', type=click.Choice(['default', 'smart']), default='default')
 @click.option('--skip-garbage-check', is_flag=True, help='Skip garbage detection')
 @click.option(
@@ -163,6 +200,8 @@ def ingest(
     ocr_engine: Optional[str],
     extractor: str,
     readability: bool,
+    html_mode: Optional[str],
+    html_profile: Optional[Path],
     html_extractor: str,
     skip_garbage_check: bool,
     skip_embedded_media: bool,
@@ -220,6 +259,9 @@ def ingest(
                 readability = True
             if html_extractor == 'default' and config_data.get('html_extractor'):
                 html_extractor = config_data.get('html_extractor')
+            html_mode = html_mode or config_data.get('html_mode')
+            if not html_profile and config_data.get('html_profile'):
+                html_profile = Path(config_data['html_profile']).expanduser()
             pdf_engine = pdf_engine or config_data.get('pdf_engine')
             ocr_engine = ocr_engine or config_data.get('ocr_engine')
             if not skip_garbage_check and config_data.get('skip_garbage_check', False):
@@ -228,6 +270,8 @@ def ingest(
                 skip_embedded_media = True
         except Exception as e:
             raise click.UsageError(f"Error loading config: {e}")
+
+    html_config = _html_config(html_mode, html_profile, readability)
 
     pdf_engine = pdf_engine or os.environ.get('DOCTRAIL_PDF_ENGINE') or 'auto'
     ocr_engine = ocr_engine or os.environ.get('DOCTRAIL_OCR_ENGINE') or 'auto'
@@ -311,6 +355,7 @@ def ingest(
             pdf_engine=pdf_engine,
             ocr_engine=ocr_engine,
             readability=readability,
+            html_config=html_config,
             html_extractor=html_extractor,
             skip_garbage_check=skip_garbage_check,
             skip_embedded_media=skip_embedded_media,

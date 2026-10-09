@@ -8,8 +8,9 @@ explicit backup switch or the ``DOCTRAIL_DISABLE_NATIVE`` kill-switch.
 
 Interface contract with the Rust binding
 ----------------------------------------
-`_ingest_native.extract_batch(paths: list[str], threads: int | None)` returns a
-list (order-preserving, one per input path) of dicts with these keys:
+`_ingest_native.extract_batch(paths: list[str], threads: int | None,
+html_config: str | None)` returns a list (order-preserving, one per input path)
+of dicts with these keys:
 
     path: str                     # echoed input path
     status: str                   # "extracted" | "fallback_required" | "failed" | "skipped_unsupported"
@@ -26,8 +27,10 @@ list (order-preserving, one per input path) of dicts with these keys:
     ocr_reason: str | None
     error: str | None
 
-`extract_path(path)` returns a single such dict (used for tests / single files).
-The binding never raises per-file: a bad file comes back status="failed".
+`extract_path(path, html_config)` returns a single such dict (used for tests /
+single files). The binding never raises per-file: a bad file comes back
+status="failed". An invalid `html_config` raises ValueError before any file is
+read.
 """
 
 from __future__ import annotations
@@ -78,12 +81,53 @@ def available() -> bool:
     return _native() is not None
 
 
-def extract_batch(paths: List[str], threads: Optional[int] = None) -> List[Dict[str, Any]]:
+HTML_FILTER_KEYS = ("keep_selectors", "drop_selectors", "drop_line_patterns")
+HTML_DIAGNOSTIC_KEYS = ("keep_selectors_matched", "nodes_dropped", "lines_dropped", "low_value_reason")
+
+
+def html_settings(
+    html_config: Optional[Dict[str, Any]], use_native: bool
+) -> Optional[Dict[str, Any]]:
+    """Validate HTML settings and return them with defaults filled in.
+
+    The native extractor applies every setting. The Python extractors know only
+    the two modes, so selector and line settings need the native build.
+    """
+    if html_config is None:
+        return None
+    if use_native:
+        native = _native()
+        if native is None or not hasattr(native, "normalize_html_config"):
+            raise RuntimeError(
+                "installed doctrail._ingest_native does not support HTML modes; "
+                "rebuild it with `make native`"
+            )
+        return json.loads(native.normalize_html_config(json.dumps(html_config)))
+    mode = html_config.get("mode", "article")
+    if mode not in ("article", "full"):
+        raise ValueError(f"unknown HTML mode {mode!r}; use 'article' or 'full'")
+    unknown = sorted(set(html_config) - {"mode", "reject_low_value", *HTML_FILTER_KEYS})
+    if unknown:
+        raise ValueError(f"unknown HTML setting {', '.join(unknown)}")
+    unsupported = [key for key in html_config if key != "mode" and html_config[key]]
+    if unsupported:
+        raise ValueError(
+            f"{', '.join(unsupported)} need the native extractor; build it with `make native`"
+        )
+    return {"mode": mode}
+
+
+def extract_batch(
+    paths: List[str],
+    threads: Optional[int] = None,
+    html: Optional[Dict[str, Any]] = None,
+) -> List[Dict[str, Any]]:
     native = _native()
     if native is None:
         raise RuntimeError("native extension doctrail._ingest_native is not available")
     normalized_paths = [str(path) for path in paths]
-    raw = native.extract_batch(normalized_paths, threads)
+    html_json = json.dumps(html) if html else None
+    raw = native.extract_batch(normalized_paths, threads, html_json)
     docs = [json.loads(item) for item in raw]
     _validate_batch_contract(normalized_paths, docs)
     return docs
@@ -190,7 +234,12 @@ def is_complete_extraction(doc: Dict[str, Any], file_path: str) -> bool:
     return True
 
 
-def to_result(file_path: str, sha1: str, doc: Dict[str, Any]) -> Dict[str, Any]:
+def to_result(
+    file_path: str,
+    sha1: str,
+    doc: Dict[str, Any],
+    html: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
     """Map a Rust extraction dict to doctrail's ingest result dict.
 
     Matches the shape produced by ``core._build_success_result`` so it can be
@@ -210,12 +259,18 @@ def to_result(file_path: str, sha1: str, doc: Dict[str, Any]) -> Dict[str, Any]:
         "language_confidence": doc.get("language_confidence"),
     }
     extraction_metadata = doc.get("extraction_metadata")
+    content_extraction: Dict[str, Any] = {}
     if isinstance(extraction_metadata, dict):
-        structured_sheets = extraction_metadata.get("content_extraction", {}).get(
-            "structured_sheets"
-        )
+        content_extraction = extraction_metadata.get("content_extraction") or {}
+        structured_sheets = content_extraction.get("structured_sheets")
         if isinstance(structured_sheets, list):
             metadata["_spreadsheet_sheets"] = structured_sheets
+    if source_format in ("html", "mhtml"):
+        metadata["html_mode"] = content_extraction.get("html_mode") or "article"
+        if html and metadata["html_mode"] == "full":
+            metadata["html_config"] = json.dumps(html, ensure_ascii=False, sort_keys=True)
+        for key in HTML_DIAGNOSTIC_KEYS:
+            metadata[f"html_{key}"] = content_extraction.get(key)
     metadata = {k: v for k, v in metadata.items() if v is not None}
 
     return {

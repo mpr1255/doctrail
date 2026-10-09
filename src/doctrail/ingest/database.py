@@ -383,7 +383,7 @@ def clean_metadata(metadata: dict) -> dict:
         if key in important_keys:
             cleaned_metadata[key] = value
         # Keep keys that contain important substrings (including mhtml_ and ocr_ prefixed keys)
-        elif any(important in key.lower() for important in ['date', 'title', 'author', 'creator', 'source', 'url', 'content', 'mhtml_', 'ocr_', 'spreadsheet_']):
+        elif any(important in key.lower() for important in ['date', 'title', 'author', 'creator', 'source', 'url', 'content', 'html_', 'ocr_', 'spreadsheet_']):
             cleaned_metadata[key] = value
     
     logger.debug(f"Cleaned metadata from {len(metadata)} to {len(cleaned_metadata)} fields")

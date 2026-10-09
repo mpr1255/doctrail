@@ -1445,7 +1445,8 @@ async def _process_html_file(file_path: str, file_sha1: str, original_file_path:
             'original_file_type': Path(original_file_path).suffix.lower().lstrip('.'),
             'Content-Type': 'text/html',
             'resourceName': os.path.basename(original_file_path),
-            'extraction_method': extraction_method
+            'extraction_method': extraction_method,
+            'html_mode': 'article' if extraction_method.startswith('readability') else 'full',
         }
         
         # If this was an MHTML file, merge in the MHTML metadata
