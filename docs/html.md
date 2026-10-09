@@ -43,7 +43,7 @@ Rule lists and `reject_low_value: true` need the native engine. The Python engin
 
 A bad selector, a bad pattern, or an unknown key stops the ingest before any file is read.
 
-The native engine reads the first 64 KiB of each file before trusting its extension. An image saved as `.html` goes to OCR, and audio, video, or a compressed archive is recorded as failed. A saved HTTP header before the page, as HTTrack writes, is removed when it ends within those 64 KiB.
+The native engine reads the first 64 KiB of each file before trusting its extension. An image saved as `.html` goes to OCR. A page saved gzip-compressed, as crawlers that store the raw HTTP response do, is decompressed and read, and the row records `content_encoding: gzip`. Audio, video, or another compressed archive is recorded as failed. A saved HTTP header before the page, as HTTrack writes, is removed when it ends within those 64 KiB.
 
 Without rule lists, a page the native engine cannot extract, such as one nested beyond the safety limit, falls back to w3m, and an empty or timed-out MHTML page falls back to the Python engine. Fallback text is whole-page text without the native formatting. With rule lists, such a page is recorded as failed, because the fallbacks cannot apply the rules. A page that the rules leave empty is skipped and reported.
 

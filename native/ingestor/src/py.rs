@@ -8,13 +8,15 @@
 #![allow(clippy::useless_conversion)] // PyO3 wrapper expansion around PyResult.
 
 use crate::{
-    classify_extraction_failure, detect_content_type, extract_bytes, extract_file, extract_file_with,
+    classify_extraction_failure, detect_content_type, extract_bytes, extract_bytes_with, extract_file,
+    extract_file_with,
     ContentTypeDetection,
     low_value_content_rejection, ExtractOptions, ExtractedDocument, HtmlConfig, HtmlKind, HtmlMode,
 };
 use anyhow::{bail, Context, Result};
 use chardetng::EncodingDetector;
 use encoding_rs::{Encoding, BIG5, EUC_JP, EUC_KR, GBK, SHIFT_JIS};
+use flate2::read::MultiGzDecoder;
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use rayon::prelude::*;
@@ -35,6 +37,8 @@ use zip::ZipArchive;
 const ZIP_RATIO_CHECK_MIN_BYTES: u64 = 1024 * 1024;
 const MAX_EXTERNAL_OUTPUT_BYTES: u64 = 64 * 1024 * 1024;
 const LARGE_HTML_EXTERNAL_BYTES: u64 = 8 * 1024 * 1024;
+/// Largest decompressed size read from a gzip-compressed page.
+const MAX_GZIP_PAGE_BYTES: u64 = 64 * 1024 * 1024;
 
 /// One extraction result. Field names are the contract with
 /// `doctrail.ingest.native_extractor` (see its module docstring).
@@ -188,6 +192,9 @@ fn extract_one(path: &str, html: &HtmlConfig) -> DocOut {
         .as_ref()
         .map(|detection| detection.mime_type.to_ascii_lowercase())
         .unwrap_or_default();
+    if matches!(sniffed_mime.as_str(), "application/gzip" | "application/x-gzip") {
+        return extract_gzipped_page(path, html, started);
+    }
     if sniffed_mime.starts_with("video/")
         || sniffed_mime.starts_with("audio/")
         || is_compressed_archive_mime(&sniffed_mime)
@@ -289,6 +296,45 @@ fn extract_one(path: &str, html: &HtmlConfig) -> DocOut {
             }
         }
     }
+}
+
+/// Crawlers that store the raw HTTP body save pages served with gzip content
+/// encoding still compressed. Decompress them and extract the page inside.
+fn extract_gzipped_page(path: &str, html: &HtmlConfig, started: Instant) -> DocOut {
+    let mut bytes = Vec::new();
+    let read = File::open(path).and_then(|file| {
+        MultiGzDecoder::new(file)
+            .take(MAX_GZIP_PAGE_BYTES + 1)
+            .read_to_end(&mut bytes)
+    });
+    let inner = detect_content_type(&bytes).mime_type.to_ascii_lowercase();
+    let result = match read {
+        Err(error) => Err(anyhow::anyhow!("the file is gzip data that does not decompress: {error}")),
+        Ok(_) if bytes.len() as u64 > MAX_GZIP_PAGE_BYTES => Err(anyhow::anyhow!(
+            "the file is gzip data that decompresses to more than {MAX_GZIP_PAGE_BYTES} bytes"
+        )),
+        Ok(_) if !(inner.starts_with("text/") || inner.contains("xml") || inner == "multipart/related") => {
+            Err(anyhow::anyhow!("the file holds gzip-compressed {inner} data, not a web page"))
+        }
+        Ok(_) => {
+            let opts = ExtractOptions {
+                mime_type: None,
+                source_path: Some(path),
+                kind: HtmlKind::Auto,
+            };
+            extract_bytes_with(&bytes, opts, html)
+        }
+    };
+    let mut doc = match result {
+        Ok(mut document) => {
+            document.extraction_metadata["content_extraction"]["content_encoding"] =
+                Value::String("gzip".to_string());
+            return doc_out_from_extracted(path, document, started, html);
+        }
+        Err(error) => failed_doc(path, format!("{error:#}")),
+    };
+    doc.extraction_ms = started.elapsed().as_millis() as u64;
+    doc
 }
 
 fn external_extract(path: &Path) -> Result<ExtractedDocument> {
@@ -622,12 +668,12 @@ fn read_file_limited(path: &Path) -> Result<String> {
     Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 
-/// Build a `status=failed` result for a path (used when extraction panics).
 /// Bytes read to identify a file's real type before trusting its extension.
 const SNIFF_BYTES: u64 = 64 * 1024;
 
 /// Compressed archives found under web-page names: their bytes are not text,
 /// and expanding them is the job of the archive path, which keys on the name.
+/// A gzip file under a web-page name is a compressed page and is read as one.
 fn is_compressed_archive_mime(mime: &str) -> bool {
     matches!(
         mime,
@@ -653,6 +699,7 @@ fn sniff_content(path: &Path) -> Option<ContentTypeDetection> {
     Some(detect_content_type(&head))
 }
 
+/// Build a `status=failed` result for a path (used when extraction panics).
 fn failed_doc(path: &str, error: String) -> DocOut {
     DocOut {
         path: path.to_string(),
@@ -1250,6 +1297,40 @@ mod tests {
         let html = extract_one(page.to_str().unwrap(), &config);
         assert_eq!(html.status, "extracted");
         assert!(html.content.contains("real page"));
+    }
+
+    #[test]
+    fn gzip_compressed_pages_are_decompressed_and_read() {
+        use flate2::{write::GzEncoder, Compression};
+        let gzip = |data: &[u8]| {
+            let mut encoder = GzEncoder::new(Vec::new(), Compression::fast());
+            encoder.write_all(data).unwrap();
+            encoder.finish().unwrap()
+        };
+        let root = tempdir().unwrap();
+        let page = root.path().join("stock-information.aspx.html");
+        fs::write(
+            &page,
+            gzip(b"<!DOCTYPE html><html><head><meta charset=\"utf-8\"><title>Weather</title></head>\
+                <body><article><p>Rain is expected across the region on Tuesday, with clearer skies \
+                from Wednesday and light winds through the weekend.</p></article></body></html>"),
+        )
+        .unwrap();
+        let binary = root.path().join("bundle.html");
+        let mut jpeg = b"\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x00\x00H\x00H\x00\x00".to_vec();
+        jpeg.extend(std::iter::repeat(0x5a).take(4096));
+        fs::write(&binary, gzip(&jpeg)).unwrap();
+        let config = HtmlConfig::default();
+
+        let doc = extract_one(page.to_str().unwrap(), &config);
+        assert_eq!(doc.status, "extracted", "{:?}", doc.error);
+        assert!(doc.content.contains("Rain is expected"), "{}", doc.content);
+        let encoding = &doc.extraction_metadata.unwrap()["content_extraction"]["content_encoding"];
+        assert_eq!(encoding, "gzip");
+
+        let failed = extract_one(binary.to_str().unwrap(), &config);
+        assert_eq!(failed.status, "failed");
+        assert!(failed.error.unwrap().contains("gzip-compressed image/"));
     }
 
     #[test]
