@@ -53,6 +53,41 @@ static UNICODE_ESCAPE_RE: Lazy<Regex> =
 static ARCHIVE_SNAPSHOT_TITLE_RE: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r"(?i)^snapshot\s+(?:of|for)\s+https?://\S+\s*$").expect("snapshot title regex")
 });
+/// Code shapes, not words. `function` counts only as a whole word that opens a
+/// body, as in `function f(a) {`; a member of `document` or `window` only when a
+/// call, assignment, or further access follows, as in `window.location.href =`;
+/// and DOM or regex helpers only when called. So prose such as "social
+/// dysfunction", "described in this document.", "a callback such as
+/// function(a)", or "quotes window.location as an example" is not leaked script.
+static SCRIPT_CALL_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(concat!(
+        r"\bfunction\b\s*\*?\s*[\w$]*\s*(?:/\*.*?\*/\s*)?\([^)]*\)\s*\{",
+        r"|=>\s*\{",
+        r"|\b(?:document|window)\.[\p{L}_$][\w$]*\s*(?:[=(.\[;]|$)",
+        r"|\b(?:document|window)\s*\.\s+[\p{L}_$][\w$]*(?:\s*=[^=]|\()",
+        r"|\b(?:eval|alert|getelementbyid)\s*\(",
+        r"|\bnew\s+regexp\s*\(",
+    ))
+    .expect("script call regex")
+});
+/// Lines that make up a known login form. Each is matched against a lowercased line.
+const LOGIN_FORM_MARKERS: [&str; 6] = [
+    "this is login.htm from the docs subdirectory",
+    "please enter your username",
+    "please enter your password",
+    "会员登录",
+    "立即注册",
+    "400-810-9888",
+];
+/// Text outside the login form, in non-whitespace characters, above which a
+/// page is a record that happens to carry a login box, not a login wall.
+const LOGIN_PAGE_MAX_OTHER_CHARS: usize = 200;
+/// URLs and article mode's `[n]` link markers, which are not prose.
+static LINK_SYNTAX_RE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"(?:https?://|www\.)\S*|\[\d+\]").expect("link syntax regex"));
+/// Error templates are short; a longer page that mentions "HTTP Error 404 Not
+/// Found" is about the error, not the error itself.
+const HTTP_ERROR_PAGE_MAX_CHARS: usize = 2000;
 static MARKDOWN_LINK_ONLY_RE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"^\[[^\]]{1,80}\]\([^)]+\)$").expect("markdown link regex"));
 static META_CHARSET_RE: Lazy<Regex> = Lazy::new(|| {
@@ -752,6 +787,11 @@ fn decode_mhtml_body_bytes<'a>(
 ) -> HtmlDecodeResult<'a> {
     let detected = decode_html_bytes_with_hint(data, hinted_encoding);
     if selected_body_type != "application/octet-stream-text" || hinted_encoding.is_some() {
+        return detected;
+    }
+    // Valid UTF-8 is read as UTF-8: GBK text is almost never valid UTF-8, while
+    // French or Spanish UTF-8 often decodes cleanly as GBK.
+    if std::str::from_utf8(data).is_ok() {
         return detected;
     }
 
@@ -2469,9 +2509,12 @@ fn strip_httrack_header(data: &[u8]) -> &[u8] {
         b"<head",
         b"<HEAD",
     ];
+    // An HTTrack header is a few hundred bytes; searching all of a huge
+    // non-HTML file for the markers would read it six times.
+    let head = &data[..data.len().min(64 * 1024)];
     let html_start = markers
         .iter()
-        .filter_map(|marker| find_bytes(data, marker))
+        .filter_map(|marker| find_bytes(head, marker))
         .min();
     if let Some(pos) = html_start {
         if pos > 100 {
@@ -3117,10 +3160,34 @@ pub(crate) fn low_value_content_rejection(content: &str, title: &str) -> Option<
 
 fn looks_like_login_placeholder(content: &str) -> bool {
     let lower = content.to_ascii_lowercase();
-    lower.contains("this is login.htm from the docs subdirectory")
+    let is_login_form = lower.contains("this is login.htm from the docs subdirectory")
         || (content.contains("会员登录")
             && content.contains("立即注册")
-            && content.contains("400-810-9888"))
+            && content.contains("400-810-9888"));
+    if !is_login_form {
+        return false;
+    }
+    let other_chars: usize = lower
+        .lines()
+        .take_while(|line| !is_link_reference_line(line))
+        .filter(|line| !LOGIN_FORM_MARKERS.iter().any(|marker| line.contains(marker)))
+        .map(|line| {
+            LINK_SYNTAX_RE
+                .replace_all(line, "")
+                .chars()
+                .filter(|ch| !ch.is_whitespace() && !matches!(ch, '[' | ']'))
+                .count()
+        })
+        .sum();
+    other_chars < LOGIN_PAGE_MAX_OTHER_CHARS
+}
+
+/// Article mode lists link targets after the text as `[n]: url` lines, and long
+/// targets wrap, so the text of a page ends where that list begins.
+fn is_link_reference_line(line: &str) -> bool {
+    line.strip_prefix('[')
+        .and_then(|rest| rest.split_once("]: "))
+        .is_some_and(|(number, _)| !number.is_empty() && number.bytes().all(|b| b.is_ascii_digit()))
 }
 
 fn looks_like_script_or_form_dump(content: &str) -> bool {
@@ -3155,15 +3222,7 @@ fn looks_like_script_or_form_dump(content: &str) -> bool {
 
 fn is_script_like_text_line(line: &str) -> bool {
     let lower = line.to_ascii_lowercase();
-    lower.contains("function ")
-        || lower.contains("document.")
-        || lower.contains("document.write")
-        || lower.contains("window.")
-        || lower.contains("getelementbyid")
-        || lower.contains(".ready(function")
-        || lower.contains("eval(")
-        || lower.contains("new regexp")
-        || lower.contains("alert(")
+    SCRIPT_CALL_RE.is_match(&lower)
         || lower.contains("return;")
         || lower.starts_with("var ")
         || lower.starts_with("if (")
@@ -3176,6 +3235,9 @@ fn is_script_like_text_line(line: &str) -> bool {
 }
 
 fn looks_like_http_error_template(content: &str) -> bool {
+    if content.chars().filter(|ch| !ch.is_whitespace()).count() >= HTTP_ERROR_PAGE_MAX_CHARS {
+        return false;
+    }
     let lower = content.to_ascii_lowercase();
     (content.contains("HTTP 错误") && content.contains("Not Found"))
         || (content.contains("您要找的资源已被删除") && content.contains("详细错误信息"))
@@ -4581,6 +4643,33 @@ mod tests {
         "#;
 
         assert!(looks_like_script_or_form_dump(script_dump));
+        for prose in [
+            "A study of social dysfunction in large organizations and its effect on staff turnover",
+            "【Key words】 social dysfunction； organizations； staff turnover；",
+            "The procedure is described in this document. The window. The retrieval(s) were logged.",
+            "Pass a callback such as function(a) to map, then function(b) to filter.",
+            "under paragraph function (a) of the Act, the agency shall report",
+            "The article quotes window.location as an example of a browser property.",
+            "The tutorial explains getElementById in plain language.",
+            "The report is in this document. Thus. The window. Then (later) it closed.",
+        ] {
+            assert!(!is_script_like_text_line(prose), "{prose}");
+        }
+        for code in [
+            "$(function(){",
+            "var x = function (a) {",
+            "function *tasks() {",
+            "function /*callback*/ (a) {",
+            "const f = (a) => {",
+            "window.location.href = u;",
+            "document. title = \"x\";",
+            "window.标题 = \"中文\";",
+            "var x = document.getElementById(\"x\");",
+            "if (document.form1.content.value == \"\") {",
+            "eval(s);",
+        ] {
+            assert!(is_script_like_text_line(code), "{code}");
+        }
         let extracted = extract_html_bytes(
             html.as_bytes(),
             Some("script-dump.html"),
@@ -5002,6 +5091,73 @@ Content-Location: http://example.test/
             extracted.extraction_metadata["content_extraction"]["encoding"],
             "UTF-8"
         );
+    }
+
+    #[test]
+    fn login_and_error_checks_spare_pages_with_real_text() {
+        let ezproxy = "This is login.htm from the docs subdirectory. Review the admin docs.\nPlease enter your username:\nPlease enter your password:\n";
+        assert!(looks_like_login_placeholder(ezproxy));
+        // EZproxy's sample login page as article mode renders it, with wrapped
+        // lines and link markup.
+        let sample = "This is login.htm from the docs subdirectory. Review\n\
+            [http://www.oclc.org/us/en/support/documentation/ezproxy/url/admin/][1] for information on how to create an\n\
+            administrative user account and [www.oclc.org/us/en/support/documentation/ezproxy/usr/][2] for information on user\n\
+            authentication options.\n\
+            Please enter your username:\n\
+            Please enter your password:\n\
+            [1]: http://www.oclc.org/us/en/support/documentation/ezproxy/url/admin/\n\
+            [2]: http://www.oclc.org/us/en/support/documentation/ezproxy/usr/\n";
+        assert!(looks_like_login_placeholder(sample));
+        let record = format!(
+            "{ezproxy}中国期刊全文数据库\n【摘要】 {}\n",
+            "目的评价城市公园开放时间调整对游客数量及周边交通的影响。".repeat(9)
+        );
+        assert!(!looks_like_login_placeholder(&record));
+
+        let wall = "会员登录\n用户名 密码 立即注册\n客服电话 400-810-9888\n首页 期刊 博士\n";
+        assert!(looks_like_login_placeholder(wall));
+        // Article mode appends link targets, and long ones wrap onto further lines.
+        let target = format!("http://login.example.com/register?return={}", "%2fsearch%3fpage%3d10".repeat(12));
+        let with_links = format!(
+            "{wall}[1]: {}\n{}\n[2]: {}\n{}\n",
+            &target[..120],
+            &target[120..],
+            &target[..120],
+            &target[120..]
+        );
+        assert!(looks_like_login_placeholder(&with_links));
+        let guide = format!("{wall}{}", "本报告介绍知网检索与下载的使用方法，并比较各数据库的收录范围与更新频率。".repeat(8));
+        assert!(!looks_like_login_placeholder(&guide));
+
+        let template = "HTTP 错误 404.0 - Not Found\n您要找的资源已被删除、已更名或暂时不可用。\n详细错误信息\n";
+        assert!(looks_like_http_error_template(template));
+        let article = format!(
+            "Fixing HTTP Error 404 Not Found\n{}",
+            "A 404 means the server found no resource at the requested path; check links, redirects, and the server's routing rules. ".repeat(20)
+        );
+        assert!(!looks_like_http_error_template(&article));
+    }
+
+    #[test]
+    fn octet_stream_mhtml_keeps_valid_utf8() {
+        let french = "Le café est fermé. Le comité a décidé que l'été serait réservé. ".repeat(4);
+        let decoded = decode_mhtml_body_bytes(french.as_bytes(), None, "application/octet-stream-text");
+        assert_eq!(decoded.decoded, french);
+
+        let chinese = "城市公园开放时间调整对游客数量的影响".repeat(2);
+        let (gbk, _, _) = GBK.encode(&chinese);
+        let decoded = decode_mhtml_body_bytes(&gbk, None, "application/octet-stream-text");
+        assert_eq!(decoded.encoding_name, "GBK");
+    }
+
+    #[test]
+    fn httrack_header_is_stripped_only_near_the_start() {
+        let header = format!("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n{}\r\n", "X-Pad: 1\r\n".repeat(12));
+        let page = format!("{header}<html><body>text</body></html>");
+        assert!(strip_httrack_header(page.as_bytes()).starts_with(b"<html>"));
+
+        let late = format!("{}<html>", "x".repeat(100 * 1024));
+        assert_eq!(strip_httrack_header(late.as_bytes()).len(), late.len());
     }
 
     #[test]
