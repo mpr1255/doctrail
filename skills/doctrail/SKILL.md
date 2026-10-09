@@ -50,6 +50,8 @@ doctrail enrich language --limit 5
 
 If `doctrail init` already created `.doctrail/config.yml` and `.doctrail/enrichments/*.yml`, patch those files rather than inventing parallel config formats.
 
+Saved web pages are read as the main article by the native engine and as the whole page by the Python engine. `doctrail ingest --html-mode full` keeps the whole page, and `--html-profile` tunes it for one collection; see https://doctrail.org/html/ before writing a profile.
+
 ## Offline runs and demos (replay)
 
 The model name `replay` (or `replay/<label>`) returns canned responses from `.doctrail/replay/<enrichment>.jsonl` fixtures instead of calling an API. Everything downstream — audit rows, `_enrichments`, views, runs, ICR — is the real pipeline, so replay runs are how you exercise a config end to end without an API key. Distinct labels act as distinct coders for ICR (`-m replay/coder-a -m replay/coder-b`).
@@ -97,7 +99,7 @@ sqlite3 /path/to/db.db "SELECT * FROM your_source_table LIMIT 3"
 
 - Write the prompt as a codebook, the way you would brief a research assistant: define every enum value, anchor every scale point (`0 = no mention; 5 = explicit existential threat`), and state explicitly when gated fields must be null. Vague constructs produce coder disagreement, with models exactly as with humans; if ICR comes back low, fix the codebook before blaming the model.
 - Provider prompt caching is prefix-based. OpenAI caches eligible matching prompt prefixes automatically. Gemini implicit caching is automatic on Gemini 2.5 and newer models, but Google does not guarantee savings on every request. In both cases, cache reuse depends on the longest identical prefix counted from the top of the request.
-- Therefore the rule is: everything static first, everything per-row last. Doctrail's default renderer puts the prompt first, appends schema instructions there for JSON-mode paths or sends provider-native schema payloads as constant request structure, then appends the per-row `input_columns` content at the end. For provider-reported OpenAI or Gemini cache hits, a long codebook prefix can be billed at cached-input rates. Doctrail does not currently set Anthropic `cache_control` markers, so do not count on Anthropic prompt-cache discounts from this layout.
+- Therefore the rule is: everything static first, everything per-row last. Doctrail's default renderer puts the prompt first, appends schema instructions there for JSON-mode paths or sends provider-native schema payloads as constant request structure, then appends the per-row `input_columns` content at the end. For provider-reported OpenAI or Gemini cache hits, a long codebook prefix can be billed at cached-input rates. For direct Anthropic models, Doctrail sends the static prompt as its own block marked with `cache_control`, so Anthropic can bill it at the cached rate on later rows.
 - `{column}` placeholders inside the prompt can break this. Each substitution makes the request differ from row to row at that point, reducing cache reuse for everything after it. Feed per-row content through `input_columns` instead; if you genuinely must interpolate, put the placeholder at the end of the prompt so the static prefix above it still matches.
 - Control input size with `:N` truncation on `input_columns` (e.g. `raw_content:3000`) rather than editing source data.
 

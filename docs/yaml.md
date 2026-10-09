@@ -39,9 +39,9 @@ prompt: |
   Return 'false' if it's empty, corrupted, or unreadable.
 ```
 
-## Full current-path config
+## Full project config
 
-Smoke-checked with `doctrail enrich --config config.yml packed_relevance --dry-run` and `doctrail enrich --config config.yml donor_payment --dry-run`.
+Smoke-checked with `doctrail enrich --config config.yml packed_relevance --dry-run` and `doctrail enrich --config config.yml donor_payment --dry-run`. It expects a `context.md` file beside the config, which `append_file` adds to the prompt.
 
 ```yaml
 database: ./docs.db
@@ -108,7 +108,9 @@ enrichments:
 
 Write `prompt` as a codebook, not just a question. Define every enum value, anchor every numeric scale point, and state gate/null behavior for optional fields. For example, if `has_payment` is false, say which evidence fields must be null; if a score runs from 0 to 5, define 0, the middle, and 5.
 
-Keep the prompt as static as possible. Doctrail renders the prompt first, adds schema instructions there for JSON-mode paths or sends provider-native schema payloads as constant request structure, and appends per-row `input_columns` content last. OpenAI automatic prompt caching and Gemini implicit caching on Gemini 2.5 and newer models can bill repeated prefix tokens at cached-input rates when the provider reports a cache hit, though Gemini does not guarantee savings on every request. Doctrail does not currently set Anthropic `cache_control` markers.
+Keep the prompt as static as possible. Doctrail renders the prompt first, adds schema instructions there for JSON-mode paths or sends provider-native schema payloads as constant request structure, and appends per-row `input_columns` content last. OpenAI automatic prompt caching and Gemini implicit caching on Gemini 2.5 and newer models can bill repeated prefix tokens at cached-input rates when the provider reports a cache hit, though Gemini does not guarantee savings on every request. For direct Anthropic models, Doctrail sends the static prompt as its own block marked with `cache_control`, so Anthropic can bill it at the cached rate on later rows.
+
+Prefer `input_columns` with `:N` truncation, such as `raw_content:3000`, over `{column}` interpolation inside the prompt. Placeholders still work, but a row-specific token breaks the shared prompt prefix there, so everything after it re-bills at full input price per row. If one is truly needed, put it at the very end.
 
 ## Self-hosted runtime limits
 
@@ -122,8 +124,6 @@ context_window: 32768
 ```
 
 `concurrency` must be at least 1. `max_tokens` is a hard per-response limit. `context_window` should match the model server and is used when `doctrail enrich --truncate` calculates how much input can fit. Enrichment-level values take precedence over project-level values.
-
-Prefer `input_columns` with `:N` truncation, such as `raw_content:3000`, over `{column}` interpolation inside the prompt. Placeholders still work, but a row-specific token breaks the shared prompt prefix there, so everything after it re-bills at full input price per row. If one is truly needed, put it at the very end.
 
 ## Token economy pattern
 
@@ -236,7 +236,7 @@ enrichments:
 
 ## Config key stability
 
-Batch 4 inventory source: `.get(...)` and direct config reads across `src/doctrail/`.
+Stability notes for the main config keys. Keys used elsewhere on this page, such as `concurrency` and `max_tokens`, and the HTML keys on the [HTML profiles](https://doctrail.org/html/) page, are not listed.
 
 | Key | Status | Note |
 | --- | --- | --- |

@@ -111,7 +111,10 @@ def get_zotero_config(config_data: Optional[dict]) -> dict:
     help=(
         "Ingest documents from local directories, Zotero, or plugins.\n\n"
         f"Supported local file types: {SUPPORTED_FORMATS_HELP}.\n\n"
-        "Examples:\n"
+        "Saved web pages: the native engine keeps the main article and the Python "
+        "engine keeps the whole page. --html-mode chooses, and --html-profile tunes "
+        "full mode for one collection: https://doctrail.org/html/\n\n"
+        "\b\nExamples:\n"
         "    doctrail ingest --input-dir ./docs --db-path ./data.db\n"
         "    doctrail ingest --zotero --collection \"Papers\" --db-path ./lit.db\n"
         "    doctrail ingest --plugin zotero --collection \"My Research\""
@@ -136,19 +139,25 @@ def get_zotero_config(config_data: Optional[dict]) -> dict:
 @click.option('--pdf-engine', type=click.Choice(['auto', 'pymupdf', 'pdftotext', 'mutool', 'mac-ocr']), help='PDF extraction strategy; auto uses pdftotext (set DOCTRAIL_PDFTOTEXT if it is not on PATH), pymupdf uses the bundled MuPDF')
 @click.option('--ocr-engine', type=click.Choice(['auto', 'textra', 'ocrmypdf', 'mac-ocr']), help='OCR backend when OCR is needed')
 @click.option('--extractor', type=click.Choice(['auto', 'rust', 'python']), default='auto', help='Extraction engine: auto uses the native build when present, else python; rust requires the native build')
-@click.option('--readability', is_flag=True, help='Use readability for HTML')
+@click.option('--readability', is_flag=True, help='Article text for HTML; the same as --html-mode article')
 @click.option(
     '--html-mode',
     type=click.Choice(['article', 'full']),
-    help='HTML text: article (readability; the native default) or full (the whole page)',
+    help='HTML and MHTML text: article (the main article; the native default) or full '
+    '(the whole page). See https://doctrail.org/html/',
 )
 @click.option(
     '--html-profile',
     type=click.Path(exists=True, dir_okay=False, path_type=Path),
-    help='YAML file of full-mode cruft rules: keep_selectors, drop_selectors, '
-    'drop_line_patterns, reject_low_value',
+    help='YAML rules that tune full-mode HTML text for one collection; needs the native '
+    'engine. See https://doctrail.org/html/',
 )
-@click.option('--html-extractor', type=click.Choice(['default', 'smart']), default='default')
+@click.option(
+    '--html-extractor',
+    type=click.Choice(['default', 'smart']),
+    default='default',
+    help='Python engine HTML text: default, or smart to keep paragraphs together in both modes',
+)
 @click.option('--skip-garbage-check', is_flag=True, help='Skip garbage detection')
 @click.option(
     '--skip-embedded-media',

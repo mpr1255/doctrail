@@ -104,6 +104,8 @@ Scopes:
 
 Run views show one persisted run in wide form. They are best for pilot runs, final runs, and human review.
 
+A run view shows the answers currently assigned to its run. Rerunning the same rows with `--overwrite`, under the same model and prompt, moves those answers to the new run, so they drop out of the earlier run's view. To keep a fixed review set, materialize it with `doctrail finalize` before overwriting.
+
 Pivot views build reusable wide analysis surfaces over normalized enrichments.
 
 Spec views are YAML-defined review surfaces. They can include source columns, enrichment columns, and one exploded JSON-array field.

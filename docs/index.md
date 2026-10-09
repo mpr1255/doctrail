@@ -4,7 +4,7 @@
 To begin right away, point your agent at [doctrail.org/llms.txt](https://doctrail.org/llms.txt) and/or run `uvx doctrail`.
 </div>
 
-Doctrail is a software library that allows researchers to perform and validate the large-scale enrichment of text corpora with large language models. It is written to be driven by agents (Claude Code, Codex) as much as humans, though humans must understand how it works. It grew naturally out of several applied computational social science research projects, eventually evolving to become a standalone tool.
+Doctrail is a command-line tool that extracts the text of a document collection into SQLite and uses large language models to code each selected document against a codebook you write, keeping a record of every call so the coding can be checked. It is written to be driven by agents (Claude Code, Codex) as much as humans, though humans must understand how it works. It grew naturally out of several applied computational social science research projects, eventually evolving to become a standalone tool.
 
 Here is an example.
 
@@ -55,15 +55,15 @@ In doctrail, your files get turned into text and ingested into a table called `d
 
 Doctrail's tables are prefixed by `_`, so they cluster together and stay out of the way.
 
-As Doctrail uses LLMs to enrich the files, the results are stored in an append-only log. SQL queries are then used to reconstruct pieces of these into other tables, or views, that you can inspect and do useful work on. The internal machinery is complex, and many thousands of lines of code define the behaviour. The key idea is that every input to the LLM, and every output from the LLM, is always captured in the database and fully auditable. This means it can be reconstructed in arbitrary ways as discussed below.
+Every model call is logged: the prompt, the raw response, and the parsed answer. The parsed answers hold the current answer for each document, field, model, and prompt; `--overwrite` replaces it, and the logged calls remain. SQL queries are then used to reconstruct pieces of these into other tables, or views, that you can inspect and do useful work on. The key idea is that the prompt, the model's raw response, and the parsed answer for every row are kept in the database, so the coding can be audited and rebuilt in many ways, as discussed below.
 
-In the end, all this is intended to make it trivial to iterate on a prompt and codebook, to confirm its behavior on a new random sample, and only then implement it on thousands, tens of thousands, of hundreds of thousands of documents in the corpus.
+In the end, all this is intended to make it trivial to iterate on a prompt and codebook, to confirm its behavior on a new random sample, and only then implement it on thousands, tens of thousands, or hundreds of thousands of documents in the corpus.
 
 There are many ancillary benefits to using a database as the storage engine, including:
 
 * Your corpus and its enrichments stay together in a single file, linked by keys;
 * Each write is atomic and incremental, meaning you can resume large runs that get interrupted and no data should be lost or corrupted;
-* The corpus is never loaded into computer memory at once. This is not a problem for small corpora, but if it grows to hundreds of thousands of documents or millions of documents, it is awkward, inefficient, and sometimes impossible to store all this in memory and repeatedly rewrite it all to disk;
+* The corpus is stored in SQLite, not held in memory. Ingest writes each file to the database as it goes, and an enrichment loads only the rows its query selects into memory, so a corpus of hundreds of thousands or millions of documents is never rewritten wholesale. For very large runs, select fewer rows or truncate long columns, as in `raw_content:3000`;
 * You can keep the database open as writes are happening and inspect the enrichments directly as they come in;
 * You can easily filter your documents and inspect their enrichments;
 * All the standard database guarantees — types, keys, and unique constraints that keep the data consistent;
@@ -83,13 +83,13 @@ The qualitative coding of some feature in a document is a claim; one will often 
 
 By **reliability**, we simply want to know whether different coders roughly converge on the same claims. If coders have low agreement about how some feature should be coded, you may have to rethink your measure. `doctrail icr` codes a random sample under several coders, and `doctrail icr-report` scores their agreement (Krippendorff's alpha, Cohen's kappa). Thus, doctrail allows you to randomly sample from your corpus, code such samples with several LLMs (and humans, for that matter), and test the reliability of the measure before running it across the full corpus.
 
-Human coders are stored like LLM coders in the ledger -- both are simply a coder identity. This means one can pool them and test agreement with the same command. To get human codings in, `doctrail overrides-export` writes a CSV template for a run (open it in Excel or anything), a human codes or corrects the rows, and `doctrail overrides-import` reads it back; the human then sits in the ledger as just another coder.
+Human codings come in through overrides. `doctrail overrides-export` writes a CSV template for a run (open it in Excel or anything), a human codes or corrects the rows, and `doctrail overrides-import` reads it back. Imported values are stored beside the model's answers, never over them, and the run's final view shows the corrected values. `icr-report` compares model coders only. To compare humans with models, export its coding matrix with `--output`, join the human codes by document key, and compute agreement in your analysis software.
 
-**Validity** is accuracy against a trusted standard. Because a human coder is just another coder in the comparison, the same `doctrail icr-report` gives you this for free: its pairwise table reports how closely each model agrees with the human, so the human-versus-model row is your validity measure. When you would rather eyeball cases than read a statistic, `doctrail review` opens a web UI that walks a human through the model's codings and shows a running accuracy.
+**Validity** is accuracy against a trusted standard, usually a sample coded by people who know the material. `doctrail review` opens a web UI that walks a human through the model's codings, records a yes or no for each, and shows a running accuracy. Agreement with such a reference is evidence of validity, not proof of it.
 
-These two affordances allow one to validate a codebook on a small random sample, read the disagreements, revise, and only scale once the LLM is behaving.
+These tools let you test a codebook on a small random sample, read the disagreements, revise, and scale only once the model behaves.
 
-Doctrail's validation framework is in active development. A key idea is that doctrail *itself* is not intended to be your validation software. It is the canonical store of codings, and provides affordances for getting values in and out, but the statistics one creates will often need to be tailored closely to a specific project, and Doctrail facilitates getting your codes into a rectangle so you can do that.
+Doctrail's validation framework is in active development. A key idea is that doctrail *itself* is not intended to be your validation software. It is the canonical store of codings, and provides ways to get values in and out, but the statistics one creates will often need to be tailored closely to a specific project, and Doctrail facilitates getting your codes into a rectangle so you can do that.
 
 ## Two example use cases
 
@@ -102,7 +102,7 @@ Another project combined tens of thousands of editorials from three PRC state me
 1. **Cache-friendly by default**. As long as the codebook is written with row-specific `{placeholder}` text at the end, most commercial model providers will give a large discount to the cached tokens, significantly reducing the inference costs;
 2. **Batch mode.** `doctrail enrich <name> --execution-mode batch` submits through the providers' batch APIs (OpenAI, Anthropic, Gemini) at roughly half the regular price. Large runs are sharded into provider jobs, `doctrail batch watch` follows progress, results reconcile into the same ledger, and partially failed shards simply retry on the next append-mode run;
 3. **Packed screening.** For rare-hit boolean screens over short texts, `pack_size` groups many rows into one call and `pack_response_mode: selected_indexes` has the model return only the indexes of the hits — so the 99% of rows that don't match cost almost no output tokens. This can significantly reduce costs for cheap screens;
-4. **Cost guardrails.** Before a run, Doctrail estimates the spend and asks you to confirm once it crosses a threshold (default $5), so a misconfigured run cannot use all your money while you sleep; `--skip-cost-check` bypasses it and `--cost-threshold` moves the line;
+4. **Cost check.** Before a run, Doctrail estimates the cost and asks you to confirm when the estimate passes a threshold (default $5); `--cost-threshold` moves the line and `--skip-cost-check` skips it. The estimate is a guide, not a cap, so also set a spending limit with your provider;
 5. **Model-agnostic.** OpenAI, Anthropic, and Gemini are built in, and OpenRouter is wired in too, so an enrichment can point at any of hundreds of models by name. You can instruct your agent to get Doctrail to list all available models on OpenRouter;
 6. **Run diffing.** `doctrail diff-runs` shows precisely where two runs disagree — prompt v1 against v2, or one model against another — so you can see what a codebook change actually moved, then diagnose hard cases;
 7. **Ingest from Zotero.** Besides a folder of files (~a dozen formats), `doctrail ingest --zotero` pulls a Zotero library or collection straight into the corpus, so your reference manager can be the source. You have to set this up first.

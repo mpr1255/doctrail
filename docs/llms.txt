@@ -1,20 +1,18 @@
 # Doctrail full manual
 
-Generated from mkdocs navigation by `scripts/build_llms_full.py`.
+Doctrail extracts the text of a document collection into SQLite and uses language models to code selected rows against a YAML code book, recording every call. Install it with `uv tool install doctrail`. For a first look, run `doctrail init test` and then `doctrail run test` in an empty directory; this needs no API key. For real data, run `doctrail init`, ingest the files, write one code book in `.doctrail/enrichments/`, dry-run it, run five rows, and inspect them before scaling. `doctrail agent` prints the operating guide for agents.
+
+This file is generated from the documentation and the CLI help by `scripts/build_llms_full.py`. Detailed reference pages, such as https://doctrail.org/html/ on tuning HTML ingest, are linked rather than included.
 
 <!-- index.md -->
 
 # Doctrail
 
-<div class="dt-start-callout" markdown>
-To begin right away, point your agent at [doctrail.org/llms.txt](https://doctrail.org/llms.txt) and/or run `uvx doctrail`.
-</div>
-
-Doctrail is a software library that allows researchers to perform and validate the large-scale enrichment of text corpora with large language models. It is written to be driven by agents (Claude Code, Codex) as much as humans, though humans must understand how it works. It grew naturally out of several applied computational social science research projects, eventually evolving to become a standalone tool.
+Doctrail is a command-line tool that extracts the text of a document collection into SQLite and uses large language models to code each selected document against a codebook you write, keeping a record of every call so the coding can be checked. It is written to be driven by agents (Claude Code, Codex) as much as humans, though humans must understand how it works. It grew naturally out of several applied computational social science research projects, eventually evolving to become a standalone tool.
 
 Here is an example.
 
-![Ingest a folder of documents, inspect the YAML codebook, enrich, and query the results — all in the terminal](assets/demo.gif)
+(Animation: Ingest a folder of documents, inspect the YAML codebook, enrich, and query the results — all in the terminal.)
 
 
 ## What did I just watch?
@@ -61,15 +59,15 @@ In doctrail, your files get turned into text and ingested into a table called `d
 
 Doctrail's tables are prefixed by `_`, so they cluster together and stay out of the way.
 
-As Doctrail uses LLMs to enrich the files, the results are stored in an append-only log. SQL queries are then used to reconstruct pieces of these into other tables, or views, that you can inspect and do useful work on. The internal machinery is complex, and many thousands of lines of code define the behaviour. The key idea is that every input to the LLM, and every output from the LLM, is always captured in the database and fully auditable. This means it can be reconstructed in arbitrary ways as discussed below.
+Every model call is logged: the prompt, the raw response, and the parsed answer. The parsed answers hold the current answer for each document, field, model, and prompt; `--overwrite` replaces it, and the logged calls remain. SQL queries are then used to reconstruct pieces of these into other tables, or views, that you can inspect and do useful work on. The key idea is that the prompt, the model's raw response, and the parsed answer for every row are kept in the database, so the coding can be audited and rebuilt in many ways, as discussed below.
 
-In the end, all this is intended to make it trivial to iterate on a prompt and codebook, to confirm its behavior on a new random sample, and only then implement it on thousands, tens of thousands, of hundreds of thousands of documents in the corpus.
+In the end, all this is intended to make it trivial to iterate on a prompt and codebook, to confirm its behavior on a new random sample, and only then implement it on thousands, tens of thousands, or hundreds of thousands of documents in the corpus.
 
 There are many ancillary benefits to using a database as the storage engine, including:
 
 * Your corpus and its enrichments stay together in a single file, linked by keys;
 * Each write is atomic and incremental, meaning you can resume large runs that get interrupted and no data should be lost or corrupted;
-* The corpus is never loaded into computer memory at once. This is not a problem for small corpora, but if it grows to hundreds of thousands of documents or millions of documents, it is awkward, inefficient, and sometimes impossible to store all this in memory and repeatedly rewrite it all to disk;
+* The corpus is stored in SQLite, not held in memory. Ingest writes each file to the database as it goes, and an enrichment loads only the rows its query selects into memory, so a corpus of hundreds of thousands or millions of documents is never rewritten wholesale. For very large runs, select fewer rows or truncate long columns, as in `raw_content:3000`;
 * You can keep the database open as writes are happening and inspect the enrichments directly as they come in;
 * You can easily filter your documents and inspect their enrichments;
 * All the standard database guarantees — types, keys, and unique constraints that keep the data consistent;
@@ -89,13 +87,13 @@ The qualitative coding of some feature in a document is a claim; one will often 
 
 By **reliability**, we simply want to know whether different coders roughly converge on the same claims. If coders have low agreement about how some feature should be coded, you may have to rethink your measure. `doctrail icr` codes a random sample under several coders, and `doctrail icr-report` scores their agreement (Krippendorff's alpha, Cohen's kappa). Thus, doctrail allows you to randomly sample from your corpus, code such samples with several LLMs (and humans, for that matter), and test the reliability of the measure before running it across the full corpus.
 
-Human coders are stored like LLM coders in the ledger -- both are simply a coder identity. This means one can pool them and test agreement with the same command. To get human codings in, `doctrail overrides-export` writes a CSV template for a run (open it in Excel or anything), a human codes or corrects the rows, and `doctrail overrides-import` reads it back; the human then sits in the ledger as just another coder.
+Human codings come in through overrides. `doctrail overrides-export` writes a CSV template for a run (open it in Excel or anything), a human codes or corrects the rows, and `doctrail overrides-import` reads it back. Imported values are stored beside the model's answers, never over them, and the run's final view shows the corrected values. `icr-report` compares model coders only. To compare humans with models, export its coding matrix with `--output`, join the human codes by document key, and compute agreement in your analysis software.
 
-**Validity** is accuracy against a trusted standard. Because a human coder is just another coder in the comparison, the same `doctrail icr-report` gives you this for free: its pairwise table reports how closely each model agrees with the human, so the human-versus-model row is your validity measure. When you would rather eyeball cases than read a statistic, `doctrail review` opens a web UI that walks a human through the model's codings and shows a running accuracy.
+**Validity** is accuracy against a trusted standard, usually a sample coded by people who know the material. `doctrail review` opens a web UI that walks a human through the model's codings, records a yes or no for each, and shows a running accuracy. Agreement with such a reference is evidence of validity, not proof of it.
 
-These two affordances allow one to validate a codebook on a small random sample, read the disagreements, revise, and only scale once the LLM is behaving.
+These tools let you test a codebook on a small random sample, read the disagreements, revise, and scale only once the model behaves.
 
-Doctrail's validation framework is in active development. A key idea is that doctrail *itself* is not intended to be your validation software. It is the canonical store of codings, and provides affordances for getting values in and out, but the statistics one creates will often need to be tailored closely to a specific project, and Doctrail facilitates getting your codes into a rectangle so you can do that.
+Doctrail's validation framework is in active development. A key idea is that doctrail *itself* is not intended to be your validation software. It is the canonical store of codings, and provides ways to get values in and out, but the statistics one creates will often need to be tailored closely to a specific project, and Doctrail facilitates getting your codes into a rectangle so you can do that.
 
 ## Two example use cases
 
@@ -108,7 +106,7 @@ Another project combined tens of thousands of editorials from three PRC state me
 1. **Cache-friendly by default**. As long as the codebook is written with row-specific `{placeholder}` text at the end, most commercial model providers will give a large discount to the cached tokens, significantly reducing the inference costs;
 2. **Batch mode.** `doctrail enrich <name> --execution-mode batch` submits through the providers' batch APIs (OpenAI, Anthropic, Gemini) at roughly half the regular price. Large runs are sharded into provider jobs, `doctrail batch watch` follows progress, results reconcile into the same ledger, and partially failed shards simply retry on the next append-mode run;
 3. **Packed screening.** For rare-hit boolean screens over short texts, `pack_size` groups many rows into one call and `pack_response_mode: selected_indexes` has the model return only the indexes of the hits — so the 99% of rows that don't match cost almost no output tokens. This can significantly reduce costs for cheap screens;
-4. **Cost guardrails.** Before a run, Doctrail estimates the spend and asks you to confirm once it crosses a threshold (default $5), so a misconfigured run cannot use all your money while you sleep; `--skip-cost-check` bypasses it and `--cost-threshold` moves the line;
+4. **Cost check.** Before a run, Doctrail estimates the cost and asks you to confirm when the estimate passes a threshold (default $5); `--cost-threshold` moves the line and `--skip-cost-check` skips it. The estimate is a guide, not a cap, so also set a spending limit with your provider;
 5. **Model-agnostic.** OpenAI, Anthropic, and Gemini are built in, and OpenRouter is wired in too, so an enrichment can point at any of hundreds of models by name. You can instruct your agent to get Doctrail to list all available models on OpenRouter;
 6. **Run diffing.** `doctrail diff-runs` shows precisely where two runs disagree — prompt v1 against v2, or one model against another — so you can see what a codebook change actually moved, then diagnose hard cases;
 7. **Ingest from Zotero.** Besides a folder of files (~a dozen formats), `doctrail ingest --zotero` pulls a Zotero library or collection straight into the corpus, so your reference manager can be the source. You have to set this up first.
@@ -151,7 +149,7 @@ The rest of this page explains what it gets you, and how to drive doctrail yours
 
 ## See it work, no API key needed
 
-Before pointing it at your own files or spending a cent, run the tutorial:
+Before pointing it at your own files or spending a cent, run the tutorial in a fresh empty directory:
 
 ```bash
 doctrail init test
@@ -174,6 +172,8 @@ doctrail enrich <name> --dry-run
 doctrail enrich <name> --limit 5
 ```
 
+Each code book is a file `.doctrail/enrichments/<name>.yml` whose `name:` matches the file name. Its `input.query` names a query from `sql_queries` in `.doctrail/config.yml`, such as the `all_docs` query that `init` writes, or holds SQL directly. `doctrail new` writes a code book for you. To run `init` without prompts, as an agent would, use `doctrail init --yes --provider anthropic` (or `openai`, `gemini`, `openrouter`); it needs that provider's key in the environment or `--api-key`.
+
 If you would rather not learn the commands, you do not have to: install doctrail, then tell your agent to run `doctrail` and order it around.
 
 ### PDF text extraction
@@ -182,7 +182,7 @@ PDF text is extracted with `pdftotext` from Poppler, which doctrail cannot bundl
 
 ### Scanned documents and OCR
 
-Ingest sends scanned PDFs and images through OCR. By default it uses local tools (`textra` on macOS, `ocrmypdf` elsewhere). If you run your own OCR service — for example Apple Vision OCR served from Macs you control — point doctrail at it with `--ocr-engine mac-ocr` and a comma-separated endpoint list:
+Ingest sends scanned PDFs and images through OCR. By default it uses local tools when they are installed: [`textra`](https://github.com/freedmand/textra) on macOS (with `mutool` for PDFs), then `ocrmypdf` for PDFs and `tesseract` for images. Doctrail does not install these tools; without one, scanned pages yield no text. If you run your own OCR service — for example Apple Vision OCR served from Macs you control — point doctrail at it with `--ocr-engine mac-ocr` and a comma-separated endpoint list:
 
 ```dotenv
 MAC_OCR__SERVICE_ENDPOINTS=https://ocr-1.example.com,https://ocr-2.example.com
@@ -206,32 +206,19 @@ git clone https://github.com/mpr1255/doctrail && cd doctrail && make native
 
 This compiles the extension and drops it into the package. It is never shipped in the wheel: the build statically embeds MuPDF, which is licensed under the AGPL-3.0 while the published package is MIT, so the native engine is a local build rather than a distributed binary.
 
-In practice the native engine is between about 2x and 15x faster, depending on the corpus mix. Measured on an Apple M1 Max (10 cores), both engines on the identical corpus, with no external OCR service configured in either run. On a mixed 1,000-file corpus (500 PDF, 300 HTML, 150 DOCX, 50 DOC), the extraction phase took approximately 34s native against 64s for the Python engine with 8 workers — about 1.9x — with comparable peak memory, roughly 0.7 GB against 0.5 GB. An earlier measurement of the extraction step alone, on a 968-file PDF-heavy sample, took 5.7s native on all cores against 83.5s Python on 8 threads, about 14.6x. Both measurements predate pdftotext becoming the default PDF extractor; they used MuPDF in both engines, so PDF-heavy timings will differ now.
+On an Apple M1 Max, the native engine ingested a mixed 1,000-file corpus about 1.9 times as fast as the Python engine, and extracted a PDF-heavy sample about 15 times as fast; both measurements predate `pdftotext` as the default PDF extractor. The end-to-end gain is smaller than the extraction gain because both engines share the hashing, SQLite writes, and Office media handling. The native engine is also stricter: it fails fast on unreadable files and flags them for OCR instead of retrying, which suits corpora of hundreds of thousands of messy files.
 
-The two numbers differ because end-to-end ingest time is bounded by work both engines share: file hashing, SQLite writes, and embedded Office media handling. The wall-clock advantage on mixed corpora is therefore modest, and it grows with corpus size and with the share of text-layer PDFs, where the extraction step dominates. The native engine is also stricter: it fails fast on unreadable files and flags them for OCR instead of retrying, which is the behavior you want at the scale of hundreds of thousands of messy files.
+### Saved web pages
 
-### HTML text: article or full
+Much research data is web pages saved as HTML or MHTML, and doctrail tunes how it reads them more heavily than any other format. Article text sits beside menus, download links, and lists of related records, and each site lays these out differently, so the reader can be tuned to each collection.
 
-HTML and MHTML pages can be read in two modes. `--html-mode article` keeps the main article and drops the rest of the page; it is the native engine's default. `--html-mode full` keeps all visible text, including navigation, sidebars, and footers. In the native engine, full mode also keeps image alt text, puts every table cell on its own line, leaves out scripts, styles, and link footnotes, and never splits a paragraph across lines, so phrase and trigram searches work across the whole paragraph. The Python engine's full mode is its BeautifulSoup text, which starts a new line at every tag and drops alt text. Without the flag each engine keeps its default: article text in the native engine, full text in the Python engine. Each row records the mode that produced it in `html_mode`. `--readability` cannot be combined with full mode.
+The defaults need no setup. The native engine keeps the main article and the Python engine keeps the whole page; choose with `--html-mode article` or `--html-mode full`:
 
-Full mode takes per-corpus rules from a YAML profile, passed with `--html-profile FILE`; a profile on its own implies full mode. The four keys are:
-
-1. `keep_selectors`: CSS selectors for the parts of the page to keep. The outermost matches are kept once each, in page order. If nothing matches, the whole page is kept and the row records `html_keep_selectors_matched` as 0.
-2. `drop_selectors`: CSS selectors for elements to remove, including inside kept parts.
-3. `drop_line_patterns`: regular expressions; any output line that matches one is removed.
-4. `reject_low_value`: when true, login pages, HTTP error templates, and navigation-only pages are stored empty, as in article mode. It defaults to false in full mode, which keeps their text and records the reason in `html_low_value_reason`.
-
-```yaml
-keep_selectors: ["#main"]
-drop_selectors: ["#MapArea", ".zwjdown"]
-drop_line_patterns: ["^HTML阅读$"]
+```bash
+doctrail ingest --input-dir ./pages --html-mode full --yes
 ```
 
-`examples/html-profiles/cnki-detail.yml` is a worked profile for CNKI article pages. Profile rules need the native engine; the Python engine accepts only the mode. A bad selector or regular expression stops the ingest before any file is read. A page the native renderer cannot handle, such as one nested beyond the safety limit, is recorded as failed when a profile has rules, because the fallback extractors cannot apply them. A page the rules leave empty is skipped. The project config accepts the same settings as `html_mode` and `html_profile`.
-
-To find what a profile should remove, list your HTML files one per line and run `uv run python scripts/html_mode_report.py --paths files.txt` from a source checkout. It compares the modes, then prints the lines repeated across the most files, which are usually site chrome; add `--profile FILE` to see what is left after the profile.
-
-Native full-mode rows also record the profile in `html_config`, the counts `html_nodes_dropped` and `html_lines_dropped`, and `extraction_method` `rust:html_full` or `rust:mhtml_full`. Ingest skips files already in the table, so rerun with `--overwrite` to re-extract them in another mode.
+To strip a site's menus and boilerplate, write a YAML profile of CSS selectors and line patterns and pass it with `--html-profile`. The rules need the native engine. The [HTML profile reference](https://doctrail.org/html/) lists every option and shows how to build a profile from a sample. Rerun with `--overwrite` to re-extract files already ingested.
 
 ## Before real model calls
 
@@ -437,9 +424,9 @@ prompt: |
   Return 'false' if it's empty, corrupted, or unreadable.
 ```
 
-## Full current-path config
+## Full project config
 
-Smoke-checked with `doctrail enrich --config config.yml packed_relevance --dry-run` and `doctrail enrich --config config.yml donor_payment --dry-run`.
+Smoke-checked with `doctrail enrich --config config.yml packed_relevance --dry-run` and `doctrail enrich --config config.yml donor_payment --dry-run`. It expects a `context.md` file beside the config, which `append_file` adds to the prompt.
 
 ```yaml
 database: ./docs.db
@@ -506,7 +493,9 @@ enrichments:
 
 Write `prompt` as a codebook, not just a question. Define every enum value, anchor every numeric scale point, and state gate/null behavior for optional fields. For example, if `has_payment` is false, say which evidence fields must be null; if a score runs from 0 to 5, define 0, the middle, and 5.
 
-Keep the prompt as static as possible. Doctrail renders the prompt first, adds schema instructions there for JSON-mode paths or sends provider-native schema payloads as constant request structure, and appends per-row `input_columns` content last. OpenAI automatic prompt caching and Gemini implicit caching on Gemini 2.5 and newer models can bill repeated prefix tokens at cached-input rates when the provider reports a cache hit, though Gemini does not guarantee savings on every request. Doctrail does not currently set Anthropic `cache_control` markers.
+Keep the prompt as static as possible. Doctrail renders the prompt first, adds schema instructions there for JSON-mode paths or sends provider-native schema payloads as constant request structure, and appends per-row `input_columns` content last. OpenAI automatic prompt caching and Gemini implicit caching on Gemini 2.5 and newer models can bill repeated prefix tokens at cached-input rates when the provider reports a cache hit, though Gemini does not guarantee savings on every request. For direct Anthropic models, Doctrail sends the static prompt as its own block marked with `cache_control`, so Anthropic can bill it at the cached rate on later rows.
+
+Prefer `input_columns` with `:N` truncation, such as `raw_content:3000`, over `{column}` interpolation inside the prompt. Placeholders still work, but a row-specific token breaks the shared prompt prefix there, so everything after it re-bills at full input price per row. If one is truly needed, put it at the very end.
 
 ## Self-hosted runtime limits
 
@@ -520,8 +509,6 @@ context_window: 32768
 ```
 
 `concurrency` must be at least 1. `max_tokens` is a hard per-response limit. `context_window` should match the model server and is used when `doctrail enrich --truncate` calculates how much input can fit. Enrichment-level values take precedence over project-level values.
-
-Prefer `input_columns` with `:N` truncation, such as `raw_content:3000`, over `{column}` interpolation inside the prompt. Placeholders still work, but a row-specific token breaks the shared prompt prefix there, so everything after it re-bills at full input price per row. If one is truly needed, put it at the very end.
 
 ## Token economy pattern
 
@@ -634,7 +621,7 @@ enrichments:
 
 ## Config key stability
 
-Batch 4 inventory source: `.get(...)` and direct config reads across `src/doctrail/`.
+Stability notes for the main config keys. Keys used elsewhere on this page, such as `concurrency` and `max_tokens`, and the HTML keys on the [HTML profiles](https://doctrail.org/html/) page, are not listed.
 
 | Key | Status | Note |
 | --- | --- | --- |
@@ -779,6 +766,8 @@ Scopes:
 ## Views
 
 Run views show one persisted run in wide form. They are best for pilot runs, final runs, and human review.
+
+A run view shows the answers currently assigned to its run. Rerunning the same rows with `--overwrite`, under the same model and prompt, moves those answers to the new run, so they drop out of the earlier run's view. To keep a fixed review set, materialize it with `doctrail finalize` before overwriting.
 
 Pivot views build reusable wide analysis surfaces over normalized enrichments.
 
@@ -1107,9 +1096,14 @@ Usage: doctrail ingest [OPTIONS]
   Supported local file types: txt/md; csv/tsv; pdf; epub; mobi; doc; rtf; docx; xlsx; xls; pptx;
   ppt; djvu; mhtml/mht; html/htm; png/jpg/jpeg/gif/bmp/tiff/tif; zip.
 
-  Examples:     doctrail ingest --input-dir ./docs --db-path ./data.db     doctrail ingest --zotero
-  --collection "Papers" --db-path ./lit.db     doctrail ingest --plugin zotero --collection "My
-  Research"
+  Saved web pages: the native engine keeps the main article and the Python engine keeps the whole
+  page. --html-mode chooses, and --html-profile tunes full mode for one collection:
+  https://doctrail.org/html/
+
+  Examples:
+      doctrail ingest --input-dir ./docs --db-path ./data.db
+      doctrail ingest --zotero --collection "Papers" --db-path ./lit.db
+      doctrail ingest --plugin zotero --collection "My Research"
 
 Options:
   --config TEXT                   Path to the configuration YAML file
@@ -1133,12 +1127,14 @@ Options:
                                   OCR backend when OCR is needed
   --extractor [auto|rust|python]  Extraction engine: auto uses the native build when present, else
                                   python; rust requires the native build
-  --readability                   Use readability for HTML
-  --html-mode [article|full]      HTML text: article (readability; the native default) or full (the
-                                  whole page)
-  --html-profile FILE             YAML file of full-mode cruft rules: keep_selectors,
-                                  drop_selectors, drop_line_patterns, reject_low_value
+  --readability                   Article text for HTML; the same as --html-mode article
+  --html-mode [article|full]      HTML and MHTML text: article (the main article; the native
+                                  default) or full (the whole page). See https://doctrail.org/html/
+  --html-profile FILE             YAML rules that tune full-mode HTML text for one collection; needs
+                                  the native engine. See https://doctrail.org/html/
   --html-extractor [default|smart]
+                                  Python engine HTML text: default, or smart to keep paragraphs
+                                  together in both modes
   --skip-garbage-check            Skip garbage detection
   --skip-embedded-media           Skip embedded Office image extraction and OCR
   -y, --yes                       Skip prompts
@@ -1332,55 +1328,7 @@ Options:
 
 ### doctrail run
 
-```text
-Usage: doctrail run [OPTIONS] [ENRICHMENT_NAMES]...
-
-  Enrich database content using LLM processing.
-
-  Run enrichments by name:     doctrail enrich language     doctrail enrich language summarize
-
-  In a doctrail project (.doctrail/ folder), enrichments are loaded from
-  .doctrail/enrichments/<name>.yml and merged with .doctrail/config.yml. Model outputs are written
-  to normalized tables; use `doctrail view create` or `doctrail view pivot` to inspect them in a
-  wide, human-readable form.
-
-Options:
-  --config TEXT                   Path to config YAML (auto-detects .doctrail/config.yml)
-  --enrichments TEXT              (Legacy) Enrichment task names
-  --limit INTEGER                 Limit number of rows to process
-  --overwrite                     Overwrite existing data in output columns
-  --verbose                       Enable verbose logging
-  --log-updates                   Log updates to a file
-  --model TEXT                    Override the default model for all enrichments
-  --db-path TEXT                  Override the database path from config
-  --output-db TEXT                Write enrichments to this database instead of the source database
-  --batch-size INTEGER            Override batch size for processing
-  --rowid INTEGER                 Process only a specific row by rowid
-  --sha1 TEXT                     Process only a specific row by sha1 hash
-  --truncate                      Truncate long inputs to fit model context window instead of
-                                  failing
-  --skip-cost-check               Skip cost estimation and confirmation
-  --cost-threshold FLOAT          Cost threshold for confirmation prompt (default: $5.00)
-  --where TEXT                    Filter the enrichment query with an outer SQL WHERE predicate
-  --query TEXT                    Replace the SQL query from config entirely
-  --project TEXT                  Tag enrichments with a project name for filtering (e.g.,
-                                  mock_compliance)
-  --dry-run                       Preview without calling LLM: show row counts, schema, and sample
-                                  input
-  --dedupe-scope [query|prompt|enrichment|name]
-                                  Append-mode dedupe scope. Overrides per-enrichment dedupe_scope.
-  --materialize-inputs / --no-materialize-inputs
-                                  Persist the exact input rowset for each run
-  --execution-mode [sync|batch|openai-batch]
-                                  How to execute the enrichment work. batch maps direct OpenAI
-                                  models to /v1/batches -> /v1/chat/completions, direct Claude
-                                  models to /v1/messages/batches -> /v1/messages, and direct Gemini
-                                  models to File API upload ->
-                                  /v1beta/models/{model}:batchGenerateContent. openai-batch is
-                                  accepted as a legacy alias.  [default: sync]
-  --allow-column-collision        Allow enrichment field names that match source table columns
-  --help                          Show this message and exit.
-```
+Alias of `doctrail enrich`.
 
 ### doctrail runs
 

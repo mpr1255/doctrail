@@ -45,7 +45,9 @@ nav:
   - Tutorial: tutorial.md
   - Code books: yaml.md
   - Data model: data-model.md
-  - Reference: cli.md
+  - Reference:
+      - CLI: cli.md
+      - HTML profiles: html.md
 
 validation:
   nav:

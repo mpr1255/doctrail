@@ -24,7 +24,7 @@ The rest of this page explains what it gets you, and how to drive doctrail yours
 
 ## See it work, no API key needed
 
-Before pointing it at your own files or spending a cent, run the tutorial:
+Before pointing it at your own files or spending a cent, run the tutorial in a fresh empty directory:
 
 ```bash
 doctrail init test
@@ -47,6 +47,8 @@ doctrail enrich <name> --dry-run
 doctrail enrich <name> --limit 5
 ```
 
+Each code book is a file `.doctrail/enrichments/<name>.yml` whose `name:` matches the file name. Its `input.query` names a query from `sql_queries` in `.doctrail/config.yml`, such as the `all_docs` query that `init` writes, or holds SQL directly. `doctrail new` writes a code book for you. To run `init` without prompts, as an agent would, use `doctrail init --yes --provider anthropic` (or `openai`, `gemini`, `openrouter`); it needs that provider's key in the environment or `--api-key`.
+
 If you would rather not learn the commands, you do not have to: install doctrail, then tell your agent to run `doctrail` and order it around.
 
 ### PDF text extraction
@@ -55,7 +57,7 @@ PDF text is extracted with `pdftotext` from Poppler, which doctrail cannot bundl
 
 ### Scanned documents and OCR
 
-Ingest sends scanned PDFs and images through OCR. By default it uses local tools (`textra` on macOS, `ocrmypdf` elsewhere). If you run your own OCR service — for example Apple Vision OCR served from Macs you control — point doctrail at it with `--ocr-engine mac-ocr` and a comma-separated endpoint list:
+Ingest sends scanned PDFs and images through OCR. By default it uses local tools when they are installed: [`textra`](https://github.com/freedmand/textra) on macOS (with `mutool` for PDFs), then `ocrmypdf` for PDFs and `tesseract` for images. Doctrail does not install these tools; without one, scanned pages yield no text. If you run your own OCR service — for example Apple Vision OCR served from Macs you control — point doctrail at it with `--ocr-engine mac-ocr` and a comma-separated endpoint list:
 
 ```dotenv
 MAC_OCR__SERVICE_ENDPOINTS=https://ocr-1.example.com,https://ocr-2.example.com
@@ -79,32 +81,19 @@ git clone https://github.com/mpr1255/doctrail && cd doctrail && make native
 
 This compiles the extension and drops it into the package. It is never shipped in the wheel: the build statically embeds MuPDF, which is licensed under the AGPL-3.0 while the published package is MIT, so the native engine is a local build rather than a distributed binary.
 
-In practice the native engine is between about 2x and 15x faster, depending on the corpus mix. Measured on an Apple M1 Max (10 cores), both engines on the identical corpus, with no external OCR service configured in either run. On a mixed 1,000-file corpus (500 PDF, 300 HTML, 150 DOCX, 50 DOC), the extraction phase took approximately 34s native against 64s for the Python engine with 8 workers — about 1.9x — with comparable peak memory, roughly 0.7 GB against 0.5 GB. An earlier measurement of the extraction step alone, on a 968-file PDF-heavy sample, took 5.7s native on all cores against 83.5s Python on 8 threads, about 14.6x. Both measurements predate pdftotext becoming the default PDF extractor; they used MuPDF in both engines, so PDF-heavy timings will differ now.
+On an Apple M1 Max, the native engine ingested a mixed 1,000-file corpus about 1.9 times as fast as the Python engine, and extracted a PDF-heavy sample about 15 times as fast; both measurements predate `pdftotext` as the default PDF extractor. The end-to-end gain is smaller than the extraction gain because both engines share the hashing, SQLite writes, and Office media handling. The native engine is also stricter: it fails fast on unreadable files and flags them for OCR instead of retrying, which suits corpora of hundreds of thousands of messy files.
 
-The two numbers differ because end-to-end ingest time is bounded by work both engines share: file hashing, SQLite writes, and embedded Office media handling. The wall-clock advantage on mixed corpora is therefore modest, and it grows with corpus size and with the share of text-layer PDFs, where the extraction step dominates. The native engine is also stricter: it fails fast on unreadable files and flags them for OCR instead of retrying, which is the behavior you want at the scale of hundreds of thousands of messy files.
+### Saved web pages
 
-### HTML text: article or full
+Much research data is web pages saved as HTML or MHTML, and doctrail tunes how it reads them more heavily than any other format. Article text sits beside menus, download links, and lists of related records, and each site lays these out differently, so the reader can be tuned to each collection.
 
-HTML and MHTML pages can be read in two modes. `--html-mode article` keeps the main article and drops the rest of the page; it is the native engine's default. `--html-mode full` keeps all visible text, including navigation, sidebars, and footers. In the native engine, full mode also keeps image alt text, puts every table cell on its own line, leaves out scripts, styles, and link footnotes, and never splits a paragraph across lines, so phrase and trigram searches work across the whole paragraph. The Python engine's full mode is its BeautifulSoup text, which starts a new line at every tag and drops alt text. Without the flag each engine keeps its default: article text in the native engine, full text in the Python engine. Each row records the mode that produced it in `html_mode`. `--readability` cannot be combined with full mode.
+The defaults need no setup. The native engine keeps the main article and the Python engine keeps the whole page; choose with `--html-mode article` or `--html-mode full`:
 
-Full mode takes per-corpus rules from a YAML profile, passed with `--html-profile FILE`; a profile on its own implies full mode. The four keys are:
-
-1. `keep_selectors`: CSS selectors for the parts of the page to keep. The outermost matches are kept once each, in page order. If nothing matches, the whole page is kept and the row records `html_keep_selectors_matched` as 0.
-2. `drop_selectors`: CSS selectors for elements to remove, including inside kept parts.
-3. `drop_line_patterns`: regular expressions; any output line that matches one is removed.
-4. `reject_low_value`: when true, login pages, HTTP error templates, and navigation-only pages are stored empty, as in article mode. It defaults to false in full mode, which keeps their text and records the reason in `html_low_value_reason`.
-
-```yaml
-keep_selectors: ["#main"]
-drop_selectors: ["#MapArea", ".zwjdown"]
-drop_line_patterns: ["^HTML阅读$"]
+```bash
+doctrail ingest --input-dir ./pages --html-mode full --yes
 ```
 
-`examples/html-profiles/cnki-detail.yml` is a worked profile for CNKI article pages. Profile rules need the native engine; the Python engine accepts only the mode. A bad selector or regular expression stops the ingest before any file is read. A page the native renderer cannot handle, such as one nested beyond the safety limit, is recorded as failed when a profile has rules, because the fallback extractors cannot apply them. A page the rules leave empty is skipped. The project config accepts the same settings as `html_mode` and `html_profile`.
-
-To find what a profile should remove, list your HTML files one per line and run `uv run python scripts/html_mode_report.py --paths files.txt` from a source checkout. It compares the modes, then prints the lines repeated across the most files, which are usually site chrome; add `--profile FILE` to see what is left after the profile.
-
-Native full-mode rows also record the profile in `html_config`, the counts `html_nodes_dropped` and `html_lines_dropped`, and `extraction_method` `rust:html_full` or `rust:mhtml_full`. Ingest skips files already in the table, so rerun with `--overwrite` to re-extract them in another mode.
+To strip a site's menus and boilerplate, write a YAML profile of CSS selectors and line patterns and pass it with `--html-profile`. The rules need the native engine. The [HTML profile reference](https://doctrail.org/html/) lists every option and shows how to build a profile from a sample. Rerun with `--overwrite` to re-extract files already ingested.
 
 ## Before real model calls
 

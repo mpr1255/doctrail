@@ -158,21 +158,5 @@ def test_cli_help_uses_post_rename_names():
 
 def test_llms_full_is_fresh():
     module = _load_build_llms_module()
-    config = yaml.load((ROOT / "mkdocs.yml").read_text(encoding="utf-8"), Loader=module._MkdocsLoader)
-    manual_paths = list(module.iter_manual_paths(config.get("nav", [])))
-    parts = [
-        "# Doctrail full manual",
-        "",
-        "Generated from mkdocs navigation by `scripts/build_llms_full.py`.",
-        "",
-    ]
-    for rel_path in manual_paths:
-        if rel_path == module.CLI_DOC:
-            text = module.render_cli_reference()
-        else:
-            text = (DOCS / rel_path).read_text(encoding="utf-8").strip()
-        parts.extend([f"<!-- {rel_path} -->", "", text, ""])
-
-    expected = "\n".join(parts).rstrip() + "\n"
     actual = (DOCS / "llms.txt").read_text(encoding="utf-8")
-    assert actual == expected, "docs/llms.txt is stale; run uv run python scripts/build_llms_full.py"
+    assert actual == module.render_manual(), "docs/llms.txt is stale; run uv run python scripts/build_llms_full.py"
