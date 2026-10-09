@@ -1135,12 +1135,12 @@ def init(
             "write_env_var": "OPENAI_API_KEY",
         },
         "gemini": {
-            "model": "gemini-1.5-flash",
+            "model": "gemini-2.5-flash",
             "env_vars": ["GOOGLE_API_KEY", "GEMINI_API_KEY", "GOOGLE_AI_API_KEY"],
             "write_env_var": "GOOGLE_API_KEY",
         },
         "anthropic": {
-            "model": "claude-3-5-haiku-latest",
+            "model": "claude-haiku-4-5",
             "env_vars": ["ANTHROPIC_API_KEY"],
             "write_env_var": "ANTHROPIC_API_KEY",
         },

@@ -86,7 +86,7 @@ class TestInitCommand:
             config_content = Path(".doctrail/config.yml").read_text()
             env_content = Path(".env").read_text()
 
-            assert "gemini-1.5-flash" in config_content
+            assert "gemini-2.5-flash" in config_content
             assert "GOOGLE_API_KEY=AIza-test-key" in env_content
 
     def test_init_with_specific_enrichments(self, tmp_path):
@@ -202,7 +202,7 @@ class TestInitCommand:
             )
 
             assert result.exit_code == 0
-            assert "claude-3-5-haiku-latest" in Path(".doctrail/config.yml").read_text()
+            assert "claude-haiku-4-5" in Path(".doctrail/config.yml").read_text()
             assert "ANTHROPIC_API_KEY=sk-ant-test" in Path(".env").read_text()
 
     def test_init_fallback_selection_reports_invalid_numbers(self, tmp_path, monkeypatch):
@@ -257,7 +257,7 @@ class TestInitCommand:
             config_text = Path(".doctrail/config.yml").read_text()
             env_text = Path(".env").read_text()
             # Explicit --provider anthropic must win
-            assert "claude-3-5-haiku-latest" in config_text, config_text
+            assert "claude-haiku-4-5" in config_text, config_text
             assert "ANTHROPIC_API_KEY=sk-ant-env" in env_text
             # The pre-existing OpenAI line is left alone
             assert "OPENAI_API_KEY=sk-openai-existing" in env_text
