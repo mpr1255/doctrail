@@ -1,6 +1,6 @@
 use anyhow::Result;
 use chardetng::EncodingDetector;
-use encoding_rs::{Encoding, UTF_8};
+use encoding_rs::{Encoding, UTF_8, WINDOWS_1252};
 use serde_json::{json, Map, Value};
 use std::borrow::Cow;
 use std::time::{Duration, Instant};
@@ -158,15 +158,32 @@ fn decode_text_bytes<'a>(data: &'a [u8], mime_type: Option<&str>) -> TextDecodeR
         }
     }
 
+    if crate::is_mostly_utf8(data) {
+        let (text, _, had_errors) = UTF_8.decode(data);
+        return TextDecodeResult {
+            encoding_name: UTF_8.name(),
+            decoded: text,
+            source: "mostly_utf8",
+            declared_encoding,
+            had_errors,
+        };
+    }
+
     let prefix = &data[..data.len().min(10_000)];
     let mut detector = EncodingDetector::new();
     detector.feed(prefix, prefix.len() == data.len());
-    let encoding = detector.guess(None, true);
+    let (encoding, source) = match detector.guess(None, true) {
+        guess if guess == WINDOWS_1252 => match crate::rescue_legacy_cjk(data) {
+            Some(rescued) => (rescued, "legacy_cjk_rescue"),
+            None => (guess, "chardetng"),
+        },
+        guess => (guess, "chardetng"),
+    };
     let (text, _, had_errors) = encoding.decode(data);
     TextDecodeResult {
         encoding_name: encoding.name(),
         decoded: text,
-        source: "chardetng",
+        source,
         declared_encoding,
         had_errors,
     }
@@ -277,6 +294,16 @@ mod tests {
             document.extraction_metadata["content_extraction"]["encoding"],
             "UTF-16LE"
         );
+    }
+
+    #[test]
+    fn utf8_with_a_few_bad_bytes_stays_utf8() {
+        let mut data = "公园开放时间：上午六点至晚上十点。\n".repeat(20).into_bytes();
+        data.insert(97, 0x8d);
+        let decoded = decode_text_bytes(&data, Some("text/plain"));
+
+        assert_eq!(decoded.source, "mostly_utf8");
+        assert!(decoded.decoded.starts_with("公园开放时间"));
     }
 
     #[test]

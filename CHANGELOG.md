@@ -5,6 +5,8 @@
 ### Fixes
 
 - Every ingest ran a timestamp backfill that scanned the whole table, which on a 13 GB database took about five minutes per run. The backfill now runs only when it adds the `added_at` column, and re-ingesting 400 files into that database takes about 16 seconds.
+- Text and HTML files that are UTF-8 apart from a few stray bytes, as when saved pages were cut or joined mid-character, were read as Windows-1252, because one invalid byte rules UTF-8 out for the encoding detector. The native engine now reads such a file as UTF-8 when valid multi-byte characters outnumber the invalid sequences twenty to one, far more than text in a legacy encoding forms by chance.
+- Chinese, Japanese, or Korean text in a legacy encoding with a few corrupt bytes, as in recovered or hard-wrapped files, was read as Windows-1252 for the same reason. The native engine now decodes such text with each CJK encoding that the bad bytes ruled out. It keeps an encoding only if that encoding has the fewest errors, under 2% of the non-ASCII bytes, and the detector picks it once the bad bytes are removed. On 1,990 saved pages and text files in eleven other languages, it changed one file, which was Chinese. Rows ingested before either fix keep their misdecoded text until re-ingested with `--overwrite`.
 
 ## 0.3.6 - full-page HTML mode and HTML profiles
 

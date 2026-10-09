@@ -1,7 +1,9 @@
 use anyhow::{anyhow, Context, Result};
 use base64::{engine::general_purpose, Engine as _};
 use chardetng::EncodingDetector;
-use encoding_rs::{Encoding, GBK, UTF_16BE, UTF_16LE, UTF_8};
+use encoding_rs::{
+    Encoding, BIG5, EUC_JP, EUC_KR, GBK, SHIFT_JIS, UTF_16BE, UTF_16LE, UTF_8, WINDOWS_1252,
+};
 use kuchikikiki::traits::*;
 use mail_parser::{Encoding as MimeEncoding, Message, MessageParser, MessagePart, MimeHeaders};
 use mimetype_detector::detect as detect_mime_type;
@@ -2627,17 +2629,96 @@ fn decode_html_bytes_with_hint<'a>(
                 had_errors: false,
             };
         }
+        if is_mostly_utf8(data) {
+            return HtmlDecodeResult {
+                encoding_name: UTF_8.name(),
+                decoded: utf8_text,
+                source: "mostly_utf8",
+                declared_encoding,
+                had_errors: true,
+            };
+        }
     }
 
-    let encoding = sniff_encoding(data);
+    let (encoding, source) = match sniff_encoding(data) {
+        guess if guess == WINDOWS_1252 => match rescue_legacy_cjk(data) {
+            Some(rescued) => (rescued, "legacy_cjk_rescue"),
+            None => (guess, "chardetng"),
+        },
+        guess => (guess, "chardetng"),
+    };
     let (text, _, had_errors) = encoding.decode(data);
     HtmlDecodeResult {
         encoding_name: encoding.name(),
         decoded: text,
-        source: "chardetng",
+        source,
         declared_encoding,
         had_errors,
     }
+}
+
+/// UTF-8 with a few stray bytes, as when saved pages are joined mid-character.
+/// One bad byte rules UTF-8 out for the detector, which then reads the rest as
+/// Windows-1252. Legacy encodings such as GBK or Windows-1252 form far more
+/// invalid sequences than accidental valid ones, so they never pass this test.
+pub(crate) fn is_mostly_utf8(data: &[u8]) -> bool {
+    let (mut errors, mut multibyte) = (0usize, 0usize);
+    let mut rest = data;
+    loop {
+        let (valid, error_len) = match std::str::from_utf8(rest) {
+            Ok(valid) => (valid, None),
+            Err(error) => {
+                errors += 1;
+                let valid = std::str::from_utf8(&rest[..error.valid_up_to()]).unwrap_or_default();
+                (valid, Some((error.valid_up_to(), error.error_len())))
+            }
+        };
+        multibyte += valid.chars().filter(|ch| ch.len_utf8() > 1).count();
+        match error_len {
+            Some((start, Some(len))) => rest = &rest[start + len..],
+            _ => break,
+        }
+    }
+    errors > 0 && errors.saturating_mul(20) <= multibyte
+}
+
+/// Legacy CJK text with a few corrupt bytes, as in recovered or truncated files.
+/// The detector drops an encoding at its first invalid sequence and then falls
+/// back to Windows-1252. Decode with each CJK candidate the bytes rule out, and
+/// keep those with the fewest errors, under 2% of the non-ASCII bytes. Re-encode
+/// so the bad sequences become valid, and accept a candidate only if the
+/// detector picks it for the cleaned bytes. A candidate without errors was
+/// already weighed and refused by the detector. GBK reads most Big5 byte pairs
+/// without error, so it is the detector, not the error count, that separates
+/// those two.
+pub(crate) fn rescue_legacy_cjk(data: &[u8]) -> Option<&'static Encoding> {
+    let prefix = &data[..data.len().min(10_000)];
+    let non_ascii = prefix.iter().filter(|byte| **byte >= 0x80).count();
+    if non_ascii < 200 {
+        return None;
+    }
+    let decoded = [GBK, BIG5, SHIFT_JIS, EUC_KR, EUC_JP].map(|encoding| {
+        let (text, _, _) = encoding.decode(prefix);
+        let errors = text.matches('\u{FFFD}').count();
+        (encoding, text, errors)
+    });
+    let fewest = decoded
+        .iter()
+        .map(|(_, _, errors)| *errors)
+        .filter(|errors| *errors > 0)
+        .min()?;
+    if fewest.saturating_mul(50) > non_ascii {
+        return None;
+    }
+    decoded
+        .into_iter()
+        .filter(|(_, _, errors)| *errors == fewest)
+        .find_map(|(encoding, text, _)| {
+            let (clean, _, _) = encoding.encode(&text);
+            let mut detector = EncodingDetector::new();
+            detector.feed(&clean, true);
+            (detector.guess(None, false) == encoding).then_some(encoding)
+        })
 }
 
 /// Guess an encoding from the first 10,000 bytes. The prefix is marked as the
@@ -5136,6 +5217,51 @@ Content-Location: http://example.test/
             "A 404 means the server found no resource at the requested path; check links, redirects, and the server's routing rules. ".repeat(20)
         );
         assert!(!looks_like_http_error_template(&article));
+    }
+
+    #[test]
+    fn legacy_cjk_with_a_few_corrupt_bytes_is_rescued() {
+        let chinese = "城市公园的开放时间与维护方式各不相同，管理部门需要定期评估游客数量与设施状况。".repeat(8);
+        let (gbk, _, _) = GBK.encode(&chinese);
+        // A tool that hard-wrapped the text replaced the second byte of a few
+        // two-byte characters with a line break.
+        let mut corrupt = gbk.to_vec();
+        for at in [451, 301, 151] {
+            corrupt.splice(at..at + 1, *b"\r\n\t");
+        }
+        assert_eq!(sniff_encoding(&corrupt), WINDOWS_1252, "the detector alone gives up on GBK");
+        assert_eq!(rescue_legacy_cjk(&corrupt), Some(GBK));
+        let decoded = decode_html_bytes(&corrupt);
+        assert_eq!(decoded.source, "legacy_cjk_rescue");
+        assert!(decoded.decoded.contains("城市公园"));
+
+        let traditional = "城市公園的開放時間與維護方式各不相同，管理部門需要定期評估遊客數量與設施狀況。".repeat(8);
+        let (big5, _, _) = BIG5.encode(&traditional);
+        let mut corrupt = big5.to_vec();
+        for at in [451, 301, 151] {
+            corrupt.splice(at..at + 1, *b"\r\n\t");
+        }
+        assert_eq!(rescue_legacy_cjk(&corrupt), Some(BIG5));
+
+        let french = "Le comité a décidé que l'été serait réservé aux fêtes, à côté du marché. ".repeat(24);
+        let (latin, _, _) = WINDOWS_1252.encode(&french);
+        assert_eq!(rescue_legacy_cjk(&latin), None);
+    }
+
+    #[test]
+    fn utf8_with_a_stray_byte_stays_utf8() {
+        let mut joined = b"<html><body><form>Please enter your username</form></body></html>\n\xba".to_vec();
+        joined.extend("<p>城市公园的开放时间与维护方式各不相同，管理部门需要定期评估游客数量。</p>".repeat(3).as_bytes());
+        let decoded = decode_html_bytes(&joined);
+        assert_eq!(decoded.source, "mostly_utf8");
+        assert!(decoded.decoded.contains("城市公园"));
+
+        let chinese = "城市公园的开放时间与维护方式各不相同。".repeat(6);
+        let (gbk, _, _) = GBK.encode(&chinese);
+        assert!(!is_mostly_utf8(&gbk));
+        let french = "Le café est fermé l'été. ".repeat(10);
+        let (latin, _, _) = encoding_rs::WINDOWS_1252.encode(&french);
+        assert!(!is_mostly_utf8(&latin));
     }
 
     #[test]
