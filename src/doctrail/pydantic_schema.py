@@ -180,7 +180,7 @@ def yaml_to_pydantic_type(
         "maxLength": "max_length",
         "minItems": "min_length",  # For arrays
         "maxItems": "max_length",  # For arrays
-        "pattern": "regex",
+        "pattern": "pattern",
     }
     
     for yaml_key, pydantic_key in constraint_mapping.items():
