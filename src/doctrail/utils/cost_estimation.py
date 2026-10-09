@@ -223,8 +223,16 @@ def estimate_enrichment_cost(
     # Estimate input tokens
     # Build a sample prompt with the template and sample data
     sample_prompt = prompt_template
+    appended = []
     for col_name, col_value in input_columns_sample.items():
-        sample_prompt = sample_prompt.replace(f"{{{col_name}}}", str(col_value))
+        placeholder = f"{{{col_name}}}"
+        if placeholder in sample_prompt:
+            sample_prompt = sample_prompt.replace(placeholder, str(col_value))
+        else:
+            # Columns without a placeholder are sent after the prompt.
+            appended.append(f"{col_name}: {col_value}")
+    if appended:
+        sample_prompt += "\n\n" + "\n\n".join(appended)
     
     # Add system prompt overhead (structured output instructions)
     system_overhead = 200  # Approximate tokens for system instructions

@@ -555,5 +555,45 @@ def test_validate_model_rejects_openai_model_outside_batch_catalog(monkeypatch):
     assert not validate_model("gpt-5-codex", execution_mode="openai-batch")
 
 
+
+def test_estimate_counts_input_columns_without_placeholders(monkeypatch):
+    """Columns sent after the prompt cost input tokens like placeholders do."""
+    import doctrail.utils.cost_estimation as cost_utils
+
+    monkeypatch.setattr(cost_utils, "get_model_price", lambda model: (1.0, 1.0))
+
+    def input_tokens(text):
+        _, breakdown = estimate_enrichment_cost(
+            model="gpt-4o-mini",
+            prompt_template="Classify the document.",
+            input_columns_sample={"raw_content": text},
+            schema={"label": {"enum": ["a", "b"]}},
+            num_rows=1,
+            rows_to_process=1,
+        )
+        return breakdown["input_tokens_per_row"]
+
+    assert input_tokens("word " * 2000) > input_tokens("word") + 1500
+
+
+def test_enrichment_estimate_applies_limits_and_prices_the_mean_row(monkeypatch):
+    import doctrail.core_runtime.commands as commands
+
+    seen = {}
+
+    def fake_estimate(**kwargs):
+        seen.update(kwargs)
+        return 0.0, {}
+
+    monkeypatch.setattr(commands, "estimate_enrichment_cost", fake_estimate)
+    rows = [{"raw_content": "x" * size, "title": "t"} for size in (10, 100, 5000)]
+    config = {"input": {"input_columns": ["raw_content:300", "title"]}, "prompt": "p"}
+
+    commands._estimate_enrichment_cost(config, rows, "gpt-4o-mini", rows_to_process=3)
+
+    # Limited lengths are 10, 100 and 300 (mean 137), so the 100-character row stands in.
+    assert seen["input_columns_sample"] == {"raw_content": "x" * 100, "title": "t"}
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

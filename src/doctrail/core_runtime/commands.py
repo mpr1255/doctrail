@@ -491,18 +491,26 @@ def _estimate_enrichment_cost(
     """Estimate cost for enrichment operation."""
 
     input_columns = enrichment_config['input'].get('input_columns', [])
-    sample_row = results[0] if results else {}
+    if isinstance(input_columns, str):
+        input_columns = [input_columns]
+    parsed_columns = parse_input_columns_with_limits(input_columns)
 
-    # Parse input columns for sample
-    input_columns_sample = {}
-    for col in input_columns:
-        col_name = col.split(':')[0]
-        if '.' in col_name:
-            _, col_only = col_name.split('.', 1)
-            if col_only in sample_row:
-                input_columns_sample[col_name] = sample_row[col_only]
-        elif col_name in sample_row:
-            input_columns_sample[col_name] = sample_row[col_name]
+    def row_sample(row: Dict[str, Any]) -> Dict[str, str]:
+        sample = {}
+        for col_name, limit in parsed_columns:
+            key = col_name.split('.', 1)[1] if '.' in col_name else col_name
+            if key in row:
+                value = "" if row[key] is None else str(row[key])
+                sample[col_name] = value[:limit] if limit else value
+        return sample
+
+    # The cost scales with the mean row, so price the row nearest the mean length.
+    samples = [row_sample(row) for row in results] or [{}]
+    lengths = [sum(map(len, sample.values())) for sample in samples]
+    mean_length = sum(lengths) / len(lengths)
+    input_columns_sample = samples[
+        min(range(len(samples)), key=lambda index: abs(lengths[index] - mean_length))
+    ]
 
     prompt_template = enrichment_config.get('prompt', '')
     schema = enrichment_config.get('schema', {})
