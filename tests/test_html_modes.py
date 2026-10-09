@@ -17,9 +17,9 @@ from doctrail.ingest.core import process_ingest
 PAGE = (
     "<html><head><title>Notice</title></head><body>"
     "<nav>Home | Open government | Services</nav>"
-    "<article><h1>Organ donation notice</h1>"
-    "<p>District health commissions should report progress on organ donation "
-    "and transplantation work every quarter, starting this year.</p></article>"
+    "<article><h1>Park opening notice</h1>"
+    "<p>District park offices should report visitor numbers and maintenance "
+    "work every quarter, starting this year.</p></article>"
     "<footer>Copyright city health commission</footer></body></html>"
 )
 
@@ -103,7 +103,7 @@ async def test_python_engine_full_mode_keeps_the_whole_page(tmp_path):
     with sqlite3.connect(db_path) as conn:
         content = conn.execute("SELECT raw_content FROM documents").fetchone()[0]
     assert "Open government" in content
-    assert "report progress on organ donation" in content
+    assert "report visitor numbers" in content
     assert "Copyright city health commission" in content
 
 

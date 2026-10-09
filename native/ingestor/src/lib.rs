@@ -4978,7 +4978,7 @@ Content-Location: http://example.test/
         let head = r#"<html><head><META http-equiv="Content-Type" content="text/html; charset=utf-16"><script>var x = '"#;
         let padding = "a".repeat(9_999 - head.len());
         let mut bytes = format!(
-            "{head}{padding}中';</script><title>免疫抑制剂研究进展</title></head><body><article><p>{body}</p></article></body></html>"
+            "{head}{padding}中';</script><title>城市公园管理研究进展</title></head><body><article><p>{body}</p></article></body></html>"
         )
         .into_bytes();
         // An even length lets the UTF-16 decode finish without errors.
@@ -4991,12 +4991,12 @@ Content-Location: http://example.test/
     #[test]
     fn html_meta_utf16_on_utf8_bytes_decodes_as_utf8() {
         let bytes = utf16_declared_utf8_page(
-            "婴幼儿胸腺发育尚未成熟，细胞免疫和体液免疫功能低下，是感染和肿瘤等免疫缺陷性疾病的高发年龄组。这段正文足够长，可以进入索引。",
+            "城市公园的开放时间与维护方式各不相同，管理部门需要定期评估游客数量与设施状况。这段正文足够长，可以进入索引。",
         );
         let extracted =
             extract_html_bytes(&bytes, Some("detail.aspx.html"), &HtmlConfig::default()).unwrap();
-        assert_eq!(extracted.title, "免疫抑制剂研究进展");
-        assert!(extracted.content.contains("婴幼儿胸腺发育尚未成熟"));
+        assert_eq!(extracted.title, "城市公园管理研究进展");
+        assert!(extracted.content.contains("城市公园的开放时间"));
         assert!(!extracted.content.contains("瑨汭"));
         assert_eq!(
             extracted.extraction_metadata["content_extraction"]["encoding"],
@@ -5013,14 +5013,14 @@ Content-Location: http://example.test/
     #[test]
     fn html_meta_utf16_with_invalid_utf8_byte_decodes_as_utf8() {
         let mut bytes = utf16_declared_utf8_page(
-            "婴幼儿胸腺发育尚未成熟，细胞免疫和体液免疫功能低下，是感染和肿瘤等免疫缺陷性疾病的高发年龄组。这段正文足够长，可以进入索引。",
+            "城市公园的开放时间与维护方式各不相同，管理部门需要定期评估游客数量与设施状况。这段正文足够长，可以进入索引。",
         );
         let at = bytes.len() - 20;
         bytes.insert(at, 0xff);
         bytes.insert(at, b' ');
         let decoded = decode_html_bytes(&bytes);
         assert_eq!(decoded.encoding_name, "UTF-8");
-        assert!(decoded.decoded.contains("婴幼儿胸腺发育尚未成熟"));
+        assert!(decoded.decoded.contains("城市公园的开放时间"));
     }
 
     #[test]
@@ -5481,17 +5481,17 @@ Content-Location: http://example.test/xml
         assert!(pathological_markup_reason(&js).is_none());
     }
 
-    const FULL_PAGE: &str = r#"<html><head><title>市卫健委通知</title><style>.x { color: red }</style><script>var tracking = 1;</script></head>
+    const FULL_PAGE: &str = r#"<html><head><title>市园林局通知</title><style>.x { color: red }</style><script>var tracking = 1;</script></head>
 <body>
 <nav class="site-nav"><a href="/">首页</a> <a href="/gk">政务公开</a></nav>
-<div id="content"><h1>关于器官捐献工作的通知</h1>
-<p>各区卫生健康委：为进一步规范人体器官捐献与移植工作，现将有关事项通知如下。<strong>请认真贯彻落实</strong>。</p>
-<img src="chart.png" alt="捐献人数统计图">
-<table><tr><th>年份</th><th>捐献例数</th></tr><tr><td>2019</td><td>5818</td></tr></table>
+<div id="content"><h1>关于公园开放时间调整的通知</h1>
+<p>各区园林绿化局：为进一步规范公园开放管理工作，现将有关事项通知如下。<strong>请认真贯彻落实</strong>。</p>
+<img src="chart.png" alt="游客人数统计图">
+<table><tr><th>年份</th><th>游客人次</th></tr><tr><td>2019</td><td>5800</td></tr></table>
 <ul><li>第一项要求</li><li>第二项要求</li></ul>
 </div>
 <div class="share">分享到：微信 微博</div>
-<footer>版权所有：某市卫生健康委员会 京ICP备12345678号</footer>
+<footer>版权所有：某市园林绿化局 京ICP备12345678号</footer>
 </body></html>"#;
 
     fn full_config(json: &str) -> HtmlConfig {
@@ -5509,11 +5509,11 @@ Content-Location: http://example.test/xml
         for expected in [
             "首页",
             "政务公开",
-            "关于器官捐献工作的通知",
+            "关于公园开放时间调整的通知",
             "现将有关事项通知如下。请认真贯彻落实。",
-            "捐献人数统计图",
+            "游客人数统计图",
             "年份",
-            "5818",
+            "5800",
             "第一项要求",
             "分享到：微信 微博",
             "京ICP备12345678号",
@@ -5529,7 +5529,7 @@ Content-Location: http://example.test/xml
                 "found {unexpected:?} in {content}"
             );
         }
-        assert_eq!(extracted.title, "市卫健委通知");
+        assert_eq!(extracted.title, "市园林局通知");
         let meta = &extracted.extraction_metadata["content_extraction"];
         assert_eq!(meta["extraction_method"], "rust:html_full");
         assert_eq!(meta["html_mode"], "full");
@@ -5560,18 +5560,18 @@ Content-Location: http://example.test/xml
 
     #[test]
     fn full_mode_kept_table_parts_keep_their_cells() {
-        let html = "<html><body><table><caption>Donations</caption>\
-            <tr><th>Year</th><th>Cases</th></tr><tr><td>2019</td><td>5818</td></tr></table></body></html>";
+        let html = "<html><body><table><caption>Visitors</caption>\
+            <tr><th>Year</th><th>Cases</th></tr><tr><td>2019</td><td>5800</td></tr></table></body></html>";
         for keep in [r#"["tr"]"#, r#"["tbody"]"#, r#"["td", "th"]"#] {
             let config = format!(r#"{{"mode": "full", "keep_selectors": {keep}}}"#);
             let extracted = full_extract(html, &config);
-            assert_eq!(extracted.content, "Year\nCases\n2019\n5818", "{keep}");
+            assert_eq!(extracted.content, "Year\nCases\n2019\n5800", "{keep}");
         }
     }
 
     #[test]
     fn full_mode_never_wraps_a_long_paragraph() {
-        let paragraph = "人体器官捐献与移植工作关系人民群众生命健康。".repeat(30);
+        let paragraph = "公园开放管理工作关系市民日常生活。".repeat(30);
         let html = format!("<html><body><p>{paragraph}</p><p>第二段</p></body></html>");
         let extracted = full_extract(&html, r#"{"mode": "full"}"#);
         assert!(extracted.content.lines().any(|line| line == paragraph));
@@ -5630,7 +5630,7 @@ Content-Location: http://example.test/xml
             FULL_PAGE,
             r##"{"mode": "full", "keep_selectors": ["#content"], "drop_selectors": ["table"]}"##,
         );
-        assert!(!extracted.content.contains("5818"));
+        assert!(!extracted.content.contains("5800"));
         assert!(extracted.content.contains("现将有关事项通知如下"));
     }
 
@@ -5692,7 +5692,7 @@ Content-Location: http://example.test/xml
     #[test]
     fn mhtml_full_mode_renders_the_whole_body() {
         let mhtml = r#"From: <Saved by Web Archiver>
-Subject: 器官捐献通知
+Subject: 公园开放通知
 MIME-Version: 1.0
 Content-Type: multipart/related; type="text/html"; boundary="boundary"
 
@@ -5701,7 +5701,7 @@ Content-Type: text/html; charset=utf-8
 Content-Transfer-Encoding: 8bit
 Content-Location: http://example.test/
 
-<html><body><nav>首页 政务公开</nav><article><p>为进一步规范人体器官捐献与移植工作，现将有关事项通知如下，这段正文足够长，可以进入索引。</p></article></body></html>
+<html><body><nav>首页 政务公开</nav><article><p>为进一步规范公园开放管理工作，现将有关事项通知如下，这段正文足够长，可以进入索引。</p></article></body></html>
 --boundary--
 "#;
         let extracted = extract_mhtml_bytes(

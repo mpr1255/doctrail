@@ -695,10 +695,10 @@ async def test_native_ingest_defers_ocr_until_all_rust_batches_finish(
 
 
 GOV_PAGE = (
-    "<html><head><title>市卫健委通知</title></head><body>"
+    "<html><head><title>市园林局通知</title></head><body>"
     "<nav>首页 政务公开 政务服务</nav>"
-    "<div id='content'><h1>关于器官捐献工作的通知</h1>"
-    "<p>" + "各区卫生健康委：为进一步规范人体器官捐献与移植工作，现将有关事项通知如下。" * 6
+    "<div id='content'><h1>关于公园开放时间调整的通知</h1>"
+    "<p>" + "各区园林绿化局：为进一步规范公园开放管理工作，现将有关事项通知如下。" * 6
     + "请按时报送工作进展情况。</p></div>"
     "<div class='share'>分享到：微信 微博</div>"
     "<footer>版权所有 京ICP备12345678号</footer></body></html>"
@@ -792,7 +792,7 @@ async def test_process_ingest_full_mode_profile_records_settings(tmp_path, nativ
     metadata = json.loads(metadata)
     assert method == "rust:html_full"
     assert "政务公开" not in content and "分享到" not in content and "ICP备" not in content
-    assert "关于器官捐献工作的通知" in content
+    assert "关于公园开放时间调整的通知" in content
     # The paragraph is one line, so phrase search works across any old wrap point.
     assert any(line.endswith("请按时报送工作进展情况。") and len(line) > 200 for line in content.splitlines())
     assert hits == 1
