@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Fixes
+
+- Every ingest ran a timestamp backfill that scanned the whole table, which on a 13 GB database took about five minutes per run. The backfill now runs only when it adds the `added_at` column, and re-ingesting 400 files into that database takes about 16 seconds.
+
 ## 0.3.6 - full-page HTML mode and HTML profiles
 
 Much research data is saved web pages, and this release makes their ingest tunable per collection. The rules live in a YAML profile, and the [HTML profiles](https://doctrail.org/html/) page documents every option; `doctrail ingest --help` links to it.

@@ -125,8 +125,11 @@ def ensure_ingest_timestamps(db, table_name: str) -> None:
     columns = {column.name for column in db[table_name].columns}
     if "updated_at" not in columns:
         db[table_name].add_column("updated_at", str)
-    if "added_at" not in columns:
-        db[table_name].add_column("added_at", str)
+    if "added_at" in columns:
+        # Rows written since the column existed carry added_at; the backfill
+        # scans the whole table, which on a large corpus takes minutes per run.
+        return
+    db[table_name].add_column("added_at", str)
     quoted_table = '"' + table_name.replace('"', '""') + '"'
     now = datetime.now().isoformat()
     with db.conn:
