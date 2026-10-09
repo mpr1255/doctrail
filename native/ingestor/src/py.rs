@@ -12,6 +12,8 @@ use crate::{
     low_value_content_rejection, ExtractOptions, ExtractedDocument, HtmlConfig, HtmlKind, HtmlMode,
 };
 use anyhow::{bail, Context, Result};
+use chardetng::EncodingDetector;
+use encoding_rs::{Encoding, BIG5, EUC_JP, EUC_KR, GBK, SHIFT_JIS};
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use rayon::prelude::*;
@@ -636,6 +638,71 @@ fn extract_one_json(path: &str, html: &HtmlConfig) -> String {
     })
 }
 
+/// Names written without the ZIP UTF-8 flag are in the writer's code page,
+/// which the zip crate reads as CP437. Chinese, Japanese and Korean Windows
+/// archives use GBK, Big5, Shift_JIS or EUC-KR instead. One archive comes from
+/// one machine, so guess a single code page from all its non-UTF-8 names and
+/// return it only when the guess is one of those; otherwise CP437 stands.
+/// Non-ASCII bytes in legacy member names needed before guessing a CJK encoding.
+const MIN_LEGACY_NAME_BYTES: usize = 10;
+
+fn legacy_name_encoding(archive: &mut ZipArchive<File>) -> Result<Option<&'static Encoding>> {
+    let mut detector = EncodingDetector::new();
+    let mut any_high_byte = false;
+    let mut non_ascii_bytes = 0;
+    for index in 0..archive.len() {
+        let entry = archive
+            .by_index_raw(index)
+            .with_context(|| format!("reading ZIP entry {index}"))?;
+        if std::str::from_utf8(entry.name_raw()).is_err() {
+            detector.feed(entry.name_raw(), false);
+            detector.feed(b"\n", false);
+            any_high_byte |= entry.name_raw().iter().any(|&byte| byte >= 0xB0);
+            non_ascii_bytes += entry.name_raw().iter().filter(|&&byte| byte >= 0x80).count();
+        }
+    }
+    // CP437's accented letters and punctuation sit below 0xB0; above are box
+    // drawing, Greek, and maths symbols, which Western names do not use but CJK
+    // double-byte names nearly always do. The detector also guesses wrongly on
+    // fewer than about five CJK characters (it reads 报告 as Korean), so keep
+    // CP437 unless the names give it that much text.
+    if !any_high_byte || non_ascii_bytes < MIN_LEGACY_NAME_BYTES {
+        return Ok(None);
+    }
+    detector.feed(b"", true);
+    let guess = detector.guess(None, false);
+    Ok([GBK, BIG5, SHIFT_JIS, EUC_KR, EUC_JP]
+        .contains(&guess)
+        .then_some(guess))
+}
+
+/// The member name as text: raw bytes that are valid UTF-8 are UTF-8 (the
+/// crate has already replaced them when the UTF-8 flag or the Info-ZIP
+/// Unicode path field was present), and other names are decoded with the
+/// archive's CJK code page. None keeps the crate's CP437 name. A decoded
+/// name must pass the same containment check as the crate's own path.
+fn decode_member_name(raw: &[u8], legacy: Option<&'static Encoding>) -> Option<String> {
+    let name = match std::str::from_utf8(raw) {
+        Ok(text) => text.to_string(),
+        Err(_) => legacy?
+            .decode_without_bom_handling_and_without_replacement(raw)?
+            .into_owned(),
+    };
+    let mut depth = 0usize;
+    if name.contains('\0') {
+        return None;
+    }
+    for component in Path::new(&name).components() {
+        match component {
+            std::path::Component::Normal(_) => depth += 1,
+            std::path::Component::ParentDir => depth = depth.checked_sub(1)?,
+            std::path::Component::CurDir => {}
+            _ => return None,
+        }
+    }
+    Some(name)
+}
+
 fn expand_zip_archive(
     archive_path: &Path,
     destination: &Path,
@@ -664,6 +731,7 @@ fn expand_zip_archive(
         );
     }
 
+    let legacy_encoding = legacy_name_encoding(&mut archive)?;
     fs::create_dir_all(destination)
         .with_context(|| format!("creating ZIP staging directory {}", destination.display()))?;
     let mut total_bytes = 0u64;
@@ -686,10 +754,13 @@ fn expand_zip_archive(
         let enclosed = entry
             .enclosed_name()
             .ok_or_else(|| anyhow::anyhow!("ZIP entry {:?} has an unsafe path", entry.name()))?;
-        let member_path = enclosed
-            .to_str()
-            .ok_or_else(|| anyhow::anyhow!("ZIP entry path is not valid UTF-8"))?
-            .to_string();
+        let member_path = match decode_member_name(entry.name_raw(), legacy_encoding) {
+            Some(name) => name,
+            None => enclosed
+                .to_str()
+                .ok_or_else(|| anyhow::anyhow!("ZIP entry path is not valid UTF-8"))?
+                .to_string(),
+        };
         let uncompressed_bytes = entry.size();
         let compressed_bytes = entry.compressed_size();
         if uncompressed_bytes > max_member_bytes {
@@ -996,6 +1067,116 @@ mod tests {
             "binary-looking fallback output with a few accidental words"
         );
         assert!(!external_text_is_usable(&garbage));
+    }
+
+    /// A ZIP whose names are raw bytes without the UTF-8 flag, as old Windows
+    /// tools wrote them: placeholder names of the same length are written and
+    /// then swapped for the raw bytes in both headers.
+    fn write_legacy_zip(path: &Path, names: &[&[u8]]) {
+        let placeholders: Vec<String> = (0..names.len())
+            .map(|index| format!("{index}").repeat(names[index].len()))
+            .collect();
+        let members: Vec<(&str, &[u8])> = placeholders
+            .iter()
+            .map(|name| (name.as_str(), &b"<p>legacy</p>"[..]))
+            .collect();
+        write_zip(path, &members);
+        let mut bytes = fs::read(path).unwrap();
+        for (placeholder, raw) in placeholders.iter().zip(names) {
+            let needle = placeholder.as_bytes();
+            let mut start = 0;
+            while let Some(offset) = bytes[start..]
+                .windows(needle.len())
+                .position(|window| window == needle)
+            {
+                let at = start + offset;
+                bytes[at..at + needle.len()].copy_from_slice(raw);
+                start = at + needle.len();
+            }
+        }
+        fs::write(path, bytes).unwrap();
+    }
+
+    #[test]
+    fn decodes_gbk_member_names_from_legacy_chinese_archives() {
+        let root = tempdir().unwrap();
+        let archive = root.path().join("legacy.zip");
+        let names = ["北京地区法轮功现象研究.htm", "新闻精选-北京专家学者.htm", "张玲莉.htm"];
+        let raw: Vec<Vec<u8>> = names.iter().map(|name| GBK.encode(name).0.into_owned()).collect();
+        write_legacy_zip(&archive, &raw.iter().map(Vec::as_slice).collect::<Vec<_>>());
+
+        let members =
+            expand_zip_archive(&archive, &root.path().join("out"), 10, 1024, 4096, 200).unwrap();
+
+        let decoded: Vec<&str> = members.iter().map(|m| m.member_path.as_str()).collect();
+        assert_eq!(decoded, names);
+        assert_eq!(fs::read(&members[0].path).unwrap(), b"<p>legacy</p>");
+    }
+
+    #[test]
+    fn keeps_cp437_for_western_legacy_names_and_reads_unflagged_utf8() {
+        let root = tempdir().unwrap();
+        let western = root.path().join("western.zip");
+        // "Résumé.txt" in CP437, where é is 0x82.
+        write_legacy_zip(&western, &[b"R\x82sum\x82.txt"]);
+        let members =
+            expand_zip_archive(&western, &root.path().join("w"), 10, 1024, 4096, 200).unwrap();
+        assert_eq!(members[0].member_path, "Résumé.txt");
+
+        let unflagged = root.path().join("unflagged.zip");
+        write_legacy_zip(&unflagged, &["报告.htm".as_bytes()]);
+        let members =
+            expand_zip_archive(&unflagged, &root.path().join("u"), 10, 1024, 4096, 200).unwrap();
+        assert_eq!(members[0].member_path, "报告.htm");
+    }
+
+    #[test]
+    fn short_western_legacy_names_stay_cp437() {
+        let root = tempdir().unwrap();
+        for (raw, expected) in [
+            (&b"B\x81ro.txt"[..], "Büro.txt"),
+            (b"M\x81nchen.txt", "München.txt"),
+            (b"fran\x87ais.txt", "français.txt"),
+            (b"gar\x87on.txt", "garçon.txt"),
+        ] {
+            let archive = root.path().join(format!("{expected}.zip"));
+            write_legacy_zip(&archive, &[raw]);
+            let mut zip = ZipArchive::new(File::open(&archive).unwrap()).unwrap();
+            assert_eq!(legacy_name_encoding(&mut zip).unwrap(), None, "{expected}");
+            assert_eq!(decode_member_name(raw, None), None);
+            assert_eq!(zip.by_index(0).unwrap().name(), expected);
+        }
+    }
+
+    #[test]
+    fn too_little_cjk_text_keeps_cp437_and_enough_is_decoded() {
+        let root = tempdir().unwrap();
+        // "报告.htm" in GBK: two characters, which the detector reads as Korean.
+        let short = root.path().join("short.zip");
+        write_legacy_zip(&short, &[b"\xb1\xa8\xb8\xe6.htm"]);
+        let mut zip = ZipArchive::new(File::open(&short).unwrap()).unwrap();
+        assert_eq!(legacy_name_encoding(&mut zip).unwrap(), None);
+
+        // "会议纪要.doc" and "报告.htm": six characters.
+        let enough = root.path().join("enough.zip");
+        let names: [&[u8]; 2] = [b"\xbb\xe1\xd2\xe9\xbc\xcd\xd2\xaa.doc", b"\xb1\xa8\xb8\xe6.htm"];
+        write_legacy_zip(&enough, &names);
+        let mut zip = ZipArchive::new(File::open(&enough).unwrap()).unwrap();
+        let encoding = legacy_name_encoding(&mut zip).unwrap();
+        assert_eq!(decode_member_name(names[0], encoding).as_deref(), Some("会议纪要.doc"));
+        assert_eq!(decode_member_name(names[1], encoding).as_deref(), Some("报告.htm"));
+    }
+
+    #[test]
+    fn decoded_member_names_must_stay_inside_the_archive() {
+        assert_eq!(decode_member_name(b"a/../b.txt", None).as_deref(), Some("a/../b.txt"));
+        assert_eq!(decode_member_name(b"../b.txt", None), None);
+        assert_eq!(decode_member_name(b"/etc/passwd", None), None);
+        assert_eq!(decode_member_name(b"\xb1\xa8\xb8\xe6.htm", None), None);
+        assert_eq!(
+            decode_member_name(b"\xb1\xa8\xb8\xe6.htm", Some(GBK)).as_deref(),
+            Some("报告.htm")
+        );
     }
 
     #[test]
