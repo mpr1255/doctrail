@@ -307,6 +307,20 @@ mod tests {
     }
 
     #[test]
+    fn long_chinese_utf8_text_split_at_sniff_limit_stays_utf8() {
+        // Two ASCII bytes put byte 10,000 inside a three-byte character.
+        let text = format!("ab{}", "（一九八〇年三月二十八日）侯培生同志：\n".repeat(400));
+        let document = extract_text_bytes(text.as_bytes(), None, None).unwrap();
+
+        assert!(document.content.contains("（一九八〇年三月二十八日）侯培生"));
+        assert!(!document.content.contains("ï¼"));
+        assert_eq!(
+            document.extraction_metadata["content_extraction"]["encoding"],
+            "UTF-8"
+        );
+    }
+
+    #[test]
     fn falls_back_to_chardetng_without_declared_charset() {
         let decoded = decode_text_bytes(b"plain ascii", Some("text/plain"));
 
