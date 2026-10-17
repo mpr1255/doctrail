@@ -57,15 +57,7 @@ PDF text is extracted with `pdftotext` from Poppler, which doctrail cannot bundl
 
 ### Scanned documents and OCR
 
-Ingest sends scanned PDFs and images through OCR. By default it uses local tools when they are installed: [`textra`](https://github.com/freedmand/textra) on macOS (with `mutool` for PDFs), then `ocrmypdf` for PDFs and `tesseract` for images. Doctrail does not install these tools; without one, scanned pages yield no text. If you run your own OCR service — for example Apple Vision OCR served from Macs you control — point doctrail at it with `--ocr-engine mac-ocr` and a comma-separated endpoint list:
-
-```dotenv
-MAC_OCR__SERVICE_ENDPOINTS=https://ocr-1.example.com,https://ocr-2.example.com
-```
-
-An endpoint is any HTTP service implementing two routes: `POST /reserve` answers `201` with `{"reservation_id": ...}` when the node has capacity, and `POST /ocr?reservation_id=...` accepts a multipart `file` upload and returns `{"text": ...}`. Doctrail shards uploads across endpoints by content hash and retries busy nodes; when the service fails or is not configured, ingest continues with the rest of its extraction cascade instead of dropping the file. The endpoints can be anything reachable over HTTPS, such as Tailscale Funnel URLs.
-
-To replace the transport entirely, set `DOCTRAIL_MAC_OCR_CLIENT_PATH` to a local Python file exposing `ocr_async(file_path, node=None)`; doctrail loads that client in place of the built-in HTTP one.
+Ingest sends scanned PDFs and images through OCR. By default it uses local tools when they are installed: [`textra`](https://github.com/freedmand/textra) on macOS (with `mutool` for PDFs), then `ocrmypdf` for PDFs and `tesseract` for images. Doctrail does not install these tools; without one, scanned pages yield no text. If you run your own OCR service, such as Apple Vision OCR on Macs you control, pass `--ocr-engine mac-ocr`. Doctrail then loads a Python client file that exposes `ocr_async(file_path, node=None)` and returns the text. By default the file is `~/.claude/skills/mac-ocr/src/ocr_client.py`, the client of the mac-ocr skill, which sends work to an OCRQ queue served by Mac workers. Set `DOCTRAIL_MAC_OCR_CLIENT_PATH` to use another client. When the client fails or is missing, ingest continues with the rest of its extraction cascade instead of dropping the file.
 
 Office files also have embedded images extracted and OCR'd by default. For a routine text-only refresh, use `--skip-embedded-media`; this leaves native document extraction enabled while avoiding LibreOffice conversion processes.
 

@@ -6,19 +6,14 @@ extraction from various file types.
 """
 
 import os
-import hashlib
 import importlib.util
-import asyncio
 import subprocess
 import platform
 import shutil
-import tempfile
 import sys
-import time
 from pathlib import Path
 from typing import Tuple, Dict, Optional
 import chardet
-import httpx
 from bs4 import BeautifulSoup
 from readability import Document
 from loguru import logger
@@ -221,16 +216,18 @@ def _extract_html_title(soup: BeautifulSoup) -> str:
     return fallback
 
 
+# The OCRQ client from the mac-ocr skill. DOCTRAIL_MAC_OCR_CLIENT_PATH overrides it.
+DEFAULT_MAC_OCR_CLIENT_PATH = "~/.claude/skills/mac-ocr/src/ocr_client.py"
+
+
 def _load_mac_ocr_module():
-    module_path = os.environ.get('DOCTRAIL_MAC_OCR_CLIENT_PATH')
-    if not module_path:
-        raise RuntimeError("DOCTRAIL_MAC_OCR_CLIENT_PATH is not configured")
+    module_path = os.environ.get("DOCTRAIL_MAC_OCR_CLIENT_PATH") or DEFAULT_MAC_OCR_CLIENT_PATH
     client_path = Path(module_path).expanduser()
 
     if not client_path.exists():
         raise RuntimeError(
-            "Mac OCR client not found. Set DOCTRAIL_MAC_OCR_CLIENT_PATH to a local Python client file "
-            "that exposes `ocr_async(file_path, node=None)`."
+            f"Mac OCR client not found at {client_path}. Install the mac-ocr skill or set "
+            "DOCTRAIL_MAC_OCR_CLIENT_PATH to a client file that exposes `ocr_async(file_path, node=None)`."
         )
 
     module_name = f"_doctrail_mac_ocr_{abs(hash(str(client_path)))}"
@@ -250,136 +247,6 @@ def _load_mac_ocr_module():
         raise RuntimeError(f"Mac OCR client at {client_path} does not define ocr_async()")
 
     return module
-
-
-def _mac_ocr_service_endpoints() -> Tuple[str, ...]:
-    raw_endpoints = (
-        os.environ.get("MAC_OCR__SERVICE_ENDPOINTS")
-        or os.environ.get("WORKER__OCR_SERVICE_ENDPOINTS")
-        or ""
-    )
-    if not raw_endpoints:
-        # An editable pre-PyPI install should work from any cwd. Read only the
-        # OCR endpoint key from its source checkout rather than importing every
-        # API credential in that checkout's .env file.
-        checkout_env = Path(__file__).resolve().parents[3] / ".env"
-        if checkout_env.is_file():
-            from ..core_utils import parse_env_file
-
-            values = parse_env_file(checkout_env)
-            raw_endpoints = (
-                values.get("MAC_OCR__SERVICE_ENDPOINTS")
-                or values.get("WORKER__OCR_SERVICE_ENDPOINTS")
-                or ""
-            )
-    return tuple(
-        endpoint.strip().rstrip("/")
-        for endpoint in raw_endpoints.split(",")
-        if endpoint.strip()
-    )
-
-
-def _mac_ocr_upload(file_path: str):
-    """Return an OCR upload path, normalizing any detected raster to PNG."""
-    from PIL import Image, UnidentifiedImageError
-
-    source_path = Path(file_path)
-    try:
-        with Image.open(source_path) as image:
-            image.load()
-            if image.mode not in {"1", "L", "LA", "RGB", "RGBA"}:
-                image = image.convert("RGBA" if "transparency" in image.info else "RGB")
-            temporary = tempfile.NamedTemporaryFile(suffix=".png")
-            image.save(temporary, format="PNG")
-            temporary.flush()
-    except (UnidentifiedImageError, OSError) as exc:
-        if source_path.suffix.lower() == ".pdf":
-            return source_path, source_path.name, None
-        raise RuntimeError(
-            f"Mac OCR candidate is neither a decodable raster nor a PDF: "
-            f"{source_path}"
-        ) from exc
-
-    return Path(temporary.name), f"{source_path.stem}.png", temporary
-
-
-async def _ocr_with_mac_ocr_service(file_path: str) -> str:
-    endpoints = _mac_ocr_service_endpoints()
-    if not endpoints:
-        raise RuntimeError(
-            "Mac OCR is not configured; set MAC_OCR__SERVICE_ENDPOINTS to the "
-            "comma-separated Tailscale Funnel endpoints"
-        )
-
-    wait_seconds = float(os.environ.get("DOCTRAIL_MAC_OCR_CAPACITY_WAIT_SECONDS", "0"))
-    poll_seconds = float(os.environ.get("DOCTRAIL_MAC_OCR_POLL_SECONDS", "2"))
-    request_seconds = float(os.environ.get("DOCTRAIL_MAC_OCR_REQUEST_TIMEOUT_SECONDS", "0"))
-    deadline = time.monotonic() + wait_seconds if wait_seconds > 0 else None
-    errors = []
-    timeout = (
-        httpx.Timeout(request_seconds, connect=10.0)
-        if request_seconds > 0
-        else httpx.Timeout(None, connect=10.0)
-    )
-    upload_path, upload_name, temporary_upload = _mac_ocr_upload(file_path)
-    with upload_path.open("rb") as upload_handle:
-        upload_sha1 = hashlib.file_digest(upload_handle, "sha1").hexdigest()
-    preferred_index = int(upload_sha1, 16) % len(endpoints)
-    ordered_endpoints = endpoints[preferred_index:] + endpoints[:preferred_index]
-    server_failures = 0
-
-    try:
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            while deadline is None or time.monotonic() < deadline:
-                for endpoint_index, endpoint in enumerate(ordered_endpoints):
-                    try:
-                        response = await client.post(f"{endpoint}/reserve", timeout=10.0)
-                        if response.status_code != 201:
-                            if endpoint_index == 0 and response.status_code in {409, 429, 503}:
-                                break
-                            continue
-                        reservation_id = response.json()["reservation_id"]
-                        with upload_path.open("rb") as file_handle:
-                            response = await client.post(
-                                f"{endpoint}/ocr",
-                                params={"reservation_id": reservation_id},
-                                files={"file": (upload_name, file_handle)},
-                                timeout=timeout,
-                            )
-                        if response.status_code >= 500:
-                            detail = (
-                                f"{endpoint}: HTTP {response.status_code} "
-                                f"{response.text[:200]}"
-                            )
-                            errors.append(detail)
-                            server_failures += 1
-                            if server_failures >= len(endpoints):
-                                raise RuntimeError(
-                                    f"Mac OCR failed on {server_failures} node(s) for "
-                                    f"{Path(file_path).name}: {detail}"
-                                )
-                            continue
-                        if response.status_code >= 400:
-                            raise RuntimeError(
-                                f"Mac OCR rejected {Path(file_path).name}: "
-                                f"HTTP {response.status_code} {response.text[:200]}"
-                            )
-                        response.raise_for_status()
-                        text = response.json().get("text", "").strip()
-                        if not text:
-                            raise RuntimeError(f"Mac OCR returned empty text for {file_path}")
-                        return text
-                    except RuntimeError:
-                        raise
-                    except Exception as exc:
-                        errors.append(f"{endpoint}: {exc}")
-                await asyncio.sleep(poll_seconds)
-    finally:
-        if temporary_upload is not None:
-            temporary_upload.close()
-
-    detail = errors[-1] if errors else "no endpoint accepted a reservation"
-    raise TimeoutError(f"Timed out waiting for Mac OCR capacity: {detail}")
 
 
 async def process_document(
@@ -887,7 +754,7 @@ def _try_ocr_with_textra(file_path: str, file_sha1: str) -> Optional[str]:
 
 
 async def _try_ocr_with_mac_ocr(file_path: str) -> Optional[str]:
-    """OCR a file through Doctrail's configured Mac OCR Funnel endpoints."""
+    """OCR a file through the OCRQ queue of Mac workers."""
     try:
         return await ocr_with_mac_ocr(file_path)
     except Exception as e:
@@ -897,11 +764,8 @@ async def _try_ocr_with_mac_ocr(file_path: str) -> Optional[str]:
 
 async def ocr_with_mac_ocr(file_path: str) -> str:
     """Run configured Mac OCR and preserve the real backend error for callers."""
-    if os.environ.get("DOCTRAIL_MAC_OCR_CLIENT_PATH"):
-        ocr_client = _load_mac_ocr_module()
-        text = await ocr_client.ocr_async(file_path, node=None)
-    else:
-        text = await _ocr_with_mac_ocr_service(file_path)
+    ocr_client = _load_mac_ocr_module()
+    text = await ocr_client.ocr_async(file_path, node=None)
     cleaned = text.strip()
     if not cleaned:
         raise RuntimeError(f"Mac OCR returned empty text for {file_path}")

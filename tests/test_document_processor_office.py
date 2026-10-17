@@ -9,14 +9,11 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-import respx
-from httpx import Response
 
 from doctrail.ingest.document_processor import (
     SUPPORTED_EXTENSION_FAMILIES,
     SkippedFileException,
     _load_mac_ocr_module,
-    _ocr_with_mac_ocr_service,
     format_supported_extensions_for_help,
     process_document,
 )
@@ -36,13 +33,6 @@ def _async_return(value):
     async def _inner(*args, **kwargs):
         return value
     return _inner
-
-
-def _accept_synthetic_ocr_upload(monkeypatch):
-    monkeypatch.setattr(
-        "doctrail.ingest.document_processor._mac_ocr_upload",
-        lambda file_path: (Path(file_path), Path(file_path).name, None),
-    )
 
 
 def _missing_tools(*tools):
@@ -126,177 +116,20 @@ def test_load_mac_ocr_module_from_env_path(monkeypatch, tmp_path):
     assert hasattr(module, "ocr_async")
 
 
-@pytest.mark.asyncio
-@respx.mock
-async def test_mac_ocr_service_uses_configured_funnel_reservation(monkeypatch, tmp_path):
-    first = "https://ocr-one.example/funnel"
-    second = "https://ocr-two.example/funnel"
-    monkeypatch.setenv("MAC_OCR__SERVICE_ENDPOINTS", f"{first},{second}")
-    image_path = tmp_path / "page.png"
-    image_path.write_bytes(b"x")
-    _accept_synthetic_ocr_upload(monkeypatch)
-
-    respx.post(f"{first}/reserve").mock(return_value=Response(500))
-    respx.post(f"{second}/reserve").mock(
-        return_value=Response(201, json={"reservation_id": "reserved"})
-    )
-    upload = respx.post(f"{second}/ocr", params={"reservation_id": "reserved"}).mock(
-        return_value=Response(200, json={"text": "==== Page 1 ====\nFarm OCR text"})
+def test_load_mac_ocr_module_defaults_to_the_mac_ocr_skill_client(monkeypatch, tmp_path):
+    client_path = tmp_path / ".claude" / "skills" / "mac-ocr" / "src" / "ocr_client.py"
+    client_path.parent.mkdir(parents=True)
+    client_path.write_text(
+        "async def ocr_async(file_path, node=None):\n"
+        "    return 'skill ocr text'\n",
+        encoding="utf-8",
     )
 
-    text = await _ocr_with_mac_ocr_service(str(image_path))
+    monkeypatch.delenv("DOCTRAIL_MAC_OCR_CLIENT_PATH", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    module = _load_mac_ocr_module()
 
-    assert "Farm OCR text" in text
-    assert upload.called
-
-
-@pytest.mark.asyncio
-@respx.mock
-async def test_mac_ocr_service_normalizes_misnamed_image_to_png(monkeypatch, tmp_path):
-    endpoint = "https://ocr-one.example/funnel"
-    monkeypatch.setenv("MAC_OCR__SERVICE_ENDPOINTS", endpoint)
-    image_path = tmp_path / "thumbnail.html"
-    image_path.write_bytes((ASSET_DIR / "federalist_fixture.png").read_bytes())
-
-    respx.post(f"{endpoint}/reserve").mock(
-        return_value=Response(201, json={"reservation_id": "reserved"})
-    )
-    upload = respx.post(f"{endpoint}/ocr", params={"reservation_id": "reserved"}).mock(
-        return_value=Response(200, json={"text": "Image OCR text"})
-    )
-
-    text = await _ocr_with_mac_ocr_service(str(image_path))
-
-    assert text == "Image OCR text"
-    body = upload.calls[0].request.content
-    assert b'filename="thumbnail.png"' in body
-    assert b"\x89PNG\r\n\x1a\n" in body
-
-
-@pytest.mark.asyncio
-@respx.mock
-async def test_mac_ocr_service_rejects_non_image_doc_before_reservation(
-    monkeypatch, tmp_path
-):
-    endpoint = "https://ocr-one.example/funnel"
-    monkeypatch.setenv("MAC_OCR__SERVICE_ENDPOINTS", endpoint)
-    doc_path = tmp_path / "corrupt.doc"
-    doc_path.write_bytes(b"not an image or PDF")
-    reserve = respx.post(f"{endpoint}/reserve").mock(
-        return_value=Response(201, json={"reservation_id": "must-not-run"})
-    )
-
-    with pytest.raises(RuntimeError, match="neither a decodable raster nor a PDF"):
-        await _ocr_with_mac_ocr_service(str(doc_path))
-
-    assert not reserve.called
-
-
-@pytest.mark.asyncio
-@respx.mock
-async def test_mac_ocr_service_prefers_sha_assigned_node(monkeypatch, tmp_path):
-    first = "https://ocr-one.example/funnel"
-    second = "https://ocr-two.example/funnel"
-    monkeypatch.setenv("MAC_OCR__SERVICE_ENDPOINTS", f"{first},{second}")
-    image_path = tmp_path / "page.png"
-    image_path.write_bytes(b"image bytes")  # SHA-1 modulo two selects `second`.
-    _accept_synthetic_ocr_upload(monkeypatch)
-
-    first_reserve = respx.post(f"{first}/reserve").mock(
-        return_value=Response(201, json={"reservation_id": "wrong-node"})
-    )
-    respx.post(f"{second}/reserve").mock(
-        return_value=Response(201, json={"reservation_id": "assigned-node"})
-    )
-    respx.post(f"{second}/ocr", params={"reservation_id": "assigned-node"}).mock(
-        return_value=Response(200, json={"text": "Cached OCR text"})
-    )
-
-    text = await _ocr_with_mac_ocr_service(str(image_path))
-
-    assert text == "Cached OCR text"
-    assert not first_reserve.called
-
-
-@pytest.mark.asyncio
-@respx.mock
-async def test_mac_ocr_service_waits_on_full_sha_assigned_node(monkeypatch, tmp_path):
-    first = "https://ocr-one.example/funnel"
-    second = "https://ocr-two.example/funnel"
-    monkeypatch.setenv("MAC_OCR__SERVICE_ENDPOINTS", f"{first},{second}")
-    monkeypatch.setenv("DOCTRAIL_MAC_OCR_CAPACITY_WAIT_SECONDS", "0.01")
-    monkeypatch.setenv("DOCTRAIL_MAC_OCR_POLL_SECONDS", "0.001")
-    image_path = tmp_path / "page.png"
-    image_path.write_bytes(b"x")  # SHA-1 modulo two selects `first`.
-    _accept_synthetic_ocr_upload(monkeypatch)
-
-    respx.post(f"{first}/reserve").mock(return_value=Response(503))
-    second_reserve = respx.post(f"{second}/reserve").mock(
-        return_value=Response(201, json={"reservation_id": "wrong-node"})
-    )
-
-    with pytest.raises(TimeoutError, match="waiting for Mac OCR capacity"):
-        await _ocr_with_mac_ocr_service(str(image_path))
-
-    assert not second_reserve.called
-
-
-@pytest.mark.asyncio
-@respx.mock
-async def test_mac_ocr_service_reports_file_rejection_without_capacity_loop(
-    monkeypatch, tmp_path
-):
-    endpoint = "https://ocr-one.example/funnel"
-    monkeypatch.setenv("MAC_OCR__SERVICE_ENDPOINTS", endpoint)
-    image_path = tmp_path / "broken.pdf"
-    image_path.write_bytes(b"%PDF-broken")
-
-    respx.post(f"{endpoint}/reserve").mock(
-        return_value=Response(201, json={"reservation_id": "reserved"})
-    )
-    respx.post(f"{endpoint}/ocr", params={"reservation_id": "reserved"}).mock(
-        return_value=Response(422, text="unsupported or unrenderable file")
-    )
-
-    with pytest.raises(
-        RuntimeError,
-        match=r"HTTP 422.*unsupported or unrenderable file",
-    ):
-        await _ocr_with_mac_ocr_service(str(image_path))
-
-
-@pytest.mark.asyncio
-@respx.mock
-async def test_mac_ocr_service_fails_over_after_transient_textra_500(
-    monkeypatch, tmp_path
-):
-    first = "https://ocr-one.example/funnel"
-    second = "https://ocr-two.example/funnel"
-    monkeypatch.setenv("MAC_OCR__SERVICE_ENDPOINTS", f"{first},{second}")
-    image_path = tmp_path / "page.png"
-    image_path.write_bytes(b"x")  # SHA-1 modulo two selects first.
-    _accept_synthetic_ocr_upload(monkeypatch)
-
-    respx.post(f"{first}/reserve").mock(
-        return_value=Response(201, json={"reservation_id": "first-job"})
-    )
-    respx.post(f"{first}/ocr", params={"reservation_id": "first-job"}).mock(
-        return_value=Response(
-            500,
-            json={"detail": "textra error: textra output file not found"},
-        )
-    )
-    respx.post(f"{second}/reserve").mock(
-        return_value=Response(201, json={"reservation_id": "second-job"})
-    )
-    second_upload = respx.post(
-        f"{second}/ocr", params={"reservation_id": "second-job"}
-    ).mock(return_value=Response(200, json={"text": "Recovered OCR text"}))
-
-    text = await _ocr_with_mac_ocr_service(str(image_path))
-
-    assert text == "Recovered OCR text"
-    assert second_upload.called
+    assert module.__file__ == str(client_path)
 
 
 @pytest.mark.asyncio
