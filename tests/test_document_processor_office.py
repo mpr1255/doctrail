@@ -116,20 +116,10 @@ def test_load_mac_ocr_module_from_env_path(monkeypatch, tmp_path):
     assert hasattr(module, "ocr_async")
 
 
-def test_load_mac_ocr_module_defaults_to_the_mac_ocr_skill_client(monkeypatch, tmp_path):
-    client_path = tmp_path / ".claude" / "skills" / "mac-ocr" / "src" / "ocr_client.py"
-    client_path.parent.mkdir(parents=True)
-    client_path.write_text(
-        "async def ocr_async(file_path, node=None):\n"
-        "    return 'skill ocr text'\n",
-        encoding="utf-8",
-    )
-
+def test_load_mac_ocr_module_needs_the_env_var(monkeypatch):
     monkeypatch.delenv("DOCTRAIL_MAC_OCR_CLIENT_PATH", raising=False)
-    monkeypatch.setenv("HOME", str(tmp_path))
-    module = _load_mac_ocr_module()
-
-    assert module.__file__ == str(client_path)
+    with pytest.raises(RuntimeError, match="DOCTRAIL_MAC_OCR_CLIENT_PATH"):
+        _load_mac_ocr_module()
 
 
 @pytest.mark.asyncio
@@ -635,7 +625,7 @@ async def test_process_document_respects_mac_ocr_engine(monkeypatch, tmp_path):
     pdf_path.write_bytes(b"%PDF-1.4\nfake pdf for engine selection\n")
     sha1 = _sha1_for(pdf_path)
 
-    monkeypatch.setattr("doctrail.ingest.document_processor._try_ocr_with_mac_ocr", _async_return("==== Page 1 ====\nOCR text"))
+    monkeypatch.setattr("doctrail.ingest.document_processor.ocr_with_mac_ocr", _async_return("==== Page 1 ====\nOCR text"))
     monkeypatch.setattr("doctrail.ingest.document_processor.extract_text_with_pymupdf", lambda path: "embedded text")
 
     result_sha1, content, metadata = await process_document(

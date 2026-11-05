@@ -216,19 +216,25 @@ def _extract_html_title(soup: BeautifulSoup) -> str:
     return fallback
 
 
-# The OCRQ client from the mac-ocr skill. DOCTRAIL_MAC_OCR_CLIENT_PATH overrides it.
-DEFAULT_MAC_OCR_CLIENT_PATH = "~/.claude/skills/mac-ocr/src/ocr_client.py"
+# The mac-ocr engines run a client you supply: a Python file that defines
+# `async def ocr_async(file_path) -> str`. Doctrail ships no OCR backend of its
+# own; DOCTRAIL_MAC_OCR_CLIENT_PATH names the file.
+MAC_OCR_CLIENT_ENV = "DOCTRAIL_MAC_OCR_CLIENT_PATH"
+
+# OCR engine names that use the client. Both are exclusive: no local fallback.
+MAC_OCR_ENGINES = frozenset({"mac-ocr", "mac-ocr-only"})
 
 
 def _load_mac_ocr_module():
-    module_path = os.environ.get("DOCTRAIL_MAC_OCR_CLIENT_PATH") or DEFAULT_MAC_OCR_CLIENT_PATH
-    client_path = Path(module_path).expanduser()
-
-    if not client_path.exists():
+    configured = os.environ.get(MAC_OCR_CLIENT_ENV)
+    if not configured:
         raise RuntimeError(
-            f"Mac OCR client not found at {client_path}. Install the mac-ocr skill or set "
-            "DOCTRAIL_MAC_OCR_CLIENT_PATH to a client file that exposes `ocr_async(file_path, node=None)`."
+            f"--ocr-engine mac-ocr needs an OCR client: set {MAC_OCR_CLIENT_ENV} to a Python file "
+            "that defines `async def ocr_async(file_path) -> str`."
         )
+    client_path = Path(configured).expanduser()
+    if not client_path.exists():
+        raise RuntimeError(f"OCR client not found at {client_path} ({MAC_OCR_CLIENT_ENV})")
 
     module_name = f"_doctrail_mac_ocr_{abs(hash(str(client_path)))}"
     existing = sys.modules.get(module_name)
@@ -237,15 +243,12 @@ def _load_mac_ocr_module():
 
     spec = importlib.util.spec_from_file_location(module_name, client_path)
     if spec is None or spec.loader is None:
-        raise RuntimeError(f"Could not load Mac OCR client from {client_path}")
-
+        raise RuntimeError(f"Could not load the OCR client from {client_path}")
     module = importlib.util.module_from_spec(spec)
     sys.modules[module_name] = module
     spec.loader.exec_module(module)
-
-    if not hasattr(module, 'ocr_async'):
-        raise RuntimeError(f"Mac OCR client at {client_path} does not define ocr_async()")
-
+    if not hasattr(module, "ocr_async"):
+        raise RuntimeError(f"OCR client at {client_path} does not define ocr_async()")
     return module
 
 
@@ -400,28 +403,22 @@ async def process_document(
         
         return result
 
-    # mac-ocr-only is for consumers that must not use local OCR fallbacks.
-    # mac-ocr preserves the existing fallback cascade.
+    # mac-ocr never falls back to local OCR: a client failure raises, and the
+    # file is recorded as failed so a later run retries it.
     if file_extension in SUPPORTED_EXTENSION_FAMILIES["image_ocr"]:
         text = None
         extraction_method = None
         ocr_engine_used = None
-        mac_ocr_only = ocr_engine == 'mac-ocr-only'
-        if ocr_engine in {'mac-ocr', 'mac-ocr-only'}:
-            mac_ocr_text = (
-                await ocr_with_mac_ocr(file_path)
-                if mac_ocr_only
-                else await _try_ocr_with_mac_ocr(file_path)
-            )
-            if mac_ocr_text:
-                text = clean_ocr_text(mac_ocr_text)
-                extraction_method = 'mac_ocr'
-                ocr_engine_used = 'mac-ocr'
-        if text is None and not mac_ocr_only:
+        mac_ocr = ocr_engine in MAC_OCR_ENGINES
+        if mac_ocr:
+            text = clean_ocr_text(await ocr_with_mac_ocr(file_path))
+            extraction_method = 'mac_ocr'
+            ocr_engine_used = 'mac-ocr'
+        if text is None:
             text = _try_ocr_image_with_textra(file_path, file_sha1)
             extraction_method = 'textra_ocr'
             ocr_engine_used = 'textra'
-        if text is None and not mac_ocr_only:
+        if text is None:
             text = _try_ocr_image_with_tesseract(file_path)
             extraction_method = 'tesseract_ocr'
             ocr_engine_used = 'tesseract'
@@ -496,8 +493,8 @@ async def _process_pdf_file(file_path: str, file_sha1: str, original_file_path: 
 
     Args:
         pdf_engine: 'auto' (default), 'pdftotext', 'pymupdf', 'mutool', 'mac-ocr'
-        ocr_engine: 'auto' (default), 'textra', 'ocrmypdf', 'mac-ocr', or
-            'mac-ocr-only' (never falls back to local OCR)
+        ocr_engine: 'auto' (default), 'textra', 'ocrmypdf', or 'mac-ocr' (alias
+            'mac-ocr-only'), which never falls back to local OCR
     """
     try:
         logger.info(f"Processing PDF file: {file_path}")
@@ -518,12 +515,10 @@ async def _process_pdf_file(file_path: str, file_sha1: str, original_file_path: 
         mutool_content = ""
 
         if pdf_engine == 'mac-ocr':
-            mac_ocr_text = await _try_ocr_with_mac_ocr(file_path)
-            if mac_ocr_text:
-                content = clean_ocr_text(mac_ocr_text)
-                extraction_method = 'mac_ocr'
-                metadata_update['ocr_applied'] = True
-                metadata_update['ocr_engine'] = 'mac-ocr'
+            content = clean_ocr_text(await ocr_with_mac_ocr(file_path))
+            extraction_method = 'mac_ocr'
+            metadata_update['ocr_applied'] = True
+            metadata_update['ocr_engine'] = 'mac-ocr'
         elif pdf_engine == 'pymupdf':
             pymupdf_content = extract_text_with_pymupdf(file_path)
             if pymupdf_content and not is_text_garbage(pymupdf_content):
@@ -562,43 +557,33 @@ async def _process_pdf_file(file_path: str, file_sha1: str, original_file_path: 
 
         if not content:
             logger.info("PDF text extraction did not produce usable text, attempting OCR...")
-            mac_ocr_only = ocr_engine == 'mac-ocr-only'
-            resolved_ocr_engine = 'mac-ocr' if mac_ocr_only else ('textra' if ocr_engine == 'auto' else ocr_engine)
+            mac_ocr = ocr_engine in MAC_OCR_ENGINES
+            resolved_ocr_engine = 'mac-ocr' if mac_ocr else ('textra' if ocr_engine == 'auto' else ocr_engine)
 
-            # OCR is a fallback cascade, not a single exclusive engine. The
-            # requested engine only picks which step runs FIRST; every cheaper,
-            # local step still runs while we have nothing, so a busy mac-ocr
-            # farm (503 'no capacity') degrades to local Apple Vision instead of
-            # storing a scanned PDF with empty content (silent data loss).
+            # mac-ocr is exclusive: the client's failure raises, so the file is
+            # recorded as failed and retried
+            # later, never stored with local OCR in its place. For the local
+            # engines, ocrmypdf stays the last resort so a scanned PDF is not
+            # stored empty.
 
-            # 1. mac-ocr farm (distributed Apple Vision) — only when requested.
-            if resolved_ocr_engine == 'mac-ocr':
-                mac_ocr_text = (
-                    await ocr_with_mac_ocr(file_path)
-                    if mac_ocr_only
-                    else await _try_ocr_with_mac_ocr(file_path)
-                )
-                if mac_ocr_text:
-                    content = clean_ocr_text(mac_ocr_text)
-                    extraction_method = 'mac_ocr'
-                    metadata_update['ocr_applied'] = True
-                    metadata_update['ocr_engine'] = 'mac-ocr'
+            # 1. The configured OCR client.
+            if mac_ocr:
+                content = clean_ocr_text(await ocr_with_mac_ocr(file_path))
+                extraction_method = 'mac_ocr'
+                metadata_update['ocr_applied'] = True
+                metadata_update['ocr_engine'] = 'mac-ocr'
 
-            # 2. Local textra (Apple Vision, Chinese-capable) — the default OCR
-            #    engine for 'auto'/'textra', and the fallback when the farm is busy.
-            if not content and not mac_ocr_only and resolved_ocr_engine in {'mac-ocr', 'textra'}:
+            # 2. Local textra (Apple Vision, Chinese-capable), the default for 'auto'.
+            if not content and resolved_ocr_engine == 'textra':
                 textra_result = _try_ocr_with_textra(file_path, file_sha1)
                 if textra_result is not None:
                     content = clean_ocr_text(textra_result)
                     extraction_method = 'textra_ocr'
                     metadata_update['ocr_applied'] = True
                     metadata_update['ocr_engine'] = 'textra'
-                    if resolved_ocr_engine == 'mac-ocr':
-                        metadata_update['ocr_fallback'] = 'mac-ocr->textra'
 
-            # 3. ocrmypdf (tesseract) — universal last resort so no scanned PDF
-            #    is ever stored empty, whatever engine was requested.
-            if not content and not mac_ocr_only:
+            # 3. ocrmypdf (tesseract), the last resort for the local engines.
+            if not content and not mac_ocr:
                 try:
                     ocr_pdf_path = ocr_pdf_with_ocrmypdf(file_path)
                     ocr_content = extract_text_with_pdftotext(ocr_pdf_path)
@@ -754,7 +739,7 @@ def _try_ocr_with_textra(file_path: str, file_sha1: str) -> Optional[str]:
 
 
 async def _try_ocr_with_mac_ocr(file_path: str) -> Optional[str]:
-    """OCR a file through the OCRQ queue of Mac workers."""
+    """OCR a file with the configured client; None on failure."""
     try:
         return await ocr_with_mac_ocr(file_path)
     except Exception as e:
@@ -763,12 +748,11 @@ async def _try_ocr_with_mac_ocr(file_path: str) -> Optional[str]:
 
 
 async def ocr_with_mac_ocr(file_path: str) -> str:
-    """Run configured Mac OCR and preserve the real backend error for callers."""
-    ocr_client = _load_mac_ocr_module()
-    text = await ocr_client.ocr_async(file_path, node=None)
-    cleaned = text.strip()
+    """OCR a file with the configured client; its errors reach the caller."""
+    text = await _load_mac_ocr_module().ocr_async(file_path)
+    cleaned = (text or "").strip()
     if not cleaned:
-        raise RuntimeError(f"Mac OCR returned empty text for {file_path}")
+        raise RuntimeError(f"OCR client returned empty text for {file_path}")
     return cleaned
 
 def _try_ocr_image_with_textra(file_path: str, file_sha1: str) -> Optional[str]:

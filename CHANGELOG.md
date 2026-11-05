@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+### Changes
+
+- `--ocr-engine mac-ocr` now uses only the OCR client you name in `DOCTRAIL_MAC_OCR_CLIENT_PATH`: a Python file that defines `async def ocr_async(file_path) -> str`. There is no default client path any more; without the variable, the engine says what to set.
+- `mac-ocr` and `mac-ocr-only` are the same engine and never fall back to local OCR: when the client fails, the file is recorded as failed and retried by a later run, rather than stored with lower-quality local OCR.
+
 ## 0.3.7 - text encoding and file-type fixes
 
 The native engine misread some files: text with a few corrupt bytes, and Word, gzip, and image files saved under web-page or `.txt` names. This release reads them correctly and makes repeated ingests into a large database faster.
