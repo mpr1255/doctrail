@@ -872,3 +872,27 @@ def test_profile_rules_block_the_w3m_fallback(tmp_path, monkeypatch, native_enab
     assert "REMOVE ME" not in doc["content"]
     assert doc["status"] != "extracted"
     assert "cannot apply the HTML profile" in doc["error"]
+
+
+def test_extract_file_returns_pdf_pages(native_enabled):
+    from doctrail.extract import extract_file
+
+    doc = extract_file(Path(__file__).parent / "assets/files/federalist_fixture.pdf")
+
+    assert doc["status"] == "extracted"
+    assert not doc["ocr_needed"]
+    assert [number for number, _ in doc["pages"]] == [1]
+    assert doc["pages"][0][1] == doc["content"].strip()
+    assert "Federalist fixture" in doc["pages"][0][1]
+
+
+def test_extract_file_has_no_pages_for_plain_text(tmp_path, native_enabled):
+    from doctrail.extract import extract_file
+
+    f = tmp_path / "notice.txt"
+    f.write_text("The park opens at nine.\n", encoding="utf-8")
+
+    doc = extract_file(f)
+
+    assert doc["pages"] == []
+    assert "park opens" in doc["content"]

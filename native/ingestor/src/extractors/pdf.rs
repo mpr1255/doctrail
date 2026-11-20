@@ -28,7 +28,26 @@ static CHAPTER_MARKER_RE: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r"^第[一二三四五六七八九十0-9]+[章节部分条]").expect("chapter marker regex")
 });
 static PDF_EXTRACTION_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
+static SOFT_HYPHEN_BREAK_RE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"\u{ad}[ \t]*\r?\n[ \t]*").expect("soft hyphen regex"));
+static PAGE_TAG_RE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"\u{fdd0}([0-9]+)\u{fdd1}").expect("page tag regex"));
+static LATIN_WORD_RE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"[A-Za-z\u{c0}-\u{24f}]{3,}").expect("latin word regex"));
 const MIN_TEXT_CHARS_PER_PAGE: usize = 80;
+/// Lines seen this often are page furniture: running heads and download stamps.
+const REPEATED_LINE_COUNT: usize = 3;
+const MIN_PAGES_FOR_PAGE_SHARE: usize = 4;
+/// A Latin word this long is almost always several words with the spaces lost.
+const LONG_WORD_LETTERS: usize = 20;
+const MIN_WORDS_FOR_LONG_WORD_SHARE: usize = 200;
+/// Above this share of long words, try the other backend.
+const RETRY_LONG_WORD_SHARE: f64 = 0.01;
+/// Above this share after both backends, the text layer has no word spacing.
+const OCR_LONG_WORD_SHARE: f64 = 0.03;
+// Noncharacters that tag where each page starts while paragraphs are joined.
+const PAGE_TAG_OPEN: char = '\u{fdd0}';
+const PAGE_TAG_CLOSE: char = '\u{fdd1}';
 const PDFTOTEXT_TIMEOUT: Duration = Duration::from_secs(120);
 const PDFTOTEXT_INSTALL_HINT: &str = "pdftotext not found: install Poppler \
 (macOS: brew install poppler; Debian/Ubuntu: apt install poppler-utils), set \
@@ -53,6 +72,9 @@ struct PdfExtractionAttempt {
     raw_text: String,
     smart_content: String,
     content: String,
+    /// (page number, character offset in `content`) for each page with text.
+    page_offsets: Vec<(usize, usize)>,
+    long_word_share: f64,
     page_count: Option<usize>,
     page_count_method: Option<&'static str>,
     backend: Option<&'static str>,
@@ -143,6 +165,18 @@ pub(crate) fn extract_pdf_bytes(
             Value::Array(attempt.fallback_attempts.clone()),
         );
     }
+    content_extraction.insert(
+        "page_offsets".to_string(),
+        json!(attempt
+            .page_offsets
+            .iter()
+            .map(|(page, offset)| [*page, *offset])
+            .collect::<Vec<_>>()),
+    );
+    content_extraction.insert(
+        "long_word_share".to_string(),
+        json!(attempt.long_word_share),
+    );
     content_extraction.insert(
         "character_count".to_string(),
         json!(attempt.content.chars().count()),
@@ -235,7 +269,27 @@ fn extract_pdf_text_attempt(
         }),
         ok => ok,
     };
-    Ok(process_pdf_extraction_result(result, started_at.elapsed()))
+    let fell_back = matches!(&result, Ok(extraction) if extraction.backend == "mupdf");
+    let attempt = process_pdf_extraction_result(result, started_at.elapsed());
+    if fell_back || !(attempt.ocr_needed || attempt.long_word_share >= RETRY_LONG_WORD_SHARE) {
+        return Ok(attempt);
+    }
+    // pdftotext loses the spaces in some files and finds little text in others
+    // where MuPDF reads them well, so give MuPDF a try before settling for OCR.
+    let reason = if attempt.ocr_needed {
+        attempt.ocr_reason
+    } else {
+        "words_run_together"
+    };
+    let Ok(Ok(mut extraction)) = extract_with_mupdf_guarded(bytes) else {
+        return Ok(attempt);
+    };
+    extraction.fallback_from = Some("pdftotext");
+    extraction.fallback_error = Some(reason.to_string());
+    let second = process_pdf_extraction_result(Ok(extraction), started_at.elapsed());
+    let better = !second.ocr_needed
+        && (attempt.ocr_needed || second.long_word_share < attempt.long_word_share);
+    Ok(if better { second } else { attempt })
 }
 
 fn is_not_found(error: &anyhow::Error) -> bool {
@@ -309,9 +363,28 @@ fn process_pdf_extraction_result(
         .map(|value| value.raw_text.clone())
         .unwrap_or_default();
     let cleanup_started_at = Instant::now();
-    let marked_raw_content = add_python_style_page_markers(&raw_text);
-    let smart_content = smart_paragraph_cleanup(&marked_raw_content);
-    let content = clean_text(&smart_content);
+    // A soft hyphen marks a word broken across lines: rejoin it, and drop the rest.
+    let rejoined = SOFT_HYPHEN_BREAK_RE.replace_all(&raw_text, "");
+    let mut cleaned_raw = String::with_capacity(rejoined.len());
+    for ch in rejoined.chars() {
+        // pdftotext keeps ligature glyphs, which hide a word from search.
+        match ch {
+            '\u{ad}' | PAGE_TAG_OPEN | PAGE_TAG_CLOSE => {}
+            '\u{fb00}' => cleaned_raw.push_str("ff"),
+            '\u{fb01}' => cleaned_raw.push_str("fi"),
+            '\u{fb02}' => cleaned_raw.push_str("fl"),
+            '\u{fb03}' => cleaned_raw.push_str("ffi"),
+            '\u{fb04}' => cleaned_raw.push_str("ffl"),
+            '\u{fb05}' | '\u{fb06}' => cleaned_raw.push_str("st"),
+            other => cleaned_raw.push(other),
+        }
+    }
+    let rejoined = cleaned_raw;
+    let marked_raw_content = add_python_style_page_markers(&rejoined);
+    let tagged = smart_paragraph_cleanup(&marked_raw_content);
+    let smart_content = PAGE_TAG_RE.replace_all(&tagged, "").into_owned();
+    let (content, page_offsets) = take_page_offsets(&clean_text(&tagged));
+    let long_word_share = long_word_share(&content);
     let cleanup_duration = cleanup_started_at.elapsed();
 
     let language_started_at = Instant::now();
@@ -320,12 +393,18 @@ fn process_pdf_extraction_result(
 
     let extraction_failed = extraction.is_none();
     let page_count = extraction.as_ref().and_then(|value| value.page_count);
-    let (ocr_needed, ocr_reason) = needs_ocr(&content, page_count, extraction_failed);
+    let (mut ocr_needed, mut ocr_reason) =
+        needs_ocr(&content, &raw_text, page_count, extraction_failed);
+    if !ocr_needed && long_word_share >= OCR_LONG_WORD_SHARE {
+        (ocr_needed, ocr_reason) = (true, "words_run_together");
+    }
 
     PdfExtractionAttempt {
         raw_text,
         smart_content,
         content,
+        page_offsets,
+        long_word_share,
         page_count,
         page_count_method: extraction
             .as_ref()
@@ -425,6 +504,8 @@ fn smart_paragraph_cleanup(text: &str) -> String {
     let lines = text.lines().collect::<Vec<_>>();
     let mut paragraphs = Vec::new();
     let mut current_paragraph: Vec<String> = Vec::new();
+    // Set at a page marker; the next line of text carries the page's tag.
+    let mut page_start: Option<usize> = None;
 
     for line in lines {
         let line = line.trim();
@@ -436,31 +517,41 @@ fn smart_paragraph_cleanup(text: &str) -> String {
             continue;
         }
 
-        if line.starts_with("--- Page") {
+        if let Some(rest) = line.strip_prefix("--- Page") {
+            page_start = rest.trim_end_matches('-').trim().parse().ok();
             continue;
         }
+        let tag = page_start
+            .take()
+            .map(|page| format!("{PAGE_TAG_OPEN}{page}{PAGE_TAG_CLOSE}"))
+            .unwrap_or_default();
 
-        let starts_new = starts_new_paragraph(line, &current_paragraph);
-        if starts_new {
+        if starts_new_paragraph(line, &current_paragraph) {
             if !current_paragraph.is_empty() {
                 paragraphs.push(current_paragraph.join(""));
             }
-            current_paragraph = vec![line.to_string()];
+            current_paragraph = vec![format!("{tag}{line}")];
             continue;
         }
 
-        if let Some(previous) = current_paragraph.last() {
-            let last_char = previous.chars().next_back();
-            let first_char = line.chars().next();
-            if last_char.is_some_and(is_english_char_or_digit)
-                && first_char.is_some_and(is_english_char_or_digit)
-            {
-                current_paragraph.push(format!(" {}", line));
-            } else {
-                current_paragraph.push(line.to_string());
-            }
+        let previous = current_paragraph.last_mut().expect("paragraph has a line");
+        let mut tail = previous.chars().rev();
+        let last_char = tail.next();
+        let before_last = tail.next();
+        let first_char = line.chars().next();
+        if matches!(last_char, Some('-' | '\u{2010}'))
+            && before_last.is_some_and(char::is_alphabetic)
+            && first_char.is_some_and(char::is_lowercase)
+        {
+            // A word hyphenated across the line break.
+            previous.pop();
+            current_paragraph.push(format!("{tag}{line}"));
+        } else if last_char.is_some_and(is_unspaced_script)
+            || first_char.is_some_and(is_unspaced_script)
+        {
+            current_paragraph.push(format!("{tag}{line}"));
         } else {
-            current_paragraph = vec![line.to_string()];
+            current_paragraph.push(format!(" {tag}{line}"));
         }
     }
 
@@ -486,8 +577,51 @@ fn starts_new_paragraph(line: &str, current_paragraph: &[String]) -> bool {
             .is_some_and(|previous| ends_with_sentence_punctuation(previous))
 }
 
-fn is_english_char_or_digit(ch: char) -> bool {
-    (ch.is_ascii() && ch.is_alphabetic()) || ch.is_ascii_digit()
+/// Chinese and Japanese text and punctuation, which take no space at a line break.
+fn is_unspaced_script(ch: char) -> bool {
+    matches!(ch as u32,
+        0x2e80..=0x9fff      // radicals, CJK punctuation, kana, Han
+        | 0xf900..=0xfaff    // compatibility ideographs
+        | 0xfe30..=0xfe4f    // vertical punctuation forms
+        | 0xff00..=0xffef    // full-width forms
+        | 0x20000..=0x3ffff  // Han extensions
+    )
+}
+
+/// Removes the page tags and returns where each tagged page starts, in characters.
+fn take_page_offsets(tagged: &str) -> (String, Vec<(usize, usize)>) {
+    let mut content = String::with_capacity(tagged.len());
+    let mut offsets = Vec::new();
+    let mut chars = 0;
+    let mut end = 0;
+    for found in PAGE_TAG_RE.captures_iter(tagged) {
+        let whole = found.get(0).expect("match");
+        let before = &tagged[end..whole.start()];
+        content.push_str(before);
+        chars += before.chars().count();
+        if let Ok(page) = found[1].parse() {
+            offsets.push((page, chars));
+        }
+        end = whole.end();
+    }
+    content.push_str(&tagged[end..]);
+    (content, offsets)
+}
+
+/// Share of Latin-script words too long to be one word; 0 for short texts.
+fn long_word_share(text: &str) -> f64 {
+    let mut words = 0usize;
+    let mut long = 0usize;
+    for word in LATIN_WORD_RE.find_iter(text) {
+        words += 1;
+        if word.as_str().chars().count() >= LONG_WORD_LETTERS {
+            long += 1;
+        }
+    }
+    if words < MIN_WORDS_FOR_LONG_WORD_SHARE {
+        return 0.0;
+    }
+    long as f64 / words as f64
 }
 
 fn is_bullet_start(ch: char) -> bool {
@@ -530,6 +664,7 @@ fn ends_with_sentence_punctuation(text: &str) -> bool {
 
 fn needs_ocr(
     content: &str,
+    raw_text: &str,
     page_count: Option<usize>,
     extraction_failed: bool,
 ) -> (bool, &'static str) {
@@ -550,24 +685,55 @@ fn needs_ocr(
         .chars()
         .filter(|character| *character == '\u{fffd}')
         .count();
-    let control = content
+    // Control characters are counted in the raw text, since cleanup removes
+    // them. A font with a broken character map fills the page with them.
+    let control = raw_text
         .chars()
         .filter(|character| {
-            let value = *character as u32;
-            (value < 0x20 && !matches!(*character, '\t' | '\n' | '\r'))
-                || (0x7f..=0x9f).contains(&value)
+            character.is_control() && !matches!(*character, '\t' | '\n' | '\r' | '\x0c')
         })
         .count();
-    if replacement.saturating_mul(100) >= non_space || control.saturating_mul(10) >= non_space {
+    if replacement.saturating_mul(100) >= non_space || control.saturating_mul(100) >= non_space {
         return (true, "corrupt_text_layer");
     }
     if let Some(page_count) = page_count.filter(|count| *count > 0) {
-        let character_count = content.chars().count();
-        if character_count < page_count.saturating_mul(MIN_TEXT_CHARS_PER_PAGE) {
+        let minimum = page_count.saturating_mul(MIN_TEXT_CHARS_PER_PAGE);
+        if content.chars().count() < minimum {
+            return (true, "sparse_text_layer");
+        }
+        // A scan whose only text is a stamp on every page has plenty of
+        // characters, all of them in a few repeated lines.
+        if page_count >= REPEATED_LINE_COUNT && unrepeated_chars(raw_text) < minimum {
+            return (true, "sparse_text_layer");
+        }
+        // A text cover page in front of scanned pages can carry the whole
+        // file over the minimum, so most pages must have text of their own.
+        let pages_with_text = raw_text
+            .split('\x0c')
+            .filter(|page| {
+                page.chars().filter(|ch| !ch.is_whitespace()).count() >= MIN_TEXT_CHARS_PER_PAGE
+            })
+            .count();
+        if page_count >= MIN_PAGES_FOR_PAGE_SHARE && pages_with_text * 2 < page_count {
             return (true, "sparse_text_layer");
         }
     }
     (false, "usable_text_layer")
+}
+
+/// Characters in lines that occur fewer than REPEATED_LINE_COUNT times.
+fn unrepeated_chars(raw_text: &str) -> usize {
+    let mut seen: std::collections::HashMap<&str, (usize, usize)> = std::collections::HashMap::new();
+    for line in raw_text.split(['\n', '\x0c']).map(str::trim) {
+        if !line.is_empty() {
+            let entry = seen.entry(line).or_insert((0, line.chars().count()));
+            entry.0 += 1;
+        }
+    }
+    seen.values()
+        .filter(|(count, _)| *count < REPEATED_LINE_COUNT)
+        .map(|(count, chars)| count * chars)
+        .sum()
 }
 
 fn title_from_content_text(content: &str) -> Option<String> {
@@ -604,6 +770,85 @@ mod tests {
 
         assert!(cleaned.contains("这是一个中文测试"));
         assert!(cleaned.contains("第二段结束。\n\n第三段开始"));
+    }
+
+    fn attempt_from(raw_text: &str, pages: usize) -> PdfExtractionAttempt {
+        let extraction = PdfTextExtraction {
+            raw_text: raw_text.to_string(),
+            page_count: Some(pages),
+            page_count_method: Some("test_page_count"),
+            backend: "test",
+            fallback_from: None,
+            fallback_error: None,
+        };
+        process_pdf_extraction_result(Ok(extraction), Duration::ZERO)
+    }
+
+    #[test]
+    fn line_breaks_join_with_a_space_unless_the_script_has_none() {
+        let cleaned = smart_paragraph_cleanup("the parks office (north\n(branch), open daily,\nexcept Mondays");
+        assert_eq!(cleaned, "the parks office (north (branch), open daily, except Mondays");
+        assert_eq!(smart_paragraph_cleanup("公园每天\n开放，\n周一除外"), "公园每天开放，周一除外");
+        assert_eq!(smart_paragraph_cleanup("公园 2024\n年开放"), "公园 2024年开放");
+    }
+
+    #[test]
+    fn hyphenated_line_breaks_are_rejoined() {
+        assert_eq!(smart_paragraph_cleanup("the gar-\ndener waters"), "the gardener waters");
+        assert_eq!(smart_paragraph_cleanup("pages 10-\n12 and North-\nSouth"), "pages 10- 12 and North- South");
+        let attempt = attempt_from("the gar\u{ad}\ndener waters the ro\u{ad}ses", 1);
+        assert_eq!(attempt.content, "the gardener waters the roses");
+    }
+
+    #[test]
+    fn page_offsets_point_at_each_page_in_content() {
+        let attempt = attempt_from("The park opens at\x0cnine. Dogs are welcome.\x0c\x0cBring water.", 4);
+        assert_eq!(attempt.content, "The park opens at nine. Dogs are welcome.\nBring water.");
+        let starts: Vec<(usize, String)> = attempt
+            .page_offsets
+            .iter()
+            .map(|(page, offset)| (*page, attempt.content.chars().skip(*offset).take(5).collect()))
+            .collect();
+        assert_eq!(
+            starts,
+            vec![(1, "The p".to_string()), (2, "nine.".to_string()), (4, "Bring".to_string())]
+        );
+    }
+
+    #[test]
+    fn stamp_only_scan_requires_ocr() {
+        let stamp = "Downloaded from the town library on 3 May. Terms of use apply to this copy.";
+        let attempt = attempt_from(&[stamp; 6].join("\x0c"), 6);
+        assert!(attempt.ocr_needed);
+        assert_eq!(attempt.ocr_reason, "sparse_text_layer");
+    }
+
+    #[test]
+    fn text_cover_on_scanned_pages_requires_ocr() {
+        let cover = "The town library lends books, maps and seeds. ".repeat(20);
+        let attempt = attempt_from(&format!("{cover}\x0c\x0c\x0c\x0c\x0c"), 6);
+        assert!(attempt.ocr_needed);
+        assert_eq!(attempt.ocr_reason, "sparse_text_layer");
+    }
+
+    #[test]
+    fn ligatures_become_letters() {
+        assert_eq!(attempt_from("the o\u{fb03}ce \u{fb01}nds a \u{fb02}ag", 1).content, "the office finds a flag");
+    }
+
+    #[test]
+    fn control_character_text_layer_requires_ocr() {
+        let attempt = attempt_from(&"The\u{1}park\u{2}opens\u{3}at nine every day. ".repeat(10), 1);
+        assert!(attempt.ocr_needed);
+        assert_eq!(attempt.ocr_reason, "corrupt_text_layer");
+    }
+
+    #[test]
+    fn text_without_word_spaces_requires_ocr() {
+        let attempt = attempt_from(&"theparkopensatnineeveryday and dogs are welcome here. ".repeat(60), 1);
+        assert!(attempt.long_word_share > 0.1);
+        assert!(attempt.ocr_needed);
+        assert_eq!(attempt.ocr_reason, "words_run_together");
     }
 
     #[test]
@@ -732,11 +977,8 @@ mod tests {
 
     #[test]
     fn doi_only_image_text_layer_requires_ocr() {
-        let (ocr_needed, reason) = needs_ocr(
-            "https://doi.org/10.1016/j.example.2024.123456",
-            Some(1),
-            false,
-        );
+        let text = "https://doi.org/10.1016/j.example.2024.123456";
+        let (ocr_needed, reason) = needs_ocr(text, text, Some(1), false);
 
         assert!(ocr_needed);
         assert_eq!(reason, "sparse_text_layer");
@@ -745,7 +987,7 @@ mod tests {
     #[test]
     fn one_percent_replacement_chars_require_ocr() {
         let content = format!("{}�", "readable".repeat(12));
-        let (ocr_needed, reason) = needs_ocr(&content, Some(1), false);
+        let (ocr_needed, reason) = needs_ocr(&content, &content, Some(1), false);
 
         assert!(ocr_needed);
         assert_eq!(reason, "corrupt_text_layer");
