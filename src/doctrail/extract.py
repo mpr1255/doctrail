@@ -26,7 +26,13 @@ def extract_file(path: Union[str, "os.PathLike[str]"]) -> Dict[str, Any]:
     try:
         from doctrail import _ingest_native as native
     except ImportError:
-        import _ingest_native as native
+        try:
+            import _ingest_native as native
+        except ImportError:
+            raise RuntimeError(
+                "extract_file needs the native engine, which this install lacks; "
+                "build it from a source checkout with `make native`"
+            ) from None
 
     doc = json.loads(native.extract_path(os.fspath(path)))
     content = doc.get("content") or ""

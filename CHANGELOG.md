@@ -7,11 +7,11 @@
 Measured on 5,176 PDFs that also have OCR text, the native engine's text now holds a median 96.2% of the distinct words in the OCR text, up from 95.6%. PDFs that pass as usable but hold under half of those words fell from 62 to 24. Run time is unchanged, since pdftotext still reads every file first.
 
 - Lines of a paragraph are joined with a space unless the break falls in Chinese or Japanese text. Before, a space was added only between two ASCII letters or digits, so a line ending in a comma or bracket ran into the next word.
-- A word hyphenated across a line break is rejoined, as is a word broken at a soft hyphen. Other soft hyphens are removed, and ligature characters such as `ﬁ` become their letters, so a search for "benefit" finds the word.
+- A word hyphenated across a line break is rejoined, as is a word broken at a soft hyphen. A hyphenated compound that breaks at its hyphen loses the hyphen too, so "state-" and "owned" on two lines become "stateowned". Other soft hyphens are removed, and ligature characters such as `ﬁ` become their letters, so a search for "benefit" finds the word.
 - When pdftotext returns text with the spaces between words missing, or too little text, MuPDF reads the file too and its text is kept if it is better. A text layer with no word spaces in either reading is sent to OCR with the reason `words_run_together`.
 - More scanned PDFs are recognised as needing OCR: files whose only text is a stamp or running head repeated on every page, files with a text cover page in front of scanned pages, and files whose fonts map letters to control characters.
 - Each PDF's record carries `page_offsets`, the character position in the text where each page starts.
-- `doctrail.extract.extract_file(path)` returns the native engine's record for one file with no database, with a `pages` list of page number and text for PDFs.
+- `doctrail.extract.extract_file(path)` returns the native engine's record for one file with no database, with a `pages` list of page number and text for PDFs. It needs the native engine.
 
 ### Changes
 
