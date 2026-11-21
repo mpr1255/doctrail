@@ -1,8 +1,10 @@
 use anyhow::Context;
+use flate2::read::GzDecoder;
 use once_cell::sync::Lazy;
 use regex::Regex;
 use serde_json::{json, Map, Value};
-use std::io::Write;
+use std::collections::{HashMap, HashSet};
+use std::io::{Read, Write};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::process::{Command, Stdio};
 use std::sync::Mutex;
@@ -502,6 +504,7 @@ fn aggressive_join(text: &str) -> String {
 fn smart_paragraph_cleanup(text: &str) -> String {
     let text = aggressive_join(text);
     let lines = text.lines().collect::<Vec<_>>();
+    let doc_words = DocWordCounts::from_lines(&lines);
     let mut paragraphs = Vec::new();
     let mut current_paragraph: Vec<String> = Vec::new();
     // Set at a page marker; the next line of text carries the page's tag.
@@ -540,11 +543,19 @@ fn smart_paragraph_cleanup(text: &str) -> String {
         let before_last = tail.next();
         let first_char = line.chars().next();
         if matches!(last_char, Some('-' | '\u{2010}'))
-            && before_last.is_some_and(char::is_alphabetic)
-            && first_char.is_some_and(char::is_lowercase)
+            && before_last.is_some_and(char::is_alphanumeric)
+            && first_char.is_some_and(char::is_alphanumeric)
         {
-            // A word hyphenated across the line break.
-            previous.pop();
+            if keep_line_break_hyphen(previous, line, before_last.unwrap(), first_char.unwrap(), &doc_words) {
+                current_paragraph.push(format!("{tag}{line}"));
+            } else {
+                previous.pop();
+                current_paragraph.push(format!("{tag}{line}"));
+            }
+        } else if matches!(last_char, Some('\u{2011}'))
+            && before_last.is_some_and(char::is_alphanumeric)
+            && first_char.is_some_and(char::is_alphanumeric)
+        {
             current_paragraph.push(format!("{tag}{line}"));
         } else if last_char.is_some_and(is_unspaced_script)
             || first_char.is_some_and(is_unspaced_script)
@@ -560,6 +571,203 @@ fn smart_paragraph_cleanup(text: &str) -> String {
     }
 
     paragraphs.join("\n\n")
+}
+
+/// English word list (derived from the MIT-licensed pyspellchecker dictionary)
+/// used to tell wrapped words (`gar-` + `dener`) from hyphenated compounds
+/// (`state-` + `owned`) when the document itself does not settle the question.
+struct EnglishLexicon {
+    all: HashSet<String>,
+    common: HashSet<String>,
+}
+
+impl EnglishLexicon {
+    fn load() -> Self {
+        let compressed = include_bytes!("en_words.txt.gz");
+        let mut decoder = GzDecoder::new(&compressed[..]);
+        let mut raw = String::new();
+        decoder
+            .read_to_string(&mut raw)
+            .expect("decompress bundled English word list");
+        let mut all = HashSet::with_capacity(140_000);
+        let mut common = HashSet::with_capacity(50_000);
+        for line in raw.lines() {
+            if let Some(word) = line.strip_prefix('*') {
+                all.insert(word.to_string());
+                common.insert(word.to_string());
+            } else if !line.is_empty() {
+                all.insert(line.to_string());
+            }
+        }
+        Self { all, common }
+    }
+
+    fn is_word(&self, word: &str) -> bool {
+        self.all.contains(word)
+    }
+
+    fn is_common(&self, word: &str) -> bool {
+        self.common.contains(word)
+    }
+}
+
+static ENGLISH_LEXICON: Lazy<EnglishLexicon> = Lazy::new(EnglishLexicon::load);
+
+/// Prefixes that commonly take a hyphen in compounds when the closed form is
+/// not a standard dictionary word (e.g. `anti-corruption`, `co-chair`).
+const HYPHEN_PREFIXES: &[&str] = &[
+    "anti", "auto", "bio", "co", "counter", "cross", "cyber", "de", "eco", "euro", "ex", "extra",
+    "geo", "hyper", "infra", "inter", "intra", "macro", "mega", "meta", "micro", "mid", "mini",
+    "multi", "neo", "non", "omni", "over", "pan", "para", "peri", "photo", "poly", "post", "pre",
+    "pro", "proto", "pseudo", "quasi", "re", "retro", "self", "semi", "sino", "socio", "sub",
+    "super", "supra", "tele", "trans", "tri", "ultra", "un", "under", "vice", "well",
+];
+
+fn is_hyphen_prefix(word: &str) -> bool {
+    HYPHEN_PREFIXES.binary_search(&word).is_ok()
+}
+
+/// Counts intra-line words and hyphenated pairs across the same PDF so that a
+/// compound or closed word seen elsewhere in the document decides a line break
+/// in any Latin-script language.
+struct DocWordCounts {
+    plain: HashMap<String, usize>,
+    hyphenated: HashMap<String, usize>,
+}
+
+impl DocWordCounts {
+    fn from_lines(lines: &[&str]) -> Self {
+        let mut plain: HashMap<String, usize> = HashMap::new();
+        let mut hyphenated: HashMap<String, usize> = HashMap::new();
+        for &raw_line in lines {
+            let line = raw_line.trim();
+            if line.is_empty() || line.starts_with("--- Page") {
+                continue;
+            }
+            for token in line.split_whitespace() {
+                // Skip tokens ending in a trailing line-break hyphen.
+                if token.ends_with('-') || token.ends_with('\u{2010}') {
+                    continue;
+                }
+                let trimmed = token.trim_matches(|ch: char| !ch.is_alphabetic());
+                if trimmed.is_empty() {
+                    continue;
+                }
+                if trimmed.contains(['-', '\u{2010}']) {
+                    let parts: Vec<String> = trimmed
+                        .split(['-', '\u{2010}'])
+                        .filter(|part| !part.is_empty() && part.chars().all(char::is_alphabetic))
+                        .map(|part| part.to_lowercase())
+                        .collect();
+                    for pair in parts.windows(2) {
+                        *hyphenated
+                            .entry(format!("{}-{}", pair[0], pair[1]))
+                            .or_insert(0) += 1;
+                    }
+                } else if trimmed.chars().all(char::is_alphabetic) {
+                    *plain.entry(trimmed.to_lowercase()).or_insert(0) += 1;
+                }
+            }
+        }
+        Self { plain, hyphenated }
+    }
+
+    fn plain_count(&self, word: &str) -> usize {
+        self.plain.get(word).copied().unwrap_or(0)
+    }
+
+    fn hyphenated_count(&self, pair: &str) -> usize {
+        self.hyphenated.get(pair).copied().unwrap_or(0)
+    }
+}
+
+/// Extract the trailing alphabetic segment immediately before the line-end
+/// hyphen, plus whether that segment is itself preceded by an earlier hyphen
+/// (as in `day-to-` or `like-with-`).
+fn trailing_hyphen_left(previous: &str) -> (String, bool) {
+    let without_hyphen = &previous[..previous.len() - previous.chars().next_back().unwrap().len_utf8()];
+    let mut start = without_hyphen.len();
+    for (idx, ch) in without_hyphen.char_indices().rev() {
+        if ch.is_alphabetic() {
+            start = idx;
+        } else {
+            break;
+        }
+    }
+    let left = without_hyphen[start..].to_lowercase();
+    let had_prior_hyphen = without_hyphen[..start]
+        .chars()
+        .next_back()
+        .is_some_and(|ch| matches!(ch, '-' | '\u{2010}'));
+    (left, had_prior_hyphen)
+}
+
+fn leading_alpha_word(line: &str) -> String {
+    line.chars()
+        .take_while(|ch| ch.is_alphabetic())
+        .collect::<String>()
+        .to_lowercase()
+}
+
+fn keep_line_break_hyphen(
+    previous: &str,
+    line: &str,
+    before_last: char,
+    first_char: char,
+    doc_words: &DocWordCounts,
+) -> bool {
+    // Digit ranges (`10-12`, `COVID-19`) and capitalised compounds (`North-South`)
+    // always keep their hyphen.
+    if !before_last.is_alphabetic() || !first_char.is_lowercase() {
+        return true;
+    }
+    let (left, had_prior_hyphen) = trailing_hyphen_left(previous);
+    let right = leading_alpha_word(line);
+    if left.is_empty() || right.is_empty() {
+        return true;
+    }
+    // Standard typesetting never breaks after a single letter (`e-mail`, `x-ray`).
+    if left.chars().count() == 1 {
+        return true;
+    }
+
+    let joined = format!("{left}{right}");
+    let hyph = format!("{left}-{right}");
+
+    // 1. Same-document self-evidence (works in every Latin-script language).
+    let h_count = doc_words.hyphenated_count(&hyph);
+    let j_count = doc_words.plain_count(&joined);
+    if h_count > j_count {
+        return true;
+    }
+    if j_count > 0 {
+        return false;
+    }
+
+    let lexicon = &*ENGLISH_LEXICON;
+
+    // 2. Multi-part compounds like `day-to-day`, `up-to-date`, `state-of-the-art`
+    // where `left` + `right` could otherwise collide with a closed word (`today`).
+    if had_prior_hyphen
+        && matches!(
+            left.as_str(),
+            "to" | "of" | "the" | "in" | "on" | "by" | "and" | "or" | "at" | "for" | "as"
+                | "with" | "out" | "up" | "per" | "de" | "la" | "et"
+        )
+        && lexicon.is_common(&right)
+    {
+        return true;
+    }
+
+    // 3. Dictionary closed word beats compound split (`gardener`, `newspaper`,
+    // `recently`, `prevent`, `anti-inflammatory`).
+    if lexicon.is_word(&joined) {
+        return false;
+    }
+
+    // 4. Two standalone English words or productive hyphen prefix + word
+    // (`state-owned`, `well-known`, `anti-corruption`, `like-with-like`).
+    (lexicon.is_common(&left) || is_hyphen_prefix(&left)) && lexicon.is_common(&right)
 }
 
 fn starts_new_paragraph(line: &str, current_paragraph: &[String]) -> bool {
@@ -609,13 +817,24 @@ fn take_page_offsets(tagged: &str) -> (String, Vec<(usize, usize)>) {
 }
 
 /// Share of Latin-script words too long to be one word; 0 for short texts.
+/// Uppercase-heavy tokens (part codes, acronyms) and nucleotide sequences
+/// (DNA/RNA primers in any case) are ignored so technical PDFs are not
+/// mistaken for missing word spaces.
 fn long_word_share(text: &str) -> f64 {
     let mut words = 0usize;
     let mut long = 0usize;
     for word in LATIN_WORD_RE.find_iter(text) {
+        let token = word.as_str();
         words += 1;
-        if word.as_str().chars().count() >= LONG_WORD_LETTERS {
-            long += 1;
+        let len = token.chars().count();
+        if len >= LONG_WORD_LETTERS {
+            let lower = token.chars().filter(|ch| ch.is_lowercase()).count();
+            let is_nucleotide = token
+                .bytes()
+                .all(|b| matches!(b.to_ascii_lowercase(), b'a' | b'c' | b'g' | b't' | b'u' | b'n'));
+            if lower * 2 >= len && !is_nucleotide {
+                long += 1;
+            }
         }
     }
     if words < MIN_WORDS_FOR_LONG_WORD_SHARE {
@@ -793,11 +1012,36 @@ mod tests {
     }
 
     #[test]
-    fn hyphenated_line_breaks_are_rejoined() {
+    fn hyphenated_line_breaks_are_rejoined_and_compounds_keep_their_hyphen() {
         assert_eq!(smart_paragraph_cleanup("the gar-\ndener waters"), "the gardener waters");
-        assert_eq!(smart_paragraph_cleanup("pages 10-\n12 and North-\nSouth"), "pages 10- 12 and North- South");
+        assert_eq!(smart_paragraph_cleanup("the news-\npaper reported"), "the newspaper reported");
+        assert_eq!(smart_paragraph_cleanup("a state-\nowned enterprise"), "a state-owned enterprise");
+        assert_eq!(smart_paragraph_cleanup("a well-\nknown policy"), "a well-known policy");
+        assert_eq!(smart_paragraph_cleanup("an anti-\ncorruption drive"), "an anti-corruption drive");
+        assert_eq!(smart_paragraph_cleanup("day-to-\nday operations"), "day-to-day operations");
+        assert_eq!(smart_paragraph_cleanup("anti-inflam-\nmatory drugs"), "anti-inflammatory drugs");
+        assert_eq!(smart_paragraph_cleanup("send an e-\nmail today"), "send an e-mail today");
+        assert_eq!(smart_paragraph_cleanup("pages 10-\n12 and North-\nSouth and COVID-\n19"), "pages 10-12 and North-South and COVID-19");
+        // Same-document self-evidence preserves novel or non-English compounds.
+        assert_eq!(
+            smart_paragraph_cleanup("Cross-strait trade grew.\nThe cross-\nstrait link held"),
+            "Cross-strait trade grew.\n\nThe cross-strait link held"
+        );
+        assert_eq!(
+            smart_paragraph_cleanup("C'est peut-être vrai.\nIl peut-\nêtre ici"),
+            "C'est peut-être vrai.\n\nIl peut-être ici"
+        );
+        // Soft hyphens are always line-wrap marks.
         let attempt = attempt_from("the gar\u{ad}\ndener waters the ro\u{ad}ses", 1);
         assert_eq!(attempt.content, "the gardener waters the roses");
+    }
+
+    #[test]
+    fn uppercase_sequences_do_not_trigger_words_run_together() {
+        let dna = "ACGTTGGATGGACCAACATTGAGTAACCAC cccATAGAAGAACTGCCCAA and primer sequence ".repeat(60);
+        let attempt = attempt_from(&dna, 1);
+        assert_eq!(attempt.long_word_share, 0.0);
+        assert!(!attempt.ocr_needed);
     }
 
     #[test]
@@ -991,5 +1235,17 @@ mod tests {
 
         assert!(ocr_needed);
         assert_eq!(reason, "corrupt_text_layer");
+    }
+
+    #[test]
+    fn dna_sequences_in_any_case_do_not_trigger_long_word_share() {
+        let mut words = vec!["primer"; 180];
+        for _ in 0..30 {
+            words.push("ACGTTGGATGGTTTCATCTTTCAAAAATCAG");
+            words.push("ctaaaaatacaaaaaattagctggaagtggt");
+            words.push("CCTCCtccttcagttgacatatgg");
+        }
+        let text = words.join(" ");
+        assert_eq!(long_word_share(&text), 0.0);
     }
 }
