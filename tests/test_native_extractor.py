@@ -847,7 +847,10 @@ def test_profile_rules_block_the_w3m_fallback(tmp_path, monkeypatch, native_enab
 
     assert "REMOVE ME" not in doc["content"]
     assert doc["status"] != "extracted"
-    assert "cannot apply the HTML profile" in doc["error"]
+    if shutil.which("w3m"):
+        assert "cannot apply the HTML profile" in doc["error"]
+    else:
+        assert "nesting depth" in doc["error"]
 
 
 def test_extract_file_returns_pdf_pages(native_enabled):
