@@ -119,7 +119,7 @@ jobs:
           args: --release --out dist
           sccache: "false"
           manylinux: 2_28
-          before-script-linux: "dnf install -y clang-devel make || yum install -y clang-devel make"
+          before-script-linux: "dnf install -y clang-devel make || (sed -i 's/^mirrorlist=/#mirrorlist=/; s/^# *baseurl=/baseurl=/' /etc/yum.repos.d/almalinux*.repo && dnf clean all && dnf install -y clang-devel make)"
       - uses: actions/upload-artifact@v4
         with:
           name: wheels-linux-${{ matrix.target }}
