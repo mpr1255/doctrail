@@ -9,20 +9,27 @@ env:
   UV_PYTHON: "3.12"
 
 jobs:
-  publish:
+  verify:
     runs-on: ubuntu-latest
-    environment:
-      name: pypi
     permissions:
       contents: read
       actions: read
-      id-token: write
-
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install pdftotext
-        run: sudo apt-get update && sudo apt-get install -y poppler-utils
+      - name: Install system build and PDF tools
+        run: sudo apt-get update && sudo apt-get install -y poppler-utils libclang-dev clang make
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo builds
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: native/ingestor
+
+      - name: Run Rust tests
+        run: cargo test --manifest-path native/ingestor/Cargo.toml
 
       - name: Install uv
         uses: astral-sh/setup-uv@v5
@@ -94,18 +101,92 @@ jobs:
             sleep 15
           done
 
-      - name: Prepare distribution directory
-        run: |
-          uv run --no-sync python - <<'PY'
-          import shutil
-          from pathlib import Path
-          dist = Path("dist")
-          if dist.exists():
-              shutil.rmtree(dist)
-          PY
+  linux-wheels:
+    needs: verify
+    strategy:
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            target: x86_64
+          - runner: ubuntu-24.04-arm
+            target: aarch64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.target }}
+          args: --release --out dist
+          sccache: "false"
+          manylinux: 2_28
+          before-script-linux: "dnf install -y clang-devel make || yum install -y clang-devel make"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-linux-${{ matrix.target }}
+          path: dist/*.whl
 
-      - name: Build package artifacts
-        run: uv build --no-sources
+  macos-wheels:
+    needs: verify
+    strategy:
+      matrix:
+        include:
+          - runner: macos-14
+            target: aarch64-apple-darwin
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.target }}
+          args: --release --out dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-macos-${{ matrix.target }}
+          path: dist/*.whl
+
+  sdist:
+    needs: verify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: PyO3/maturin-action@v1
+        with:
+          command: sdist
+          args: --out dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sdist
+          path: dist/*.tar.gz
+
+  publish:
+    needs: [verify, linux-wheels, macos-wheels, sdist]
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install Python
+        run: uv python install 3.12
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
 
       - name: Refuse paper artifacts
         run: |
@@ -125,19 +206,19 @@ jobs:
       - name: Check package metadata
         run: uvx --from twine twine check dist/*
 
-      - name: Smoke test wheel
+      - name: Smoke test Linux x86_64 wheel
         run: |
-          for wheel in dist/*.whl; do
-            uvx --from "$wheel" doctrail --version
-          done
+          whl="$(realpath dist/*x86_64*.whl | head -1)"
+          uvx --from "$whl" doctrail --version
+          uvx --from "$whl" doctrail docs > /tmp/wheel-llms.txt
+          cmp docs/llms.txt /tmp/wheel-llms.txt
+          uvx --from "$whl" doctrail skill > /tmp/wheel-skill.txt
+          cmp skills/doctrail/SKILL.md /tmp/wheel-skill.txt
+          tmpdir="$(mktemp -d)"
+          (cd "$tmpdir" && uvx --from "$whl" doctrail init test && uvx --from "$whl" doctrail run test)
+          rm -rf "$tmpdir"
 
-      - name: Smoke test source distribution
-        run: |
-          for archive in dist/*.tar.gz; do
-            uvx --from "$archive" doctrail --version
-          done
-
-      - name: Upload package artifacts
+      - name: Upload combined distribution artifacts
         uses: actions/upload-artifact@v4
         with:
           name: doctrail-dist

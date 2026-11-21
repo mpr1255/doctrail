@@ -1,9 +1,9 @@
 [project]
 name = "doctrail"
-version = "0.3.7"
+version = "0.4.0"
 description = "SQLite database enrichment tool using LLMs"
 readme = "README.md"
-license = "MIT"
+license = "AGPL-3.0-or-later"
 license-files = ["LICENSE"]
 requires-python = ">=3.12"
 authors = [
@@ -17,10 +17,11 @@ classifiers = [
     "Environment :: Console",
     "Framework :: FastAPI",
     "Intended Audience :: Science/Research",
-    "License :: OSI Approved :: MIT License",
+    "License :: OSI Approved :: GNU Affero General Public License v3 or later (AGPLv3+)",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Rust",
     "Topic :: Database",
     "Topic :: Scientific/Engineering :: Information Analysis",
     "Topic :: Text Processing",
@@ -36,29 +37,18 @@ dependencies = [
     "tiktoken",
     "aiohttp",
     "httpx>=0.27",
-    "beautifulsoup4",
-    "chardet",
     "PyYAML",
     "openai>=1.76,<2",
     "anthropic>=0.40",
     "jinja2",
-    "mhtml-to-html-py",
     "google-genai>=1.0.0",
     "pypinyin>=0.54.0",
     "pyalex>=0.18",
-    "readability-lxml>=0.8",
     "questionary>=2.0",
     "tqdm>=4.0",
     "pydantic>=2.0",
-    # Document extraction (Python-first; legacy Office fallbacks may use system tools)
-    "pymupdf>=1.24", # PDF text extraction (replaces pdftotext, mutool)
-    "python-docx>=1.0", # DOCX extraction
-    "ebooklib>=0.18", # EPUB extraction (replaces ebook-convert for EPUB)
-    "lxml>=5.0", # HTML/XML parsing
+    "pillow>=10.0",
     "claude-agent-sdk>=0.1.45",
-    "openpyxl>=3.1.5",
-    "python-pptx>=1.0.2",
-    "xlrd>=2.0.2",
     "prompt-toolkit<3.0.52",
     "krippendorff>=0.7",
 ]
@@ -73,10 +63,13 @@ Changelog = "https://github.com/mpr1255/doctrail/blob/master/CHANGELOG.md"
 [project.optional-dependencies]
 test = [
     "fastapi>=0.115.0",
+    "openpyxl>=3.1.5",
     "pytest",
     "pytest-asyncio",
     "pytest-mock",
-    "respx", # For mocking HTTP requests if needed later
+    "python-docx>=1.0",
+    "python-pptx>=1.0.2",
+    "respx",
     "uvicorn[standard]>=0.32.0",
 ]
 server = [
@@ -84,7 +77,7 @@ server = [
     "uvicorn[standard]>=0.32.0",
 ]
 ocr = [
-    "ocrmypdf>=16.0",  # Generic Python extractor only; never used by Rust ingest
+    "ocrmypdf>=16.0",
 ]
 icr = [
 ]
@@ -93,39 +86,35 @@ icr = [
 doctrail = "doctrail.cli:cli"
 
 [build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
+requires = ["maturin>=1.7,<2"]
+build-backend = "maturin"
 
-[tool.hatch.build]
-exclude = [
-    "**/.unison/**",
-    ".history/**",
-    ".deleted/**",
-    ".venv/**",
-    ".venv*/**",
-    "_paper/**",
-    "agents/**",
-    "data/**",
-    "native/**",
-    "notes/**",
-    "out/**",
-    "scratch/**",
-    "tmp/**",
+[tool.maturin]
+manifest-path = "native/ingestor/Cargo.toml"
+python-source = "src"
+module-name = "doctrail._ingest_native"
+features = ["extension-module"]
+strip = true
+include = [
+    { path = "docs/llms.txt", format = "sdist" },
+    { path = "skills/doctrail/SKILL.md", format = "sdist" },
+    { path = "LICENSE", format = "sdist" },
 ]
-
-[tool.hatch.build.targets.wheel]
-packages = ["src/doctrail"]
-
-[tool.hatch.build.targets.wheel.force-include]
-"docs/llms.txt" = "doctrail/_docs/llms.txt"
-"skills/doctrail/SKILL.md" = "doctrail/_docs/SKILL.md"
-"examples/tutorial" = "doctrail/_examples/tutorial"
+exclude = [
+    "**/__pycache__/**",
+    "**/.DS_Store",
+    "src/doctrail/_ingest_native*.so",
+    "src/doctrail/_ingest_native*.pyd",
+]
 
 [dependency-groups]
 dev = [
+    "openpyxl>=3.1.5",
     "pytest>=8.3.5",
     "pytest-asyncio>=0.26.0",
     "pytest-mock>=3.14.0",
+    "python-docx>=1.0",
+    "python-pptx>=1.0.2",
 ]
 
 [tool.pytest.ini_options]

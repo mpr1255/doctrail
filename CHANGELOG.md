@@ -1,22 +1,31 @@
 # Changelog
 
-## Unreleased
+## 0.4.0 - native engine in the wheel, PDF fixes, and OCR plugin contract
+
+Every `uv tool install doctrail` now ships the Rust extraction engine in prebuilt wheels (macOS arm64/x86_64 and Linux x86_64/aarch64), removing the old split between a PyPI Python extractor and a source-only Rust build. Because the bundled MuPDF fallback is licensed under AGPL-3.0, the package license is now GNU AGPL-3.0-or-later.
+
+### Native wheel and simplification
+
+- The Rust extraction engine (`doctrail._ingest_native`) is now built by maturin and shipped inside the `doctrail` wheels. Every install gets multicore extraction, HTML profiles, ZIP ingestion, and `doctrail.extract.extract_file` out of the box.
+- Removed the duplicate Python extraction engine (`src/doctrail/extractors/` and the legacy per-format chains in `document_processor.py`) and dropped its Python-only parsing dependencies (`pymupdf`, `python-docx`, `ebooklib`, `readability-lxml`, `mhtml-to-html-py`, `openpyxl`, `python-pptx`, `xlrd`, `chardet`, `beautifulsoup4`, `lxml`).
+- License changed from MIT to GNU AGPL-3.0-or-later to match the statically linked MuPDF fallback.
+- CI now compiles and tests both the Rust crate and the Python suite, and builds platform wheels in the release workflow.
 
 ### PDF text
 
-Measured on 5,176 PDFs that also have OCR text, the native engine's text now holds a median 96.2% of the distinct words in the OCR text, up from 95.6%. PDFs that pass as usable but hold under half of those words fell from 62 to 24. Run time is unchanged, since pdftotext still reads every file first.
+Measured on 5,176 PDFs that also have OCR text, extracted text now holds a median 96.2% of the distinct words in the OCR text, up from 95.6%, while files under half fell from 62 to 24. Run time is unchanged because `pdftotext` still reads every file first. Checked on 337 Chinese PDFs with zero false-positive OCR regressions.
 
-- Lines of a paragraph are joined with a space unless the break falls in Chinese or Japanese text. Before, a space was added only between two ASCII letters or digits, so a line ending in a comma or bracket ran into the next word.
-- A word hyphenated across a line break is rejoined, as is a word broken at a soft hyphen. A hyphenated compound that breaks at its hyphen loses the hyphen too, so "state-" and "owned" on two lines become "stateowned". Other soft hyphens are removed, and ligature characters such as `ﬁ` become their letters, so a search for "benefit" finds the word.
-- When pdftotext returns text with the spaces between words missing, or too little text, MuPDF reads the file too and its text is kept if it is better. A text layer with no word spaces in either reading is sent to OCR with the reason `words_run_together`.
-- More scanned PDFs are recognised as needing OCR: files whose only text is a stamp or running head repeated on every page, files with a text cover page in front of scanned pages, and files whose fonts map letters to control characters.
-- Each PDF's record carries `page_offsets`, the character position in the text where each page starts.
-- `doctrail.extract.extract_file(path)` returns the native engine's record for one file with no database, with a `pages` list of page number and text for PDFs. It needs the native engine.
+- Lines of a paragraph join with a space unless the break falls in Chinese or Japanese text. Before, a space was added only between two ASCII letters or digits, so a line ending in a comma or bracket ran into the next word.
+- Line-break hyphenation now distinguishes wrapped words from hyphenated compounds using same-document evidence, multi-hyphen chains, and a compact English lexicon: `gar-` / `dener` rejoins to `gardener`, while `state-` / `owned`, `well-` / `known`, `anti-` / `corruption`, `day-to-` / `day`, `North-` / `South`, and `10-` / `12` keep their hyphens without stray spaces. Soft hyphens are removed, and ligature glyphs such as `ﬁ` expand to their letters.
+- When `pdftotext` returns text with missing word spaces or too little text, MuPDF reads the file too and its text is kept when it is better. Uppercase codes and DNA/RNA nucleotide sequences no longer trigger false `words_run_together` OCR routing.
+- More scanned PDFs are recognised as needing OCR: files whose only text is a repeated stamp or running head, files with a text cover page in front of scanned pages, and files whose fonts map letters to control characters.
+- Each PDF record carries `page_offsets`, and `doctrail.extract.extract_file(path)` returns one file's record and per-page text slices without a database.
 
-### Changes
+### OCR plugin contract
 
-- `--ocr-engine mac-ocr` now uses only the OCR client you name in `DOCTRAIL_MAC_OCR_CLIENT_PATH`: a Python file that defines `async def ocr_async(file_path) -> str`. There is no default client path any more; without the variable, the engine says what to set.
-- `mac-ocr` and `mac-ocr-only` are the same engine and never fall back to local OCR: when the client fails, the file is recorded as failed and retried by a later run, rather than stored with lower-quality local OCR.
+- Added `--ocr-engine plugin` and `DOCTRAIL_OCR_PLUGIN`, pointing at any user-supplied Python file that defines `async def ocr_async(file_path: str) -> str` or `def ocr(file_path: str) -> str`. Doctrail ships no OCR service of its own; plugin mode never falls back to local OCR, so failures are recorded and retried on a later run.
+- `--ocr-engine auto`, `textra`, and `ocrmypdf` now run through the unified extraction pipeline whenever a PDF or image needs OCR, and `--pdf-engine ocr` sends every PDF straight to OCR.
+- Existing `--ocr-engine mac-ocr` / `mac-ocr-only`, `--pdf-engine mac-ocr`, and `DOCTRAIL_MAC_OCR_CLIENT_PATH` continue to work as compatibility aliases.
 
 ## 0.3.7 - text encoding and file-type fixes
 

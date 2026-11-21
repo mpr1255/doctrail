@@ -48,4 +48,4 @@ Inside the package, `doctrail docs` prints the reference documentation offline.
 
 ## License
 
-MIT
+GNU AGPL-3.0-or-later (see [LICENSE](LICENSE)). Doctrail bundles MuPDF for PDF extraction.

@@ -50,7 +50,11 @@ doctrail enrich language --limit 5
 
 If `doctrail init` already created `.doctrail/config.yml` and `.doctrail/enrichments/*.yml`, patch those files rather than inventing parallel config formats.
 
-Saved web pages are read as the main article by the native engine and as the whole page by the Python engine. `doctrail ingest --html-mode full` keeps the whole page, and `--html-profile` tunes it for one collection; see https://doctrail.org/html/ before writing a profile.
+Saved web pages keep the main article by default. `doctrail ingest --html-mode full` keeps the whole page, and `--html-profile` tunes it for one collection; see https://doctrail.org/html/ before writing a profile.
+
+For scanned PDFs and images, doctrail tries local OCR tools (`textra`, `ocrmypdf`, `tesseract`) by default. To plug in an external OCR service or script, pass `--ocr-engine plugin` and set `DOCTRAIL_OCR_PLUGIN` to a Python file defining `async def ocr_async(file_path: str) -> str` (or `def ocr(file_path: str) -> str`). Plugin mode never falls back to local OCR: failed files are recorded for retry on the next run.
+
+To extract one file in Python without creating a database, call `doctrail.extract.extract_file(path)`.
 
 ## Offline runs and demos (replay)
 

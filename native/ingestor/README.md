@@ -1,30 +1,23 @@
 # doctrail native ingestor
 
-This crate is doctrail's vendored native document-extraction core. Python calls
-it through the `doctrail._ingest_native` PyO3 module.
+This crate is doctrail's document-extraction engine (`doctrail._ingest_native`),
+compiled by maturin and shipped inside the `doctrail` wheel under AGPL-3.0-or-later.
 
-Build it from the repository root with:
+Rebuild it in a source checkout with:
 
 ```bash
-bash scripts/build_native.sh
+make native
 ```
 
-Alternatively, run `make native` from the repository root.
-
-The native crate retains its original AGPL-3.0 license marker. Keep it on the
-local-development path until its distribution terms are reconciled with the
-MIT-licensed top-level package.
-
-The optional local safety limits are:
+Optional runtime safety limits:
 
 - `DOCTRAIL_INGEST_TIMEOUT_MS` (default `20000`)
 - `DOCTRAIL_INGEST_MAX_NESTING_DEPTH` (default `8192`)
 - `DOCTRAIL_INGEST_MAX_CONTENT_CHARS` (default `2000000`)
 
-The Rust path directly parses the common text, HTML, PDF, Office, EPUB, and
-spreadsheet formats. Its bounded external lanes use `ebook-convert` for
-MOBI/AZW, `djvutxt` for DJVU, `textutil` or `unrtf` for RTF, and `strings` for
-legacy PPT. MuPDF owns PDF text extraction. Files that genuinely require OCR
-are returned to Doctrail for routing through its configured OCR backend; Rust
-never starts a local OCR engine. Every external process has a hard timeout, and
-captured output is limited to 64 MiB.
+The Rust engine parses text, HTML, MHTML, PDF, DOCX, DOC, XLSX, XLS, PPTX,
+EPUB, CSV, TSV, and ZIP archives in process. Bounded external lanes handle
+MOBI/AZW (`ebook-convert`), DJVU (`djvutxt`), RTF (`textutil`/`unrtf`), and
+legacy PPT (`strings`). PDF text comes from `pdftotext` by default with bundled
+MuPDF as fallback and `--pdf-engine pymupdf` override. Files that need OCR are
+flagged and routed through Doctrail's Python OCR layer (`--ocr-engine`).

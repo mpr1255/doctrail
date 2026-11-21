@@ -1082,6 +1082,19 @@ fn extract_path(py: Python<'_>, path: String, html_config: Option<&str>) -> PyRe
     Ok(py.allow_threads(|| extract_one_json(&path, &html)))
 }
 
+/// Bundled reference manual (`docs/llms.txt`) embedded at build time so wheels
+/// carry the exact manual without duplicating files in git.
+#[pyfunction]
+fn bundled_llms_txt() -> &'static str {
+    include_str!("../../../docs/llms.txt")
+}
+
+/// Bundled operating guide (`skills/doctrail/SKILL.md`) embedded at build time.
+#[pyfunction]
+fn bundled_skill_md() -> &'static str {
+    include_str!("../../../skills/doctrail/SKILL.md")
+}
+
 #[pymodule]
 fn _ingest_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(extract_batch, m)?)?;
@@ -1089,6 +1102,8 @@ fn _ingest_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(extract_path, m)?)?;
     m.add_function(wrap_pyfunction!(normalize_html_config, m)?)?;
     m.add_function(wrap_pyfunction!(expand_zip, m)?)?;
+    m.add_function(wrap_pyfunction!(bundled_llms_txt, m)?)?;
+    m.add_function(wrap_pyfunction!(bundled_skill_md, m)?)?;
     Ok(())
 }
 

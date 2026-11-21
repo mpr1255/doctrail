@@ -759,6 +759,15 @@ def _read_packaged_doc(name: str) -> str:
     if source_path.exists():
         return source_path.read_text(encoding="utf-8")
 
+    if name == "llms.txt":
+        try:
+            from doctrail import _ingest_native as native
+
+            if hasattr(native, "bundled_llms_txt"):
+                return native.bundled_llms_txt()
+        except ImportError:
+            pass
+
     try:
         return (
             resources.files("doctrail")
@@ -776,6 +785,14 @@ def _read_packaged_skill() -> str:
     source_path = _repo_root_from_source() / "skills" / "doctrail" / "SKILL.md"
     if source_path.exists():
         return source_path.read_text(encoding="utf-8")
+
+    try:
+        from doctrail import _ingest_native as native
+
+        if hasattr(native, "bundled_skill_md"):
+            return native.bundled_skill_md()
+    except ImportError:
+        pass
 
     try:
         return (
@@ -812,9 +829,9 @@ def _install_packaged_skill(force: bool) -> None:
 
 
 def _tutorial_resource_root():
-    source_path = _repo_root_from_source() / "examples" / "tutorial"
-    if source_path.exists():
-        return source_path
+    local = Path(__file__).resolve().parents[1] / "_examples" / "tutorial"
+    if local.is_dir():
+        return local
     return resources.files("doctrail").joinpath("_examples").joinpath("tutorial")
 
 
@@ -868,8 +885,15 @@ def _apply_tutorial_metadata(db_path: Path, manifest_path: Path) -> None:
         conn.commit()
 
 
+def _tutorial_config_source(root: Path) -> Path:
+    packaged = root / "doctrail_config"
+    if packaged.exists():
+        return packaged
+    return root / ".doctrail"
+
+
 def _copy_tutorial_doctrail(root: Path, destination: Path, corpus: Optional[str]) -> None:
-    source = root / ".doctrail"
+    source = _tutorial_config_source(root)
     if corpus is None:
         shutil.copytree(source, destination)
         return
@@ -915,7 +939,7 @@ def _init_test_scaffold(corpus: Optional[str] = None) -> None:
 
     resource_root = _tutorial_resource_root()
     with _resource_as_path(resource_root) as root:
-        if not (root / "corpus").exists() or not (root / ".doctrail").exists():
+        if not (root / "corpus").exists() or not _tutorial_config_source(root).exists():
             raise click.ClickException("Tutorial scaffold resources are missing from the package.")
 
         corpus_root = root / "corpus"
@@ -948,10 +972,8 @@ def _init_test_scaffold(corpus: Optional[str] = None) -> None:
         yes=True,
         workers=1,
         overwrite=True,
-        skip_garbage_check=True,
         exclude_pattern="manifest.json,federalist_consensus.csv",
         pdf_engine="pymupdf",
-        html_extractor="default",
     ))
     _apply_tutorial_metadata(db_path, cwd / "data" / "manifest.json")
 

@@ -178,39 +178,45 @@ If you would rather not learn the commands, you do not have to: install doctrail
 
 ### PDF text extraction
 
-PDF text is extracted with `pdftotext` from Poppler, which doctrail cannot bundle. Install it before ingesting PDFs: `brew install poppler` on macOS, `apt install poppler-utils` on Debian or Ubuntu. Doctrail looks for it on `PATH` and in `/opt/homebrew/bin`, `/usr/local/bin`, and `/usr/bin`; if it lives elsewhere, set `DOCTRAIL_PDFTOTEXT` to the binary. Ingest stops with these instructions when PDFs are present and `pdftotext` cannot be found. To use the bundled MuPDF instead, pass `--pdf-engine pymupdf`. Both engines record which extractor produced each row in `extraction_method`.
+PDF text is extracted with `pdftotext` from Poppler, which doctrail cannot bundle. Install it before ingesting PDFs: `brew install poppler` on macOS, `apt install poppler-utils` on Debian or Ubuntu. Doctrail looks for it on `PATH` and in `/opt/homebrew/bin`, `/usr/local/bin`, and `/usr/bin`; if it lives elsewhere, set `DOCTRAIL_PDFTOTEXT` to the binary. Ingest stops with these instructions when PDFs are present and `pdftotext` cannot be found.
+
+When `pdftotext` misses spaces between words or finds too little text, doctrail tries its bundled MuPDF automatically and keeps the better reading. Pass `--pdf-engine pymupdf` to use MuPDF directly, or `--pdf-engine ocr` to send every PDF straight to OCR. Every row records which extractor produced it in `extraction_method`.
+
+To extract a single file from Python with no database, call `doctrail.extract.extract_file(path)`: it returns the cleaned text, metadata, OCR flags, and per-page text slices for PDFs.
 
 ### Scanned documents and OCR
 
-Ingest sends scanned PDFs and images through OCR. By default it uses local tools when they are installed: [`textra`](https://github.com/freedmand/textra) on macOS (with `mutool` for PDFs), then `ocrmypdf` for PDFs and `tesseract` for images. Doctrail does not install these tools; without one, scanned pages yield no text. If you run your own OCR service, pass `--ocr-engine mac-ocr` and point `DOCTRAIL_MAC_OCR_CLIENT_PATH` at a Python file you write that defines `async def ocr_async(file_path) -> str`. Doctrail imports that file and awaits `ocr_async` for each scanned PDF or image; it ships no OCR service of its own. With this engine there is no local fallback: when the client raises or returns no text, the file is recorded as failed and a later run retries it.
+Ingest sends scanned PDFs and images through OCR. By default it uses local tools when they are installed: [`textra`](https://github.com/freedmand/textra) on macOS (with `mutool` for PDFs), then `ocrmypdf` for PDFs and `tesseract` for images. Doctrail does not install these tools; without one, scanned files fail extraction rather than being stored empty.
 
-Office files also have embedded images extracted and OCR'd by default. For a routine text-only refresh, use `--skip-embedded-media`; this leaves native document extraction enabled while avoiding LibreOffice conversion processes.
+If you run your own OCR setup — a cluster, a hosted API, or a local script — plug it in without changing doctrail. Pass `--ocr-engine plugin` and set `DOCTRAIL_OCR_PLUGIN` to a Python file that defines `async def ocr_async(file_path: str) -> str` (or a synchronous `def ocr(file_path: str) -> str`):
 
-### Fast native extraction (optional)
+```python
+# my_ocr.py
+import subprocess
 
-Doctrail has two extraction engines. Every install has the Python engine: a plain `uv tool install doctrail` (or `uvx doctrail`) uses it, and `doctrail ingest` works out of the box. The optional native engine is a Rust extension, vendored in the repository, that does multicore extraction in-process. `--extractor auto` (the default) uses the native build when present and otherwise falls back to the Python engine with a printed notice; `--extractor rust` requires the native build and fails if it is missing; `--extractor python` forces the Python engine. Setting `DOCTRAIL_DISABLE_NATIVE=1` disables the native engine at runtime.
-
-Building it requires a source checkout and a Rust toolchain:
-
-```bash
-git clone https://github.com/mpr1255/doctrail && cd doctrail && make native
+def ocr(file_path: str) -> str:
+    return subprocess.check_output(["my-ocr-cli", file_path], text=True)
 ```
 
-This compiles the extension and drops it into the package. It is never shipped in the wheel: the build statically embeds MuPDF, which is licensed under the AGPL-3.0 while the published package is MIT, so the native engine is a local build rather than a distributed binary.
+```bash
+DOCTRAIL_OCR_PLUGIN=./my_ocr.py doctrail ingest --input-dir ./scans --ocr-engine plugin --yes
+```
 
-On an Apple M1 Max, the native engine ingested a mixed 1,000-file corpus about 1.9 times as fast as the Python engine, and extracted a PDF-heavy sample about 15 times as fast; both measurements predate `pdftotext` as the default PDF extractor. The end-to-end gain is smaller than the extraction gain because both engines share the hashing, SQLite writes, and Office media handling. The native engine is also stricter: it fails fast on unreadable files and flags them for OCR instead of retrying, which suits corpora of hundreds of thousands of messy files.
+Doctrail passes each scanned file's path to your function and stores the text it returns. Plugin mode never falls back to local OCR: when the plugin raises or returns empty text, the file is recorded as failed so a later run retries it.
+
+Office files also have embedded images extracted and OCR'd by default. For a routine text-only refresh, use `--skip-embedded-media`; this keeps document text extraction enabled while avoiding LibreOffice conversion processes.
 
 ### Saved web pages
 
 Much research data is web pages saved as HTML or MHTML, and doctrail tunes how it reads them more heavily than any other format. Article text sits beside menus, download links, and lists of related records, and each site lays these out differently, so the reader can be tuned to each collection.
 
-The defaults need no setup. The native engine keeps the main article and the Python engine keeps the whole page; choose with `--html-mode article` or `--html-mode full`:
+The default keeps the main article. Choose with `--html-mode article` or `--html-mode full`:
 
 ```bash
 doctrail ingest --input-dir ./pages --html-mode full --yes
 ```
 
-To strip a site's menus and boilerplate, write a YAML profile of CSS selectors and line patterns and pass it with `--html-profile`. The rules need the native engine. The [HTML profile reference](https://doctrail.org/html/) lists every option and shows how to build a profile from a sample. Rerun with `--overwrite` to re-extract files already ingested.
+To strip a site's menus and boilerplate, write a YAML profile of CSS selectors and line patterns and pass it with `--html-profile`. The [HTML profile reference](https://doctrail.org/html/) lists every option and shows how to build a profile from a sample. Rerun with `--overwrite` to re-extract files already ingested.
 
 ## Before real model calls
 
@@ -1088,9 +1094,8 @@ Usage: doctrail ingest [OPTIONS]
   Supported local file types: txt/md; csv/tsv; pdf; epub; mobi; doc; rtf; docx; xlsx; xls; pptx;
   ppt; djvu; mhtml/mht; html/htm; png/jpg/jpeg/gif/bmp/tiff/tif; zip.
 
-  Saved web pages: the native engine keeps the main article and the Python engine keeps the whole
-  page. --html-mode chooses, and --html-profile tunes full mode for one collection:
-  https://doctrail.org/html/
+  Saved web pages keep the main article by default. Pass --html-mode full for the whole page, and
+  --html-profile to tune full mode for one collection: https://doctrail.org/html/
 
   Examples:
       doctrail ingest --input-dir ./docs --db-path ./data.db
@@ -1111,23 +1116,18 @@ Options:
   --include-pattern TEXT          Only process matching files
   --exclude-pattern TEXT          Skip matching files
   --workers INTEGER RANGE         Number of extraction worker threads  [x>=1]
-  --pdf-engine [auto|pymupdf|pdftotext|mutool|mac-ocr]
+  --pdf-engine [auto|pdftotext|pymupdf|ocr]
                                   PDF extraction strategy; auto uses pdftotext (set
-                                  DOCTRAIL_PDFTOTEXT if it is not on PATH), pymupdf uses the bundled
-                                  MuPDF
-  --ocr-engine [auto|textra|ocrmypdf|mac-ocr]
-                                  OCR backend when OCR is needed
-  --extractor [auto|rust|python]  Extraction engine: auto uses the native build when present, else
-                                  python; rust requires the native build
+                                  DOCTRAIL_PDFTOTEXT if not on PATH), pymupdf uses the bundled
+                                  MuPDF, ocr sends every PDF straight to OCR
+  --ocr-engine [auto|plugin|textra|ocrmypdf]
+                                  OCR backend for scanned PDFs and images; plugin runs the Python
+                                  file named in DOCTRAIL_OCR_PLUGIN
   --readability                   Article text for HTML; the same as --html-mode article
-  --html-mode [article|full]      HTML and MHTML text: article (the main article; the native
-                                  default) or full (the whole page). See https://doctrail.org/html/
-  --html-profile FILE             YAML rules that tune full-mode HTML text for one collection; needs
-                                  the native engine. See https://doctrail.org/html/
-  --html-extractor [default|smart]
-                                  Python engine HTML text: default, or smart to keep paragraphs
-                                  together in both modes
-  --skip-garbage-check            Skip garbage detection
+  --html-mode [article|full]      HTML and MHTML text: article (default, main article) or full
+                                  (whole page). See https://doctrail.org/html/
+  --html-profile FILE             YAML rules that tune full-mode HTML text for one collection. See
+                                  https://doctrail.org/html/
   --skip-embedded-media           Skip embedded Office image extraction and OCR
   -y, --yes                       Skip prompts
   --fulltext                      Create FTS index

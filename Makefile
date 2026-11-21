@@ -2,7 +2,7 @@
 
 help:
 	@printf "%s\n" \
-		"make native              Build the Rust extraction extension and install its .so into the package." \
+		"make native              Rebuild the Rust extraction extension into the local editable install." \
 		"make generated           Rebuild generated docs artifacts." \
 		"make docs                Rebuild generated docs artifacts and the MkDocs site." \
 		"make docs-fresh          Verify generated docs match the current worktree." \
@@ -12,7 +12,7 @@ help:
 		"make deploy              Prepare the tree for the GitHub Pages deploy workflow." \
 		"make release-check       Run the generated-docs gates for a tagged release."
 
-native:
+native: generated
 	bash scripts/build_native.sh
 
 generated:

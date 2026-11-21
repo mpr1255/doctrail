@@ -33,7 +33,7 @@ from reportlab.pdfgen import canvas
 
 
 ROOT = Path(__file__).resolve().parents[1]
-OUT = ROOT / "examples" / "tutorial"
+OUT = ROOT / "src" / "doctrail" / "_examples" / "tutorial"
 DATA = OUT / "corpus"
 FEDERALIST_URL = "https://www.gutenberg.org/cache/epub/1404/pg1404.txt"
 RETRIEVED_ON = "2026-06-10"
@@ -438,7 +438,7 @@ def write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
 
 
 def write_scaffold(built_files: list[BuiltFile]) -> None:
-    doctrail = OUT / ".doctrail"
+    doctrail = OUT / "doctrail_config"
     enrichments = doctrail / "enrichments"
     replay = doctrail / "replay"
     views = doctrail / "views"
@@ -778,7 +778,7 @@ def main() -> None:
     parser.add_argument("--output", type=Path, default=OUT)
     args = parser.parse_args()
     if args.output != OUT:
-        raise SystemExit("This generator writes the repo tutorial corpus at examples/tutorial.")
+        raise SystemExit("This generator writes the repo tutorial corpus at src/doctrail/_examples/tutorial.")
     build()
 
 
