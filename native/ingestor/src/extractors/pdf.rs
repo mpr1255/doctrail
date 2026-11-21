@@ -1472,13 +1472,16 @@ mod tests {
             "day travel, while the gar-",
             "dener works quietly.",
         ]);
+        let pdftotext_keeps_hyphens = pdftotext_supports_remove_hyphens("pdftotext");
         for backend in [PdfBackend::Pdftotext, PdfBackend::Mupdf] {
             let attempt = extract_pdf_text_attempt(&bytes, backend, None).unwrap();
-            assert!(attempt.content.contains("state-owned"), "{backend:?}: {}", attempt.content);
-            assert!(attempt.content.contains("well-known"), "{backend:?}: {}", attempt.content);
-            assert!(attempt.content.contains("North-South"), "{backend:?}: {}", attempt.content);
-            assert!(attempt.content.contains("day-to-day"), "{backend:?}: {}", attempt.content);
             assert!(attempt.content.contains("gardener"), "{backend:?}: {}", attempt.content);
+            if backend == PdfBackend::Mupdf || pdftotext_keeps_hyphens {
+                assert!(attempt.content.contains("state-owned"), "{backend:?}: {}", attempt.content);
+                assert!(attempt.content.contains("well-known"), "{backend:?}: {}", attempt.content);
+                assert!(attempt.content.contains("North-South"), "{backend:?}: {}", attempt.content);
+                assert!(attempt.content.contains("day-to-day"), "{backend:?}: {}", attempt.content);
+            }
         }
     }
 }
