@@ -302,12 +302,14 @@ def _extract_rows_for_file(
         min_dim = min(w, h) if (w and h) else 0
         ocr_text = ""
         ocr_skipped = None
+        ocr_error = None
         ocr_attempted = False
         if is_ocrable(media_name) and (min_dim == 0 or min_dim >= min_ocr_dim):
             ocr_attempted = True
             try:
                 ocr_text = ocr_fn_for_bytes(data, media_name, ocr_fn)
             except Exception as exc:
+                ocr_error = str(exc)
                 logger.warning(f"OCR failed for {path.name} {media_name}: {exc}")
         elif is_ocrable(media_name):
             ocr_skipped = f"below_min_dim:{min_dim}<{min_ocr_dim}"
@@ -319,10 +321,15 @@ def _extract_rows_for_file(
             "Content-Type": f"image/{Path(media_name).suffix.lower().lstrip('.')}",
             "ocr_attempted": ocr_attempted,
             "ocr_status": (
-                "success" if ocr_text else "no_text" if ocr_attempted
-                else "skipped" if ocr_skipped else "unsupported_image_format"
+                "error" if ocr_error
+                else "success" if ocr_text
+                else "no_text" if ocr_attempted
+                else "skipped" if ocr_skipped
+                else "unsupported_image_format"
             ),
         }
+        if ocr_error:
+            metadata["ocr_error"] = ocr_error
         if ocr_skipped:
             metadata["ocr_skipped"] = ocr_skipped
         metadata.update(exif)
@@ -363,11 +370,10 @@ def ocr_fn_for_bytes(data: bytes, media_name: str, ocr_fn: Callable[[Path], str]
 def _ocr_callable(ocr_engine: str):
     """Return a bounded OCR cascade for an extracted image file."""
     from .ocr import (
-        PLUGIN_OCR_ENGINES,
         _try_ocr_image_with_tesseract,
         _try_ocr_image_with_textra,
         normalize_ocr_engine,
-        try_ocr_with_plugin,
+        ocr_with_plugin,
     )
     import asyncio
 
@@ -375,11 +381,9 @@ def _ocr_callable(ocr_engine: str):
 
     def _ocr(path: Path) -> str:
         if canonical == "plugin":
-            try:
-                return asyncio.run(try_ocr_with_plugin(str(path))) or ""
-            except Exception as exc:
-                logger.warning(f"OCR plugin failed for {path.name}: {exc}")
-                return ""
+            # Plugin failures must propagate so the parent Office document is
+            # not marked finished and is retried on the next run.
+            return asyncio.run(ocr_with_plugin(str(path)))
         if canonical in {"auto", "textra"}:
             text = _try_ocr_image_with_textra(str(path), sha1_bytes(path.read_bytes()))
             if text and text.strip():
@@ -474,6 +478,14 @@ def run_media_ingest(
                 continue
             if rows is None:
                 stats["skipped_dupe"] += 1
+                continue
+            failed_rows = [row for row in rows if row["metadata"].get("ocr_status") == "error"]
+            if failed_rows:
+                first_err = failed_rows[0]["metadata"].get("ocr_error") or "OCR failed"
+                logger.warning(
+                    f"Embedded-media OCR failed for {src.name} ({len(failed_rows)}/{len(rows)} image(s)): {first_err}"
+                )
+                stats["failed_files"].append(f"{src}: {first_err}")
                 continue
             if rows:
                 stats["files_with_images"] += 1

@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
-from ..file_filters import check_for_manual_override, should_skip_file
+from ..file_filters import (
+    check_for_existing_ocr_pdf,
+    check_for_manual_override,
+    should_skip_file,
+)
 from . import native_extractor
 from .ocr import (
     LEGACY_OCR_CLIENT_ENV,
@@ -128,32 +133,37 @@ async def process_document(
     if effective_html is None and use_readability:
         effective_html = {"mode": "article"}
 
-    prev_backend = os.environ.get("DOCTRAIL_PDF_BACKEND")
-    prev_pdftotext = os.environ.get("DOCTRAIL_PDFTOTEXT")
-    try:
-        if suffix == ".pdf":
-            pdf_backend = "pdftotext" if pdf_engine in ("auto", "pdftotext") else "mupdf"
-            if pdf_backend == "pdftotext":
-                os.environ["DOCTRAIL_PDFTOTEXT"] = require_pdftotext()
-            os.environ["DOCTRAIL_PDF_BACKEND"] = pdf_backend
+    extract_target = file_path
+    existing_ocr_pdf = None
+    if suffix == ".pdf":
+        existing_ocr_pdf = check_for_existing_ocr_pdf(file_path)
+        if existing_ocr_pdf:
+            extract_target = existing_ocr_pdf
 
-        doc = native_extractor.extract_one(file_path, html=effective_html)
-    finally:
-        if prev_backend is None:
-            os.environ.pop("DOCTRAIL_PDF_BACKEND", None)
-        else:
-            os.environ["DOCTRAIL_PDF_BACKEND"] = prev_backend
-        if prev_pdftotext is None:
-            os.environ.pop("DOCTRAIL_PDFTOTEXT", None)
-        else:
-            os.environ["DOCTRAIL_PDFTOTEXT"] = prev_pdftotext
+    pdf_backend: Optional[str] = None
+    pdftotext_bin: Optional[str] = None
+    if suffix == ".pdf":
+        pdf_backend = "pdftotext" if pdf_engine in ("auto", "pdftotext") else "mupdf"
+        if pdf_backend == "pdftotext":
+            pdftotext_bin = require_pdftotext()
 
-    if native_extractor.is_complete_extraction(doc, file_path):
+    doc = await asyncio.to_thread(
+        native_extractor.extract_one,
+        extract_target,
+        effective_html,
+        pdf_backend=pdf_backend,
+        pdftotext=pdftotext_bin,
+    )
+
+    if native_extractor.is_complete_extraction(doc, extract_target):
         result = native_extractor.to_result(file_path, file_sha1, doc, effective_html)
         metadata = result["metadata"]
         metadata.setdefault("original_file_path", file_path)
         metadata.setdefault("original_file_type", suffix.lstrip("."))
         metadata.setdefault("resourceName", path.name)
+        if existing_ocr_pdf:
+            metadata["ocr_applied"] = True
+            metadata["ocr_file_path"] = existing_ocr_pdf
         return file_sha1, result["content"], metadata
 
     if doc.get("ocr_needed"):
@@ -173,7 +183,10 @@ async def process_document(
             "ocr_engine": engine_used,
         }
 
-    if doc.get("status") == "extracted" and suffix in {".htm", ".html", ".mht", ".mhtml"}:
+    if doc.get("status") == "extracted" and (
+        doc.get("source_format") in {"html", "mhtml"}
+        or suffix in {".htm", ".html", ".mht", ".mhtml"}
+    ):
         raise SkippedFileException(doc.get("error") or "HTML contained no usable document text")
 
     reason = doc.get("error") or doc.get("ocr_reason") or f"status={doc.get('status')!r}"

@@ -48,7 +48,12 @@ from .ocr import (
 )
 from .text_processing import clean_ocr_text
 from ..db_operations import _quote_identifier
-from ..file_filters import should_skip_file, apply_file_patterns, check_for_manual_override
+from ..file_filters import (
+    apply_file_patterns,
+    check_for_existing_ocr_pdf,
+    check_for_manual_override,
+    should_skip_file,
+)
 from .manifest import load_manifest, get_file_metadata, find_manifest_in_directory
 
 # Keep alias for tests that monkeypatch the plugin OCR entry point on core.
@@ -631,7 +636,7 @@ async def process_ingest(
             logger.info(f"Skipping {dup_removed} duplicate-content file(s) with an already-seen sha1")
         files_to_process = deduped
 
-    if not files_to_process and not existing_office_paths and not archive_failures:
+    if not files_to_process and not existing_office_paths and not resume_office_paths and not archive_failures:
         console.print("[yellow]No new files to process.[/yellow]")
         return {
             'status': 'success',
@@ -641,18 +646,18 @@ async def process_ingest(
         }
     
     # pdftotext is the default PDF engine. Fail before extraction rather than
-    # silently falling back to MuPDF, and tell the native extractor which
-    # backend and binary to use.
+    # silently falling back to MuPDF, and pass the backend and binary explicitly
+    # to each native batch instead of mutating process-wide environment variables.
     force_pdf_ocr = pdf_engine in ("ocr", "mac-ocr")
     effective_ocr_engine = normalize_ocr_engine(
         "plugin" if (pdf_engine == "mac-ocr" and ocr_engine == "auto") else ocr_engine
     )
     pdf_backend = "pdftotext" if pdf_engine in ("auto", "pdftotext") else "mupdf"
+    pdftotext_bin: Optional[str] = None
     if not force_pdf_ocr and pdf_backend == "pdftotext" and any(
         Path(fp).suffix.lower() == ".pdf" for fp, _ in files_to_process
     ):
-        os.environ["DOCTRAIL_PDFTOTEXT"] = require_pdftotext()
-    os.environ["DOCTRAIL_PDF_BACKEND"] = pdf_backend
+        pdftotext_bin = require_pdftotext()
 
     # Show summary and confirm
     worker_count = min(_default_worker_count() if workers is None else workers, max(1, len(files_to_process)))
@@ -811,7 +816,10 @@ async def process_ingest(
             try:
                 async with native_ocr_semaphore:
                     if effective_ocr_engine == "plugin":
-                        ocr_text = clean_ocr_text(await ocr_with_mac_ocr(path))
+                        raw_text = await ocr_with_mac_ocr(path)
+                        ocr_text = clean_ocr_text(raw_text).strip()
+                        if not ocr_text:
+                            raise RuntimeError(f"OCR plugin returned empty text for {path}")
                         method, engine_used = "ocr_plugin", "plugin"
                     else:
                         ocr_text, method, engine_used = await run_ocr(
@@ -855,6 +863,7 @@ async def process_ingest(
                 "elapsed": (doc.get("extraction_ms") or 0) / 1000.0,
             }
 
+        ocr_sibling_for_original: Dict[str, str] = {}
         for fp, sha in files_to_process:
             p = str(fp)
             override_path = check_for_manual_override(p)
@@ -895,6 +904,10 @@ async def process_ingest(
                     },
                 ))
                 continue
+            if fp.suffix.lower() == ".pdf":
+                sibling = check_for_existing_ocr_pdf(p)
+                if sibling:
+                    ocr_sibling_for_original[p] = sibling
             native_paths.append(p)
 
         # Keep extraction batches small enough that OCR-heavy corpora make
@@ -905,6 +918,7 @@ async def process_ingest(
             if shutdown_requested:
                 break
             batch_paths = native_paths[start:start + native_chunk]
+            extract_paths = [ocr_sibling_for_original.get(p, p) for p in batch_paths]
             progress.update(
                 task,
                 description=(
@@ -914,7 +928,13 @@ async def process_ingest(
                 ),
             )
             try:
-                docs = native_extractor.extract_batch(batch_paths, workers, html)
+                docs = native_extractor.extract_batch(
+                    extract_paths,
+                    workers,
+                    html,
+                    pdf_backend=pdf_backend,
+                    pdftotext=pdftotext_bin,
+                )
             except Exception as exc:
                 logger.error(f"Native extract_batch failed for {len(batch_paths)} file(s): {exc}")
                 for p in batch_paths:
@@ -925,9 +945,13 @@ async def process_ingest(
                         "elapsed": 0,
                     })
                 continue
-            for p, doc in zip(batch_paths, docs):
-                if native_extractor.is_complete_extraction(doc, p):
-                    handle_result(native_extractor.to_result(p, path_to_sha[p], doc, html))
+            for p, extract_path, doc in zip(batch_paths, extract_paths, docs):
+                if native_extractor.is_complete_extraction(doc, extract_path):
+                    result = native_extractor.to_result(p, path_to_sha[p], doc, html)
+                    if p in ocr_sibling_for_original:
+                        result["metadata"]["ocr_applied"] = True
+                        result["metadata"]["ocr_file_path"] = ocr_sibling_for_original[p]
+                    handle_result(result)
                     continue
                 if doc.get("ocr_needed"):
                     deferred_ocr.append((p, doc))
@@ -938,10 +962,9 @@ async def process_ingest(
                     or str(doc.get("mime_type") or "").startswith("multipart/related")
                     or suffix in {".mht", ".mhtml"}
                 )
+                is_html = doc.get("source_format") == "html" or suffix in {".htm", ".html"}
                 error = doc.get("error") or ""
-                if doc.get("status") == "extracted" and (
-                    suffix in {".htm", ".html"} or is_mhtml
-                ):
+                if doc.get("status") == "extracted" and (is_html or is_mhtml):
                     empty = "HTML contained no usable document text"
                     if html_rules:
                         empty += " after the HTML profile rules"

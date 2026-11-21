@@ -9,8 +9,8 @@
         ...
 
 The result is the native engine's record for the file plus ``pages``, a list of
-``(page_number, text)`` pairs for each PDF page that has text. Joined in order,
-the page texts make up ``content``; a paragraph that runs over a page break is
+``(page_number, text)`` pairs for each PDF page that has text, with leading and
+trailing whitespace trimmed per page. A paragraph that runs over a page break is
 split between its two pages. Other formats have no pages and return an empty
 list.
 """

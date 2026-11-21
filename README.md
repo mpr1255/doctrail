@@ -48,4 +48,4 @@ Inside the package, `doctrail docs` prints the reference documentation offline.
 
 ## License
 
-GNU AGPL-3.0-or-later (see [LICENSE](LICENSE)). Doctrail bundles MuPDF for PDF extraction.
+GNU AGPL-3.0-or-later (see [LICENSE](LICENSE) and [THIRD_PARTY_NOTICES.txt](THIRD_PARTY_NOTICES.txt)). Doctrail bundles MuPDF for PDF extraction; corresponding source for every release is published in the matching PyPI source distribution and this repository.

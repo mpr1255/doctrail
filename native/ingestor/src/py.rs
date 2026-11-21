@@ -9,9 +9,10 @@
 
 use crate::{
     classify_extraction_failure, detect_content_type, extract_bytes, extract_bytes_with, extract_file,
-    extract_file_with,
+    extract_file_with_config,
     ContentTypeDetection,
     low_value_content_rejection, ExtractOptions, ExtractedDocument, HtmlConfig, HtmlKind, HtmlMode,
+    PdfConfig,
 };
 use anyhow::{bail, Context, Result};
 use chardetng::EncodingDetector;
@@ -173,7 +174,7 @@ fn doc_out_from_extracted(
     }
 }
 
-fn extract_one(path: &str, html: &HtmlConfig) -> DocOut {
+fn extract_one(path: &str, html: &HtmlConfig, pdf: &PdfConfig) -> DocOut {
     let started = Instant::now();
     let extension = Path::new(path)
         .extension()
@@ -261,7 +262,7 @@ fn extract_one(path: &str, html: &HtmlConfig) -> DocOut {
         source_path: Some(path),
         kind: HtmlKind::Auto,
     };
-    match extract_file_with(Path::new(path), opts, html) {
+    match extract_file_with_config(Path::new(path), opts, html, pdf) {
         Ok(doc) => doc_out_from_extracted(path, doc, started, html),
         Err(e) => {
             let mut profile_blocked = false;
@@ -740,13 +741,13 @@ fn panic_to_string(panic: Box<dyn std::any::Any + Send>) -> String {
     }
 }
 
-fn extract_one_json(path: &str, html: &HtmlConfig) -> String {
+fn extract_one_json(path: &str, html: &HtmlConfig, pdf: &PdfConfig) -> String {
     // Contain per-file Rust panics: a panic in one document must become a
     // `status=failed` result for that file, never propagate out of the rayon
     // closure (which would surface as a PyO3 PanicException and kill the whole
     // batch/CLI). A C-level abort/segfault in a native lib still cannot be
     // caught in-process; that is a known limitation.
-    let doc = match catch_unwind(AssertUnwindSafe(|| extract_one(path, html))) {
+    let doc = match catch_unwind(AssertUnwindSafe(|| extract_one(path, html, pdf))) {
         Ok(doc) => doc,
         Err(panic) => failed_doc(path, format!("panic: {}", panic_to_string(panic))),
     };
@@ -1025,19 +1026,25 @@ fn normalize_html_config(html_config: &str) -> PyResult<String> {
 /// with the HTML settings (see `HtmlConfig`); it is validated before any file
 /// is read.
 #[pyfunction]
-#[pyo3(signature = (paths, threads=None, html_config=None))]
+#[pyo3(signature = (paths, threads=None, html_config=None, pdf_backend=None, pdftotext=None))]
 fn extract_batch(
     py: Python<'_>,
     paths: Vec<String>,
     threads: Option<usize>,
     html_config: Option<&str>,
+    pdf_backend: Option<&str>,
+    pdftotext: Option<&str>,
 ) -> PyResult<Vec<String>> {
     let html = parse_html_config(html_config)?;
+    let pdf = PdfConfig {
+        backend: pdf_backend.map(str::to_string),
+        pdftotext: pdftotext.map(str::to_string),
+    };
     Ok(py.allow_threads(|| {
         let run = || {
             paths
                 .par_iter()
-                .map(|p| extract_one_json(p, &html))
+                .map(|p| extract_one_json(p, &html, &pdf))
                 .collect::<Vec<String>>()
         };
         match threads {
@@ -1076,10 +1083,20 @@ fn hash_batch(py: Python<'_>, paths: Vec<String>, threads: Option<usize>) -> Vec
 
 /// Extract a single path (GIL released). Returns one JSON string.
 #[pyfunction]
-#[pyo3(signature = (path, html_config=None))]
-fn extract_path(py: Python<'_>, path: String, html_config: Option<&str>) -> PyResult<String> {
+#[pyo3(signature = (path, html_config=None, pdf_backend=None, pdftotext=None))]
+fn extract_path(
+    py: Python<'_>,
+    path: String,
+    html_config: Option<&str>,
+    pdf_backend: Option<&str>,
+    pdftotext: Option<&str>,
+) -> PyResult<String> {
     let html = parse_html_config(html_config)?;
-    Ok(py.allow_threads(|| extract_one_json(&path, &html)))
+    let pdf = PdfConfig {
+        backend: pdf_backend.map(str::to_string),
+        pdftotext: pdftotext.map(str::to_string),
+    };
+    Ok(py.allow_threads(|| extract_one_json(&path, &html, &pdf)))
 }
 
 /// Bundled reference manual (`docs/llms.txt`) embedded at build time so wheels
@@ -1308,17 +1325,18 @@ mod tests {
         fs::write(&page, "<html><body><article><p>A real page about the archive.</p></article></body></html>")
             .unwrap();
         let config = HtmlConfig::default();
+        let pdf = PdfConfig::default();
 
-        let image = extract_one(jpeg.to_str().unwrap(), &config);
+        let image = extract_one(jpeg.to_str().unwrap(), &config, &pdf);
         assert_eq!(image.status, "fallback_required");
         assert!(image.ocr_needed);
         assert_eq!(image.source_format.as_deref(), Some("jpg"));
 
-        let clip = extract_one(video.to_str().unwrap(), &config);
+        let clip = extract_one(video.to_str().unwrap(), &config, &pdf);
         assert_eq!(clip.status, "failed");
         assert!(clip.error.unwrap().contains("video/"), "video detected");
 
-        let html = extract_one(page.to_str().unwrap(), &config);
+        let html = extract_one(page.to_str().unwrap(), &config, &pdf);
         assert_eq!(html.status, "extracted");
         assert!(html.content.contains("real page"));
     }
@@ -1345,20 +1363,21 @@ mod tests {
         jpeg.extend(std::iter::repeat(0x5a).take(4096));
         fs::write(&binary, gzip(&jpeg)).unwrap();
         let config = HtmlConfig::default();
+        let pdf = PdfConfig::default();
 
-        let doc = extract_one(page.to_str().unwrap(), &config);
+        let doc = extract_one(page.to_str().unwrap(), &config, &pdf);
         assert_eq!(doc.status, "extracted", "{:?}", doc.error);
         assert!(doc.content.contains("Rain is expected"), "{}", doc.content);
         let encoding = &doc.extraction_metadata.unwrap()["content_extraction"]["content_encoding"];
         assert_eq!(encoding, "gzip");
 
-        let failed = extract_one(binary.to_str().unwrap(), &config);
+        let failed = extract_one(binary.to_str().unwrap(), &config, &pdf);
         assert_eq!(failed.status, "failed");
         assert!(failed.error.unwrap().contains("gzip-compressed image/"));
 
         let text = root.path().join("forecast.txt");
         fs::write(&text, gzip(b"Rain is expected across the region on Tuesday.\n")).unwrap();
-        let doc = extract_one(text.to_str().unwrap(), &config);
+        let doc = extract_one(text.to_str().unwrap(), &config, &pdf);
         assert_eq!(doc.status, "extracted", "{:?}", doc.error);
         assert_eq!(doc.content, "Rain is expected across the region on Tuesday.");
     }
@@ -1371,7 +1390,7 @@ mod tests {
         bytes.resize(LARGE_HTML_EXTERNAL_BYTES as usize + 1024, 0x5a);
         fs::write(&jpeg, bytes).unwrap();
 
-        let image = extract_one(jpeg.to_str().unwrap(), &HtmlConfig::default());
+        let image = extract_one(jpeg.to_str().unwrap(), &HtmlConfig::default(), &PdfConfig::default());
         assert_eq!(image.status, "fallback_required");
         assert!(image.ocr_needed);
     }

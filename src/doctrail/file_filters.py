@@ -210,3 +210,18 @@ def check_for_manual_override(file_path: str) -> Optional[str]:
             return str(override_path)
     
     return None
+
+
+def check_for_existing_ocr_pdf(file_path: str) -> Optional[str]:
+    """Return an existing OCR sibling PDF (`name--OCR.pdf` or `name_ocr.pdf`) if present."""
+    path = Path(file_path)
+    if path.suffix.lower() != ".pdf":
+        return None
+    if path.stem.endswith("--OCR") or path.stem.endswith("_ocr"):
+        return None
+    for candidate_name in (f"{path.stem}--OCR.pdf", f"{path.stem}_ocr.pdf"):
+        candidate = path.parent / candidate_name
+        if candidate.is_file():
+            logger.info(f"Found existing OCR sibling PDF: {candidate}")
+            return str(candidate)
+    return None

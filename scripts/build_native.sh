@@ -10,6 +10,6 @@ echo "building native extraction extension (release)..."
 if [ ! -d "$here/.venv" ]; then
     uv sync --no-install-project
 fi
-VIRTUAL_ENV="$here/.venv" uv run --no-project --with 'maturin>=1.7,<2' maturin develop --release --uv
+uv run --no-project --with 'maturin>=1.10,<2' env VIRTUAL_ENV="$here/.venv" maturin develop --release --uv
 
-uv run --no-sync python -c "import doctrail._ingest_native as n; assert hasattr(n, 'extract_batch') and hasattr(n, 'bundled_llms_txt'); print('OK: doctrail._ingest_native built and importable')"
+"$here/.venv/bin/python" -c "import doctrail._ingest_native as n; assert hasattr(n, 'extract_batch') and hasattr(n, 'bundled_llms_txt'); print('OK: doctrail._ingest_native built and importable')"

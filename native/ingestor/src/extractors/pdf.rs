@@ -30,8 +30,8 @@ static CHAPTER_MARKER_RE: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r"^第[一二三四五六七八九十0-9]+[章节部分条]").expect("chapter marker regex")
 });
 static PDF_EXTRACTION_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
-static SOFT_HYPHEN_BREAK_RE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"\u{ad}[ \t]*\r?\n[ \t]*").expect("soft hyphen regex"));
+static PDFTOTEXT_HYPHEN_FLAG_CACHE: Lazy<Mutex<HashMap<String, bool>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
 static PAGE_TAG_RE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"\u{fdd0}([0-9]+)\u{fdd1}").expect("page tag regex"));
 static LATIN_WORD_RE: Lazy<Regex> =
@@ -93,10 +93,26 @@ struct PdfExtractionAttempt {
     fallback_attempts: Vec<Value>,
 }
 
+#[derive(Clone, Debug, Default)]
+pub struct PdfConfig {
+    pub backend: Option<String>,
+    pub pdftotext: Option<String>,
+}
+
+#[cfg(test)]
 pub(crate) fn extract_pdf_bytes(
     bytes: &[u8],
     source_path: Option<&str>,
     mime_type: Option<&str>,
+) -> anyhow::Result<super::types::GeneralExtractedDocument> {
+    extract_pdf_bytes_with_config(bytes, source_path, mime_type, &PdfConfig::default())
+}
+
+pub(crate) fn extract_pdf_bytes_with_config(
+    bytes: &[u8],
+    source_path: Option<&str>,
+    mime_type: Option<&str>,
+    pdf: &PdfConfig,
 ) -> anyhow::Result<super::types::GeneralExtractedDocument> {
     if !bytes[..bytes.len().min(1024)]
         .windows(5)
@@ -106,8 +122,8 @@ pub(crate) fn extract_pdf_bytes(
     }
     let total_started_at = Instant::now();
 
-    let backend_request = requested_pdf_backend();
-    let attempt = extract_pdf_text_attempt(bytes, backend_request)?;
+    let backend_request = requested_pdf_backend(pdf);
+    let attempt = extract_pdf_text_attempt(bytes, backend_request, pdf.pdftotext.as_deref())?;
     let title = title_from_raw_pdf_text(&attempt.raw_text)
         .or_else(|| title_from_content_text(&attempt.content))
         .unwrap_or_default();
@@ -235,10 +251,16 @@ pub(crate) fn extract_pdf_bytes(
     })
 }
 
-/// pdftotext unless the caller set DOCTRAIL_PDF_BACKEND=mupdf.
-fn requested_pdf_backend() -> PdfBackend {
+/// pdftotext unless the caller or DOCTRAIL_PDF_BACKEND asked for mupdf.
+fn requested_pdf_backend(pdf: &PdfConfig) -> PdfBackend {
+    if let Some(backend) = pdf.backend.as_deref() {
+        return match backend {
+            "mupdf" | "pymupdf" => PdfBackend::Mupdf,
+            _ => PdfBackend::Pdftotext,
+        };
+    }
     match std::env::var("DOCTRAIL_PDF_BACKEND").as_deref() {
-        Ok("mupdf") => PdfBackend::Mupdf,
+        Ok("mupdf") | Ok("pymupdf") => PdfBackend::Mupdf,
         _ => PdfBackend::Pdftotext,
     }
 }
@@ -255,6 +277,7 @@ impl PdfBackend {
 fn extract_pdf_text_attempt(
     bytes: &[u8],
     backend: PdfBackend,
+    pdftotext_override: Option<&str>,
 ) -> anyhow::Result<PdfExtractionAttempt> {
     let started_at = Instant::now();
     if backend == PdfBackend::Mupdf {
@@ -262,7 +285,7 @@ fn extract_pdf_text_attempt(
         return Ok(process_pdf_extraction_result(result, started_at.elapsed()));
     }
     // A missing binary is a setup error, not a damaged PDF: never mask it.
-    let result = match extract_with_pdftotext(bytes) {
+    let result = match extract_with_pdftotext(bytes, pdftotext_override) {
         Err(error) if is_not_found(&error) => anyhow::bail!(PDFTOTEXT_INSTALL_HINT),
         Err(error) => extract_with_mupdf_guarded(bytes)?.map(|mut extraction| {
             extraction.fallback_from = Some("pdftotext");
@@ -300,13 +323,54 @@ fn is_not_found(error: &anyhow::Error) -> bool {
         .is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound)
 }
 
-fn extract_with_pdftotext(bytes: &[u8]) -> anyhow::Result<PdfTextExtraction> {
-    let program = std::env::var("DOCTRAIL_PDFTOTEXT").unwrap_or_else(|_| "pdftotext".to_string());
+/// Poppler 26+ strips end-of-line hyphens by default (`-remove-hyphens all`),
+/// fusing hyphenated compounds like `state-\nowned` into `stateowned` before
+/// doctrail sees the line break. Detect `-remove-hyphens` once per binary path
+/// so we pass `-remove-hyphens none` on Poppler 26+ without breaking older
+/// Poppler builds that do not know the flag.
+fn pdftotext_supports_remove_hyphens(program: &str) -> bool {
+    {
+        let cache = PDFTOTEXT_HYPHEN_FLAG_CACHE
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(&supported) = cache.get(program) {
+            return supported;
+        }
+    }
+    let supported = Command::new(program)
+        .arg("-h")
+        .stdin(Stdio::null())
+        .output()
+        .map(|output| {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            stdout.contains("-remove-hyphens") || stderr.contains("-remove-hyphens")
+        })
+        .unwrap_or(false);
+    let mut cache = PDFTOTEXT_HYPHEN_FLAG_CACHE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    cache.insert(program.to_string(), supported);
+    supported
+}
+
+fn extract_with_pdftotext(
+    bytes: &[u8],
+    pdftotext_override: Option<&str>,
+) -> anyhow::Result<PdfTextExtraction> {
+    let program = pdftotext_override
+        .map(str::to_string)
+        .or_else(|| std::env::var("DOCTRAIL_PDFTOTEXT").ok())
+        .unwrap_or_else(|| "pdftotext".to_string());
     let mut input = tempfile::NamedTempFile::new().context("creating pdftotext input file")?;
     input.write_all(bytes).context("writing pdftotext input file")?;
     let output = tempfile::NamedTempFile::new().context("creating pdftotext output file")?;
     let stderr = tempfile::NamedTempFile::new().context("creating pdftotext stderr file")?;
-    let mut child = Command::new(&program)
+    let mut command = Command::new(&program);
+    if pdftotext_supports_remove_hyphens(&program) {
+        command.args(["-remove-hyphens", "none"]);
+    }
+    let mut child = command
         .args(["-enc", "UTF-8"])
         .arg(input.path())
         .arg(output.path())
@@ -365,13 +429,14 @@ fn process_pdf_extraction_result(
         .map(|value| value.raw_text.clone())
         .unwrap_or_default();
     let cleanup_started_at = Instant::now();
-    // A soft hyphen marks a word broken across lines: rejoin it, and drop the rest.
-    let rejoined = SOFT_HYPHEN_BREAK_RE.replace_all(&raw_text, "");
-    let mut cleaned_raw = String::with_capacity(rejoined.len());
-    for ch in rejoined.chars() {
-        // pdftotext keeps ligature glyphs, which hide a word from search.
+    // Expand ligature glyphs (which hide words from search) and strip any
+    // stray internal page sentinels from source text. Soft hyphens (`\u{ad}`)
+    // stay until `smart_paragraph_cleanup` so line-end soft hyphens rejoin
+    // cleanly even across a page break, and interior soft hyphens are dropped.
+    let mut cleaned_raw = String::with_capacity(raw_text.len());
+    for ch in raw_text.chars() {
         match ch {
-            '\u{ad}' | PAGE_TAG_OPEN | PAGE_TAG_CLOSE => {}
+            PAGE_TAG_OPEN | PAGE_TAG_CLOSE => {}
             '\u{fb00}' => cleaned_raw.push_str("ff"),
             '\u{fb01}' => cleaned_raw.push_str("fi"),
             '\u{fb02}' => cleaned_raw.push_str("fl"),
@@ -381,8 +446,7 @@ fn process_pdf_extraction_result(
             other => cleaned_raw.push(other),
         }
     }
-    let rejoined = cleaned_raw;
-    let marked_raw_content = add_python_style_page_markers(&rejoined);
+    let marked_raw_content = tag_physical_pages(&cleaned_raw);
     let tagged = smart_paragraph_cleanup(&marked_raw_content);
     let smart_content = PAGE_TAG_RE.replace_all(&tagged, "").into_owned();
     let (content, page_offsets) = take_page_offsets(&clean_text(&tagged));
@@ -453,16 +517,22 @@ fn extract_with_mupdf(bytes: &[u8]) -> anyhow::Result<PdfTextExtraction> {
     })
 }
 
-fn add_python_style_page_markers(raw_text: &str) -> String {
+fn tag_physical_pages(raw_text: &str) -> String {
     raw_text
         .split('\x0c')
         .enumerate()
         .filter_map(|(index, page)| {
             let page = page.trim();
-            (!page.is_empty()).then(|| format!("--- Page {} ---\n{}", index + 1, page))
+            (!page.is_empty()).then(|| format!("{PAGE_TAG_OPEN}{}{PAGE_TAG_CLOSE}\n{page}", index + 1))
         })
         .collect::<Vec<_>>()
         .join("\n\n")
+}
+
+fn parse_page_marker_line(line: &str) -> Option<usize> {
+    let rest = line.strip_prefix(PAGE_TAG_OPEN)?;
+    let digits = rest.strip_suffix(PAGE_TAG_CLOSE)?;
+    digits.parse().ok()
 }
 
 fn clean_text(text: &str) -> String {
@@ -510,43 +580,65 @@ fn smart_paragraph_cleanup(text: &str) -> String {
     // Set at a page marker; the next line of text carries the page's tag.
     let mut page_start: Option<usize> = None;
 
-    for line in lines {
-        let line = line.trim();
-        if line.is_empty() {
+    for raw_line in lines {
+        let trimmed = raw_line.trim();
+        if trimmed.is_empty() {
             if !current_paragraph.is_empty() {
-                paragraphs.push(current_paragraph.join(""));
+                paragraphs.push(finalize_paragraph(&current_paragraph));
                 current_paragraph.clear();
             }
             continue;
         }
 
-        if let Some(rest) = line.strip_prefix("--- Page") {
-            page_start = rest.trim_end_matches('-').trim().parse().ok();
+        if let Some(page) = parse_page_marker_line(trimmed) {
+            page_start = Some(page);
             continue;
         }
+        // Keep a trailing soft hyphen only until the next line decides the join;
+        // remove any interior soft hyphens from the line.
+        let trailing_soft_hyphen = trimmed.ends_with('\u{ad}');
+        let mut line: String = trimmed.chars().filter(|&ch| ch != '\u{ad}').collect();
+        if line.is_empty() {
+            continue;
+        }
+        if trailing_soft_hyphen {
+            line.push('\u{ad}');
+        }
+
         let tag = page_start
             .take()
             .map(|page| format!("{PAGE_TAG_OPEN}{page}{PAGE_TAG_CLOSE}"))
             .unwrap_or_default();
 
-        if starts_new_paragraph(line, &current_paragraph) {
+        if starts_new_paragraph(&line, &current_paragraph) {
             if !current_paragraph.is_empty() {
-                paragraphs.push(current_paragraph.join(""));
+                paragraphs.push(finalize_paragraph(&current_paragraph));
             }
             current_paragraph = vec![format!("{tag}{line}")];
             continue;
         }
 
+        let paragraph_so_far = current_paragraph.join("");
         let previous = current_paragraph.last_mut().expect("paragraph has a line");
         let mut tail = previous.chars().rev();
         let last_char = tail.next();
         let before_last = tail.next();
         let first_char = line.chars().next();
-        if matches!(last_char, Some('-' | '\u{2010}'))
+        if last_char == Some('\u{ad}') {
+            previous.pop();
+            current_paragraph.push(format!("{tag}{line}"));
+        } else if matches!(last_char, Some('-' | '\u{2010}'))
             && before_last.is_some_and(char::is_alphanumeric)
             && first_char.is_some_and(char::is_alphanumeric)
         {
-            if keep_line_break_hyphen(previous, line, before_last.unwrap(), first_char.unwrap(), &doc_words) {
+            let context = PAGE_TAG_RE.replace_all(&paragraph_so_far, "");
+            if keep_line_break_hyphen(
+                &context,
+                &line,
+                before_last.unwrap(),
+                first_char.unwrap(),
+                &doc_words,
+            ) {
                 current_paragraph.push(format!("{tag}{line}"));
             } else {
                 previous.pop();
@@ -567,10 +659,14 @@ fn smart_paragraph_cleanup(text: &str) -> String {
     }
 
     if !current_paragraph.is_empty() {
-        paragraphs.push(current_paragraph.join(""));
+        paragraphs.push(finalize_paragraph(&current_paragraph));
     }
 
     paragraphs.join("\n\n")
+}
+
+fn finalize_paragraph(parts: &[String]) -> String {
+    parts.join("").replace('\u{ad}', "")
 }
 
 /// English word list (derived from the MIT-licensed pyspellchecker dictionary)
@@ -641,28 +737,33 @@ impl DocWordCounts {
         let mut hyphenated: HashMap<String, usize> = HashMap::new();
         for &raw_line in lines {
             let line = raw_line.trim();
-            if line.is_empty() || line.starts_with("--- Page") {
+            if line.is_empty() || parse_page_marker_line(line).is_some() {
                 continue;
             }
             for token in line.split_whitespace() {
-                // Skip tokens ending in a trailing line-break hyphen.
-                if token.ends_with('-') || token.ends_with('\u{2010}') {
+                // Skip tokens ending in a trailing line-break hyphen or soft hyphen.
+                if token.ends_with(['-', '\u{2010}', '\u{ad}']) {
                     continue;
                 }
-                let trimmed = token.trim_matches(|ch: char| !ch.is_alphabetic());
+                let clean_token = token.replace('\u{ad}', "");
+                let trimmed = clean_token.trim_matches(|ch: char| !ch.is_alphabetic());
                 if trimmed.is_empty() {
                     continue;
                 }
-                if trimmed.contains(['-', '\u{2010}']) {
-                    let parts: Vec<String> = trimmed
-                        .split(['-', '\u{2010}'])
-                        .filter(|part| !part.is_empty() && part.chars().all(char::is_alphabetic))
-                        .map(|part| part.to_lowercase())
-                        .collect();
+                if trimmed.contains(['-', '\u{2010}', '\u{2011}']) {
+                    // Keep every split segment in order so non-alphabetic gaps
+                    // (like `gar-2-dener`) never create fake adjacent pairs.
+                    let parts: Vec<&str> = trimmed.split(['-', '\u{2010}', '\u{2011}']).collect();
                     for pair in parts.windows(2) {
-                        *hyphenated
-                            .entry(format!("{}-{}", pair[0], pair[1]))
-                            .or_insert(0) += 1;
+                        if !pair[0].is_empty()
+                            && !pair[1].is_empty()
+                            && pair[0].chars().all(char::is_alphabetic)
+                            && pair[1].chars().all(char::is_alphabetic)
+                        {
+                            *hyphenated
+                                .entry(format!("{}-{}", pair[0].to_lowercase(), pair[1].to_lowercase()))
+                                .or_insert(0) += 1;
+                        }
                     }
                 } else if trimmed.chars().all(char::is_alphabetic) {
                     *plain.entry(trimmed.to_lowercase()).or_insert(0) += 1;
@@ -698,7 +799,7 @@ fn trailing_hyphen_left(previous: &str) -> (String, bool) {
     let had_prior_hyphen = without_hyphen[..start]
         .chars()
         .next_back()
-        .is_some_and(|ch| matches!(ch, '-' | '\u{2010}'));
+        .is_some_and(|ch| matches!(ch, '-' | '\u{2010}' | '\u{2011}'));
     (left, had_prior_hyphen)
 }
 
@@ -733,21 +834,11 @@ fn keep_line_break_hyphen(
 
     let joined = format!("{left}{right}");
     let hyph = format!("{left}-{right}");
-
-    // 1. Same-document self-evidence (works in every Latin-script language).
-    let h_count = doc_words.hyphenated_count(&hyph);
-    let j_count = doc_words.plain_count(&joined);
-    if h_count > j_count {
-        return true;
-    }
-    if j_count > 0 {
-        return false;
-    }
-
     let lexicon = &*ENGLISH_LEXICON;
 
-    // 2. Multi-part compounds like `day-to-day`, `up-to-date`, `state-of-the-art`
-    // where `left` + `right` could otherwise collide with a closed word (`today`).
+    // 1. Multi-part compounds like `day-to-day`, `up-to-date`, `state-of-the-art`
+    // where the trailing connector + word (`to` + `day`) would otherwise collide
+    // with an unrelated closed word (`today`) elsewhere in the same document.
     if had_prior_hyphen
         && matches!(
             left.as_str(),
@@ -757,6 +848,16 @@ fn keep_line_break_hyphen(
         && lexicon.is_common(&right)
     {
         return true;
+    }
+
+    // 2. Same-document self-evidence (works in every Latin-script language).
+    let h_count = doc_words.hyphenated_count(&hyph);
+    let j_count = doc_words.plain_count(&joined);
+    if h_count > j_count {
+        return true;
+    }
+    if j_count > 0 {
+        return false;
     }
 
     // 3. Dictionary closed word beats compound split (`gardener`, `newspaper`,
@@ -823,10 +924,13 @@ fn take_page_offsets(tagged: &str) -> (String, Vec<(usize, usize)>) {
 fn long_word_share(text: &str) -> f64 {
     let mut words = 0usize;
     let mut long = 0usize;
+    let mut total_latin_chars = 0usize;
+    let mut long_latin_chars = 0usize;
     for word in LATIN_WORD_RE.find_iter(text) {
         let token = word.as_str();
         words += 1;
         let len = token.chars().count();
+        total_latin_chars += len;
         if len >= LONG_WORD_LETTERS {
             let lower = token.chars().filter(|ch| ch.is_lowercase()).count();
             let is_nucleotide = token
@@ -834,10 +938,16 @@ fn long_word_share(text: &str) -> f64 {
                 .all(|b| matches!(b.to_ascii_lowercase(), b'a' | b'c' | b'g' | b't' | b'u' | b'n'));
             if lower * 2 >= len && !is_nucleotide {
                 long += 1;
+                long_latin_chars += len;
             }
         }
     }
     if words < MIN_WORDS_FOR_LONG_WORD_SHARE {
+        // A page whose spaces were completely stripped produces very few tokens
+        // (sometimes just one), so catch long unbroken runs by character share.
+        if long > 0 && long_latin_chars >= 500 && long_latin_chars * 2 >= total_latin_chars {
+            return 1.0;
+        }
         return 0.0;
     }
     long as f64 / words as f64
@@ -1172,7 +1282,7 @@ mod tests {
         )
         .unwrap();
         for backend in [PdfBackend::Pdftotext, PdfBackend::Mupdf] {
-            let attempt = extract_pdf_text_attempt(&bytes, backend).unwrap();
+            let attempt = extract_pdf_text_attempt(&bytes, backend, None).unwrap();
             assert_eq!(attempt.backend, Some(backend.as_str()));
             assert_eq!(attempt.page_count, Some(1));
             assert!(attempt.content.contains("Federalist fixture"));
@@ -1247,5 +1357,128 @@ mod tests {
         }
         let text = words.join(" ");
         assert_eq!(long_word_share(&text), 0.0);
+    }
+
+    #[test]
+    fn completely_glued_passage_triggers_long_word_share() {
+        let glued = "accordancewithhisobligationstothestate".repeat(30);
+        assert_eq!(long_word_share(&glued), 1.0);
+    }
+
+    #[test]
+    fn literal_page_heading_text_is_preserved_and_not_parsed_as_page_break() {
+        let raw = "--- Page layout ---\nFirst page body.\n--- Page 98 ---\nStill page one.\x0cSecond page body.";
+        let attempt = process_pdf_extraction_result(
+            Ok(PdfTextExtraction {
+                raw_text: raw.to_string(),
+                page_count: Some(2),
+                page_count_method: Some("test"),
+                backend: "test",
+                fallback_from: None,
+                fallback_error: None,
+            }),
+            Duration::from_millis(1),
+        );
+        assert!(attempt.content.contains("--- Page layout ---"));
+        assert!(attempt.content.contains("--- Page 98 ---"));
+        let page_numbers: Vec<usize> = attempt.page_offsets.iter().map(|(p, _)| *p).collect();
+        assert_eq!(page_numbers, vec![1, 2]);
+    }
+
+    #[test]
+    fn cross_page_soft_hyphen_rejoins_cleanly() {
+        let raw = "The gar\u{ad}\n\x0cdener planted trees.";
+        let attempt = process_pdf_extraction_result(
+            Ok(PdfTextExtraction {
+                raw_text: raw.to_string(),
+                page_count: Some(2),
+                page_count_method: Some("test"),
+                backend: "test",
+                fallback_from: None,
+                fallback_error: None,
+            }),
+            Duration::from_millis(1),
+        );
+        assert_eq!(attempt.content, "The gardener planted trees.");
+        assert_eq!(attempt.page_offsets, vec![(1, 0), (2, 7)]);
+    }
+
+    #[test]
+    fn multi_hyphen_chains_and_nonbreaking_hyphen_evidence_work() {
+        let raw = "We spoke today about day-\nto-\nday policy and day-to-\nday life.\n\
+                   See gar-2-dener and gar-\ndener.\n\
+                   Les \u{00e9}tats\u{2011}unis et les \u{00e9}tats-\nunis.";
+        let attempt = process_pdf_extraction_result(
+            Ok(PdfTextExtraction {
+                raw_text: raw.to_string(),
+                page_count: Some(1),
+                page_count_method: Some("test"),
+                backend: "test",
+                fallback_from: None,
+                fallback_error: None,
+            }),
+            Duration::from_millis(1),
+        );
+        assert!(attempt.content.contains("day-to-day policy"), "{}", attempt.content);
+        assert!(attempt.content.contains("day-to-day life"), "{}", attempt.content);
+        assert!(attempt.content.contains("and gardener."), "{}", attempt.content);
+        assert!(attempt.content.contains("les \u{00e9}tats-unis."), "{}", attempt.content);
+    }
+
+    fn minimal_pdf_with_lines(lines: &[&str]) -> Vec<u8> {
+        let mut stream = String::from("BT /F1 12 Tf 72 720 Td 16 TL\n");
+        for (i, line) in lines.iter().enumerate() {
+            let escaped = line.replace('\\', "\\\\").replace('(', "\\(").replace(')', "\\)");
+            if i == 0 {
+                stream.push_str(&format!("({escaped}) Tj\n"));
+            } else {
+                stream.push_str(&format!("T* ({escaped}) Tj\n"));
+            }
+        }
+        stream.push_str("ET\n");
+
+        let objects = vec![
+            "1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n".to_string(),
+            "2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n".to_string(),
+            "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>\nendobj\n".to_string(),
+            format!("4 0 obj\n<< /Length {} >>\nstream\n{stream}endstream\nendobj\n", stream.len()),
+            "5 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n".to_string(),
+        ];
+        let mut pdf = b"%PDF-1.4\n".to_vec();
+        let mut offsets = Vec::new();
+        for obj in &objects {
+            offsets.push(pdf.len());
+            pdf.extend_from_slice(obj.as_bytes());
+        }
+        let xref_pos = pdf.len();
+        pdf.extend_from_slice(format!("xref\n0 {}\n0000000000 65535 f \n", objects.len() + 1).as_bytes());
+        for off in offsets {
+            pdf.extend_from_slice(format!("{off:010} 00000 n \n").as_bytes());
+        }
+        pdf.extend_from_slice(
+            format!("trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref_pos}\n%%EOF\n", objects.len() + 1)
+                .as_bytes(),
+        );
+        pdf
+    }
+
+    #[test]
+    fn real_pdf_preserves_hyphenated_compounds_on_both_backends() {
+        let bytes = minimal_pdf_with_lines(&[
+            "The state-",
+            "owned areas are well-",
+            "known across North-",
+            "South routes for day-to-",
+            "day travel, while the gar-",
+            "dener works quietly.",
+        ]);
+        for backend in [PdfBackend::Pdftotext, PdfBackend::Mupdf] {
+            let attempt = extract_pdf_text_attempt(&bytes, backend, None).unwrap();
+            assert!(attempt.content.contains("state-owned"), "{backend:?}: {}", attempt.content);
+            assert!(attempt.content.contains("well-known"), "{backend:?}: {}", attempt.content);
+            assert!(attempt.content.contains("North-South"), "{backend:?}: {}", attempt.content);
+            assert!(attempt.content.contains("day-to-day"), "{backend:?}: {}", attempt.content);
+            assert!(attempt.content.contains("gardener"), "{backend:?}: {}", attempt.content);
+        }
     }
 }

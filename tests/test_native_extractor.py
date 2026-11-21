@@ -188,10 +188,10 @@ def test_sparse_xlsx_with_bounded_dimension_stays_native(tmp_path, native_enable
 
 
 def test_scanned_pdf_returns_ocr_signal_without_running_local_ocr(tmp_path, native_enabled):
-    image = Image.new("RGB", (1600, 500), "white")
+    image = Image.new("RGB", (800, 300), "white")
     draw = ImageDraw.Draw(image)
-    font = ImageFont.truetype("/System/Library/Fonts/Helvetica.ttc", 110)
-    draw.text((80, 160), "DOCTRAIL TEXTRA PDF", fill="black", font=font)
+    draw.rectangle((40, 40, 760, 260), outline="black", width=6)
+    draw.text((80, 120), "DOCTRAIL SCANNED PDF", fill="black", font=ImageFont.load_default())
     scanned_pdf = tmp_path / "scanned.pdf"
     image.save(scanned_pdf, "PDF", resolution=150)
 
@@ -333,7 +333,7 @@ async def test_process_ingest_records_whole_chunk_failure_without_python_fallbac
     monkeypatch.setattr(
         native_extractor,
         "extract_batch",
-        lambda paths, threads, html=None: (_ for _ in ()).throw(RuntimeError("bad batch contract")),
+        lambda paths, threads, html=None, **_: (_ for _ in ()).throw(RuntimeError("bad batch contract")),
     )
 
     result = await process_ingest(
@@ -506,7 +506,7 @@ async def test_native_zero_page_pdf_still_tries_mac_ocr_and_preserves_failure(
     monkeypatch.setattr(
         native_extractor,
         "extract_batch",
-        lambda paths, threads, html=None: [{
+        lambda paths, threads, html=None, **_: [{
             "path": paths[0],
             "status": "extracted",
             "content": "",
@@ -554,7 +554,7 @@ async def test_native_zero_page_pdf_classifies_confirmed_renderer_failure_as_dam
     monkeypatch.setattr(
         native_extractor,
         "extract_batch",
-        lambda paths, threads, html=None: [{
+        lambda paths, threads, html=None, **_: [{
             "path": paths[0],
             "status": "extracted",
             "content": "",
@@ -600,9 +600,9 @@ async def test_process_ingest_skips_css_before_native_submission(
     submitted = []
     real_extract_batch = native_extractor.extract_batch
 
-    def recording_extract_batch(paths, threads=None, html=None):
+    def recording_extract_batch(paths, threads=None, html=None, **kwargs):
         submitted.extend(paths)
-        return real_extract_batch(paths, threads, html)
+        return real_extract_batch(paths, threads, html, **kwargs)
 
     monkeypatch.setattr(native_extractor, "extract_batch", recording_extract_batch)
     result = await process_ingest(
@@ -633,7 +633,7 @@ async def test_native_ingest_defers_ocr_until_all_rust_batches_finish(
 
     events = []
 
-    def fake_extract_batch(batch_paths, threads=None, html=None):
+    def fake_extract_batch(batch_paths, threads=None, html=None, **_):
         events.append("rust")
         docs = []
         for batch_path in batch_paths:
@@ -959,3 +959,165 @@ def test_cli_pdf_engine_mac_ocr_alias_routes_to_plugin(tmp_path, monkeypatch):
     assert result.exit_code == 0, result.output
     assert captured["pdf_engine"] == "ocr"
     assert captured["ocr_engine"] == "plugin"
+
+
+@pytest.mark.asyncio
+async def test_failed_ocr_plugin_import_is_not_cached(tmp_path, monkeypatch):
+    from doctrail.ingest import ocr as ocr_mod
+
+    plugin = tmp_path / "flaky_import.py"
+    flag = tmp_path / "allow.txt"
+    plugin.write_text(
+        f"from pathlib import Path\n"
+        f"def ocr(file_path: str) -> str:\n    return 'recovered OCR text'\n"
+        f"if not Path({str(flag)!r}).exists():\n    raise RuntimeError('init failed')\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("DOCTRAIL_OCR_PLUGIN", str(plugin))
+    monkeypatch.delenv("DOCTRAIL_MAC_OCR_CLIENT_PATH", raising=False)
+
+    with pytest.raises(RuntimeError, match="init failed"):
+        await ocr_mod.ocr_with_plugin(str(tmp_path / "a.png"))
+    with pytest.raises(RuntimeError, match="init failed"):
+        await ocr_mod.ocr_with_plugin(str(tmp_path / "a.png"))
+
+    flag.write_text("ok", encoding="utf-8")
+    assert await ocr_mod.ocr_with_plugin(str(tmp_path / "a.png")) == "recovered OCR text"
+
+
+@pytest.mark.asyncio
+async def test_ocr_plugin_rejects_junk_that_cleans_to_empty(tmp_path, native_enabled, monkeypatch):
+    source = tmp_path / "source"
+    source.mkdir()
+    shutil.copy2(Path(__file__).parent / "assets" / "files" / "federalist_fixture.png", source / "scan.png")
+
+    plugin = tmp_path / "junk_ocr.py"
+    plugin.write_text("def ocr(file_path: str) -> str:\n    return '___|||   '\n", encoding="utf-8")
+    monkeypatch.setenv("DOCTRAIL_OCR_PLUGIN", str(plugin))
+
+    db_path = tmp_path / "junk.db"
+    res = await process_ingest(
+        db_path=str(db_path),
+        input_dir=str(source),
+        table="documents",
+        ocr_engine="plugin",
+        workers=1,
+        yes=True,
+    )
+    assert res["successful"] == 0
+    assert res["failed"] == 1
+
+
+@pytest.mark.asyncio
+async def test_embedded_office_image_plugin_failure_retries_cleanly(tmp_path, native_enabled, monkeypatch):
+    from docx import Document
+
+    source = tmp_path / "source"
+    source.mkdir()
+    img_path = tmp_path / "embed.png"
+    Image.new("RGB", (300, 300), "white").save(img_path, format="PNG")
+    docx_path = source / "with_image.docx"
+    doc = Document()
+    doc.add_paragraph("Body paragraph in Word document.")
+    doc.add_picture(str(img_path))
+    doc.save(docx_path)
+
+    fail_flag = tmp_path / "fail.txt"
+    fail_flag.write_text("1", encoding="utf-8")
+    plugin = tmp_path / "toggle_ocr.py"
+    plugin.write_text(
+        f"from pathlib import Path\n"
+        f"def ocr(file_path: str) -> str:\n"
+        f"    if Path({str(fail_flag)!r}).exists():\n"
+        f"        raise RuntimeError('temporary OCR outage')\n"
+        f"    return 'RECOVERED EMBEDDED IMAGE TEXT'\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("DOCTRAIL_OCR_PLUGIN", str(plugin))
+    monkeypatch.delenv("DOCTRAIL_MAC_OCR_CLIENT_PATH", raising=False)
+
+    db_path = tmp_path / "office.db"
+    first = await process_ingest(
+        db_path=str(db_path),
+        input_dir=str(source),
+        table="documents",
+        ocr_engine="plugin",
+        workers=1,
+        yes=True,
+    )
+    assert first["successful"] == 1
+    assert first["embedded_media"]["failed_files"]
+    with sqlite3.connect(db_path) as conn:
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(documents)")}
+        raw_content = conn.execute("SELECT raw_content FROM documents").fetchone()[0]
+        json_meta = (
+            conn.execute("SELECT json_metadata FROM documents").fetchone()[0]
+            if "json_metadata" in cols
+            else ""
+        )
+    assert "Body paragraph in Word document." in raw_content
+    assert "RECOVERED EMBEDDED IMAGE TEXT" not in raw_content
+    assert "embedded_media" not in (json_meta or "")
+
+    fail_flag.unlink()
+    second = await process_ingest(
+        db_path=str(db_path),
+        input_dir=str(source),
+        table="documents",
+        ocr_engine="plugin",
+        workers=1,
+        yes=True,
+    )
+    assert not second["embedded_media"]["failed_files"]
+    with sqlite3.connect(db_path) as conn:
+        raw_content, json_meta = conn.execute(
+            "SELECT raw_content, json_metadata FROM documents"
+        ).fetchone()
+    assert "RECOVERED EMBEDDED IMAGE TEXT" in raw_content
+    assert "embedded_media" in (json_meta or "")
+
+
+@pytest.mark.asyncio
+async def test_existing_ocr_sibling_pdf_is_reused(tmp_path, native_enabled):
+    source = tmp_path / "source"
+    source.mkdir()
+    blank = source / "scan.pdf"
+    Image.new("RGB", (400, 200), "white").save(blank, "PDF", resolution=150)
+    shutil.copy2(
+        Path(__file__).parent / "assets" / "files" / "federalist_fixture.pdf",
+        source / "scan--OCR.pdf",
+    )
+
+    db_path = tmp_path / "sibling.db"
+    res = await process_ingest(
+        db_path=str(db_path),
+        input_dir=str(source),
+        table="documents",
+        exclude_pattern="*--OCR.pdf",
+        workers=1,
+        yes=True,
+    )
+    assert res["successful"] == 1
+    with sqlite3.connect(db_path) as conn:
+        raw_content, metadata_json = conn.execute(
+            "SELECT raw_content, metadata FROM documents"
+        ).fetchone()
+    meta = json.loads(metadata_json)
+    assert "Federalist fixture" in raw_content
+    assert str(meta["ocr_applied"]).lower() == "true"
+    assert meta["ocr_file_path"].endswith("scan--OCR.pdf")
+
+
+def test_concurrent_extract_one_respects_per_call_pdf_backend(native_enabled):
+    from concurrent.futures import ThreadPoolExecutor
+
+    fixture = Path(__file__).parent / "assets" / "files" / "federalist_fixture.pdf"
+
+    def run_one(backend: str):
+        doc = native_extractor.extract_one(fixture, pdf_backend=backend)
+        return backend, doc["extraction_metadata"]["content_extraction"]["pdf_text_backend"]
+
+    backends = ["pdftotext", "mupdf"] * 6
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        results = list(pool.map(run_one, backends))
+    assert all(requested == actual for requested, actual in results), results

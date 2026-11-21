@@ -4,7 +4,7 @@ version = "0.4.0"
 description = "SQLite database enrichment tool using LLMs"
 readme = "README.md"
 license = "AGPL-3.0-or-later"
-license-files = ["LICENSE"]
+license-files = ["LICENSE", "THIRD_PARTY_NOTICES.txt"]
 requires-python = ">=3.12"
 authors = [
     { name = "Doctrail contributors" },
@@ -86,7 +86,7 @@ icr = [
 doctrail = "doctrail.cli:cli"
 
 [build-system]
-requires = ["maturin>=1.7,<2"]
+requires = ["maturin>=1.10,<2"]
 build-backend = "maturin"
 
 [tool.maturin]
@@ -99,6 +99,7 @@ include = [
     { path = "docs/llms.txt", format = "sdist" },
     { path = "skills/doctrail/SKILL.md", format = "sdist" },
     { path = "LICENSE", format = "sdist" },
+    { path = "THIRD_PARTY_NOTICES.txt", format = "sdist" },
 ]
 exclude = [
     "**/__pycache__/**",

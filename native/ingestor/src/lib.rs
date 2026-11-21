@@ -25,6 +25,7 @@ mod extractors;
 mod py;
 
 use extractors::language::{detect_language, language_detection_metadata};
+pub use extractors::pdf::PdfConfig;
 use extractors::types::GeneralExtractedDocument;
 
 const MIN_CONTENT_LENGTH_TO_INDEX: usize = 100;
@@ -384,6 +385,15 @@ pub fn extract_file_with(
     options: ExtractOptions<'_>,
     html: &HtmlConfig,
 ) -> Result<ExtractedDocument> {
+    extract_file_with_config(path, options, html, &PdfConfig::default())
+}
+
+pub fn extract_file_with_config(
+    path: &Path,
+    options: ExtractOptions<'_>,
+    html: &HtmlConfig,
+    pdf: &PdfConfig,
+) -> Result<ExtractedDocument> {
     let total_started_at = Instant::now();
     let read_started_at = Instant::now();
     let bytes = fs::read(path).with_context(|| format!("reading {}", path.display()))?;
@@ -400,7 +410,7 @@ pub fn extract_file_with(
     })?;
     let resolve_duration = resolve_started_at.elapsed();
 
-    let mut extracted = extract_by_kind(&bytes, options, kind, html)?;
+    let mut extracted = extract_by_kind(&bytes, options, kind, html, pdf)?;
     insert_content_type_detection(&mut extracted, options, &detection, kind);
     insert_timing(&mut extracted, "file_read", read_duration);
     insert_timing(&mut extracted, "kind_resolve", resolve_duration);
@@ -421,6 +431,15 @@ pub fn extract_bytes_with(
     options: ExtractOptions<'_>,
     html: &HtmlConfig,
 ) -> Result<ExtractedDocument> {
+    extract_bytes_with_config(bytes, options, html, &PdfConfig::default())
+}
+
+pub fn extract_bytes_with_config(
+    bytes: &[u8],
+    options: ExtractOptions<'_>,
+    html: &HtmlConfig,
+    pdf: &PdfConfig,
+) -> Result<ExtractedDocument> {
     let total_started_at = Instant::now();
     let resolve_started_at = Instant::now();
     let detection = detect_content_type(bytes);
@@ -433,7 +452,7 @@ pub fn extract_bytes_with(
     })?;
     let resolve_duration = resolve_started_at.elapsed();
 
-    let mut extracted = extract_by_kind(bytes, options, kind, html)?;
+    let mut extracted = extract_by_kind(bytes, options, kind, html, pdf)?;
     insert_content_type_detection(&mut extracted, options, &detection, kind);
     insert_timing(&mut extracted, "kind_resolve", resolve_duration);
     insert_timing(
@@ -618,8 +637,43 @@ fn extract_mhtml_bytes(
             result.title = repair_title(subject);
         }
     }
+    let (original_url, save_date) = parse_mhtml_top_headers(raw_message);
+    if let Some(url) = original_url {
+        result.extraction_metadata["content_extraction"]["original_url"] = json!(url);
+    }
+    if let Some(date) = save_date {
+        result.extraction_metadata["content_extraction"]["save_date"] = json!(date);
+    }
     result.source_format = "mhtml".to_string();
     Ok(result)
+}
+
+fn parse_mhtml_top_headers(raw_message: &[u8]) -> (Option<String>, Option<String>) {
+    let head_len = raw_message.len().min(16 * 1024);
+    let head = String::from_utf8_lossy(&raw_message[..head_len]);
+    let mut snapshot_url: Option<String> = None;
+    let mut content_location: Option<String> = None;
+    let mut save_date: Option<String> = None;
+    for raw_line in head.lines() {
+        let line = raw_line.trim_end_matches('\r');
+        if line.is_empty() {
+            break;
+        }
+        if let Some((name, value)) = line.split_once(':') {
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            if name.eq_ignore_ascii_case("Snapshot-Content-Location") && snapshot_url.is_none() {
+                snapshot_url = Some(trimmed.to_string());
+            } else if name.eq_ignore_ascii_case("Content-Location") && content_location.is_none() {
+                content_location = Some(trimmed.to_string());
+            } else if name.eq_ignore_ascii_case("Date") && save_date.is_none() {
+                save_date = Some(trimmed.to_string());
+            }
+        }
+    }
+    (snapshot_url.or(content_location), save_date)
 }
 
 fn repair_mhtml_missing_part_separator(bytes: &[u8]) -> Cow<'_, [u8]> {
@@ -2168,6 +2222,7 @@ fn extract_by_kind(
     options: ExtractOptions<'_>,
     kind: ExtractKind,
     html: &HtmlConfig,
+    pdf: &PdfConfig,
 ) -> Result<ExtractedDocument> {
     match kind {
         ExtractKind::Html => extract_html_bytes(bytes, options.source_path, html),
@@ -2175,10 +2230,13 @@ fn extract_by_kind(
         ExtractKind::Image => anyhow::bail!(
             "detected image content requires OCR; fallback_required=configured_ocr_backend"
         ),
-        ExtractKind::Pdf => {
-            extractors::pdf::extract_pdf_bytes(bytes, options.source_path, options.mime_type)
-                .map(general_to_extracted)
-        }
+        ExtractKind::Pdf => extractors::pdf::extract_pdf_bytes_with_config(
+            bytes,
+            options.source_path,
+            options.mime_type,
+            pdf,
+        )
+        .map(general_to_extracted),
         ExtractKind::Document => extractors::document::extract_document_bytes(
             bytes,
             options.source_path,

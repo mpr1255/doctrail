@@ -17,9 +17,9 @@ Measured on 5,176 PDFs that also have OCR text, extracted text now holds a media
 
 - Lines of a paragraph join with a space unless the break falls in Chinese or Japanese text. Before, a space was added only between two ASCII letters or digits, so a line ending in a comma or bracket ran into the next word.
 - Line-break hyphenation now distinguishes wrapped words from hyphenated compounds using same-document evidence, multi-hyphen chains, and a compact English lexicon: `gar-` / `dener` rejoins to `gardener`, while `state-` / `owned`, `well-` / `known`, `anti-` / `corruption`, `day-to-` / `day`, `North-` / `South`, and `10-` / `12` keep their hyphens without stray spaces. Soft hyphens are removed, and ligature glyphs such as `ﬁ` expand to their letters.
-- When `pdftotext` returns text with missing word spaces or too little text, MuPDF reads the file too and its text is kept when it is better. Uppercase codes and DNA/RNA nucleotide sequences no longer trigger false `words_run_together` OCR routing.
+- When `pdftotext` returns text with missing word spaces or too little text, MuPDF reads the file too and its text is kept when it is better. Uppercase codes and A/C/G/T/U/N nucleotide sequences no longer trigger false `words_run_together` OCR routing, and completely unspaced passages still route to OCR.
 - More scanned PDFs are recognised as needing OCR: files whose only text is a repeated stamp or running head, files with a text cover page in front of scanned pages, and files whose fonts map letters to control characters.
-- Each PDF record carries `page_offsets`, and `doctrail.extract.extract_file(path)` returns one file's record and per-page text slices without a database.
+- `doctrail.extract.extract_file(path)` returns one file's record, `page_offsets`, and per-page text slices without a database; Poppler 26+ is called with `-remove-hyphens none` so end-of-line hyphens reach the disambiguator intact.
 
 ### OCR plugin contract
 

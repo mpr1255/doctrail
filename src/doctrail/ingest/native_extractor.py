@@ -11,11 +11,13 @@ from __future__ import annotations
 import importlib
 import json
 import os
+import threading
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 _native_module = None
 _native_loaded = False
+_native_lock = threading.Lock()
 _VALID_STATUSES = {"extracted", "fallback_required", "failed", "skipped_unsupported"}
 
 ZIP_MAX_ENTRIES = 50_000
@@ -30,17 +32,24 @@ HTML_DIAGNOSTIC_KEYS = ("keep_selectors_matched", "nodes_dropped", "lines_droppe
 
 
 def _native():
-    """Import the compiled PyO3 extension (`doctrail._ingest_native`). Cached."""
+    """Import the compiled PyO3 extension (`doctrail._ingest_native`). Cached on success."""
     global _native_module, _native_loaded
-    if not _native_loaded:
-        _native_loaded = True
+    if _native_loaded:
+        return _native_module
+    with _native_lock:
+        if _native_loaded:
+            return _native_module
+        loaded = None
         for name in ("doctrail._ingest_native", "_ingest_native"):
             try:
-                _native_module = importlib.import_module(name)
+                loaded = importlib.import_module(name)
                 break
             except ImportError:
-                _native_module = None
-    return _native_module
+                loaded = None
+        if loaded is not None:
+            _native_module = loaded
+            _native_loaded = True
+        return loaded
 
 
 def _require_native():
@@ -73,22 +82,35 @@ def html_settings(html_config: Optional[Dict[str, Any]]) -> Optional[Dict[str, A
 def extract_one(
     path: str | os.PathLike[str],
     html: Optional[Dict[str, Any]] = None,
+    *,
+    pdf_backend: Optional[str] = None,
+    pdftotext: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Extract a single file through the native engine."""
     native = _require_native()
     html_json = json.dumps(html) if html else None
-    return json.loads(native.extract_path(os.fspath(path), html_json))
+    if pdf_backend is not None or pdftotext is not None:
+        raw = native.extract_path(os.fspath(path), html_json, pdf_backend, pdftotext)
+    else:
+        raw = native.extract_path(os.fspath(path), html_json)
+    return json.loads(raw)
 
 
 def extract_batch(
     paths: List[str],
     threads: Optional[int] = None,
     html: Optional[Dict[str, Any]] = None,
+    *,
+    pdf_backend: Optional[str] = None,
+    pdftotext: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     native = _require_native()
     normalized_paths = [str(path) for path in paths]
     html_json = json.dumps(html) if html else None
-    raw = native.extract_batch(normalized_paths, threads, html_json)
+    if pdf_backend is not None or pdftotext is not None:
+        raw = native.extract_batch(normalized_paths, threads, html_json, pdf_backend, pdftotext)
+    else:
+        raw = native.extract_batch(normalized_paths, threads, html_json)
     docs = [json.loads(item) for item in raw]
     _validate_batch_contract(normalized_paths, docs)
     return docs
@@ -211,6 +233,14 @@ def to_result(
             metadata["html_config"] = json.dumps(html, ensure_ascii=False, sort_keys=True)
         for key in HTML_DIAGNOSTIC_KEYS:
             metadata[f"html_{key}"] = content_extraction.get(key)
+    if source_format == "mhtml":
+        for key in ("mhtml_subject", "original_url", "save_date"):
+            if content_extraction.get(key):
+                metadata[key] = content_extraction[key]
+    if source_format == "pdf":
+        for key in ("page_count", "pdf_text_fallback_from"):
+            if content_extraction.get(key) is not None:
+                metadata[key] = content_extraction[key]
     metadata = {k: v for k, v in metadata.items() if v is not None}
 
     return {

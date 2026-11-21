@@ -122,7 +122,7 @@ def main() -> None:
     if args.profile:
         rules = yaml.safe_load(args.profile.read_text(encoding="utf-8")) or {}
         configs["full+profile"] = {"mode": "full", **rules}
-    configs = {name: native_extractor.html_settings(html, True) for name, html in configs.items()}
+    configs = {name: native_extractor.html_settings(html) for name, html in configs.items()}
 
     results = {name: extract(paths, html, args.threads) for name, html in configs.items()}
     print()

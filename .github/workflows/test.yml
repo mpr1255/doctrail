@@ -54,11 +54,26 @@ jobs:
 
       - name: Build and smoke-test wheel
         run: |
-          uv run --with 'maturin>=1.7,<2' maturin build --release --out dist
-          whl="$(ls dist/*.whl | head -1)"
-          uvx --from "$whl" doctrail --version
-          uvx --from "$whl" doctrail docs > /tmp/wheel-llms.txt
-          cmp docs/llms.txt /tmp/wheel-llms.txt
-          uvx --from "$whl" doctrail skill > /tmp/wheel-skill.txt
-          cmp skills/doctrail/SKILL.md /tmp/wheel-skill.txt
-          uvx --from "$whl" python -c "from doctrail.extract import extract_file; doc = extract_file('tests/assets/files/federalist_fixture.pdf'); assert doc['status'] == 'extracted' and len(doc['pages']) == 1"
+          uv run --no-project --with 'maturin>=1.10,<2' maturin build --release --out dist
+          whl="$(realpath dist/*.whl | head -1)"
+          fixture="$(realpath tests/assets/files/federalist_fixture.pdf)"
+          llms_ref="$(realpath docs/llms.txt)"
+          skill_ref="$(realpath skills/doctrail/SKILL.md)"
+          repo_root="$(realpath .)"
+          tmpdir="$(mktemp -d)"
+          (
+            cd "$tmpdir"
+            uvx --from "$whl" doctrail --version
+            uvx --from "$whl" doctrail docs > "$tmpdir/wheel-llms.txt"
+            cmp "$llms_ref" "$tmpdir/wheel-llms.txt"
+            uvx --from "$whl" doctrail skill > "$tmpdir/wheel-skill.txt"
+            cmp "$skill_ref" "$tmpdir/wheel-skill.txt"
+            uvx --from "$whl" python -c "
+          import os, doctrail._ingest_native as n
+          from doctrail.extract import extract_file
+          assert not os.path.realpath(n.__file__).startswith('$repo_root'), n.__file__
+          doc = extract_file('$fixture')
+          assert doc['status'] == 'extracted' and len(doc['pages']) == 1, doc
+          "
+          )
+          rm -rf "$tmpdir"
