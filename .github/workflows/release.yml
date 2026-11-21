@@ -206,6 +206,9 @@ jobs:
       - name: Check package metadata
         run: uvx --from twine twine check dist/*
 
+      - name: Install Poppler for wheel smoke test
+        run: sudo apt-get update && sudo apt-get install -y poppler-utils
+
       - name: Smoke test Linux x86_64 wheel
         run: |
           shopt -s nullglob
