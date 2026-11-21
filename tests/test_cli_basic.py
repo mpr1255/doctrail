@@ -508,35 +508,15 @@ def test_ingest_defaults_to_cwd_doctrail_db(tmp_path):
         assert count == 1
 
 
-def test_ingest_workers_handle_non_picklable_metadata(monkeypatch, tmp_path):
-    """Threaded ingest should normalize odd metadata objects before persistence."""
+def test_ingest_workers_preserve_metadata_across_files(tmp_path):
+    """Multi-worker ingest should persist extracted content and metadata for every file."""
     runner = CliRunner()
-
-    class _NonPicklableTitle:
-        def __init__(self, text):
-            self.text = text
-
-        def __str__(self):
-            return self.text
-
-        def __reduce__(self):
-            raise TypeError("do not pickle me")
-
-    async def _fake_process_document(file_path, file_sha1, **kwargs):
-        return file_sha1, f"content from {Path(file_path).name}", {
-            "title": _NonPicklableTitle(f"title for {Path(file_path).name}"),
-            "author": _NonPicklableTitle("archive bot"),
-            "original_file_path": file_path,
-            "extraction_method": "fake_extractor",
-        }
-
-    monkeypatch.setattr("doctrail.ingest.core.process_document", _fake_process_document)
 
     with runner.isolated_filesystem(temp_dir=tmp_path):
         docs_dir = Path("docs")
         docs_dir.mkdir()
-        (docs_dir / "first.txt").write_text("first\n", encoding="utf-8")
-        (docs_dir / "second.txt").write_text("second\n", encoding="utf-8")
+        (docs_dir / "first.txt").write_text("First notice\nBody one.\n", encoding="utf-8")
+        (docs_dir / "second.txt").write_text("Second notice\nBody two.\n", encoding="utf-8")
 
         result = runner.invoke(cli, [
             "--skip-requirements",
@@ -551,22 +531,17 @@ def test_ingest_workers_handle_non_picklable_metadata(monkeypatch, tmp_path):
         with sqlite3.connect("doctrail.db") as conn:
             rows = conn.execute(
                 """
-                SELECT filename, title, author, metadata
+                SELECT filename, raw_content, metadata
                 FROM documents
                 ORDER BY filename
                 """
             ).fetchall()
 
-        normalized_rows = [
-            (filename, title, author, json.loads(metadata))
-            for filename, title, author, metadata in rows
-        ]
-        assert normalized_rows[0][:3] == ("first.txt", "title for first.txt", "archive bot")
-        assert normalized_rows[0][3]["title"] == "title for first.txt"
-        assert normalized_rows[0][3]["author"] == "archive bot"
-        assert normalized_rows[1][:3] == ("second.txt", "title for second.txt", "archive bot")
-        assert normalized_rows[1][3]["title"] == "title for second.txt"
-        assert normalized_rows[1][3]["author"] == "archive bot"
+        assert [r[0] for r in rows] == ["first.txt", "second.txt"]
+        assert "Body one." in rows[0][1]
+        assert "Body two." in rows[1][1]
+        assert json.loads(rows[0][2])["source_format"] == "text"
+        assert json.loads(rows[1][2])["source_format"] == "text"
 
 
 def test_ingest_directory_db_path_uses_doctrail_db(tmp_path):
@@ -717,6 +692,43 @@ def test_ingest_with_multiple_workers_processes_all_files(tmp_path):
         with sqlite3.connect("doctrail.db") as conn:
             count = conn.execute("SELECT COUNT(*) FROM documents").fetchone()[0]
         assert count == 4
+
+
+def test_ingest_with_workers_uses_env_ocr_plugin(tmp_path):
+    """--ocr-engine plugin loads DOCTRAIL_OCR_PLUGIN (sync or async) without local fallback."""
+    runner = CliRunner()
+
+    with runner.isolated_filesystem(temp_dir=tmp_path):
+        docs_dir = Path("docs")
+        docs_dir.mkdir()
+        (docs_dir / "sample.pdf").write_bytes(b"%PDF-1.4\nplaceholder pdf bytes\n")
+
+        plugin_path = Path("ocr_plugin.py")
+        plugin_path.write_text(
+            "def ocr(file_path):\n"
+            "    return '==== Page 1 ====\\nPLUGIN OCR TEXT'\n",
+            encoding="utf-8",
+        )
+
+        result = runner.invoke(
+            cli,
+            [
+                "--skip-requirements",
+                "ingest",
+                "--input-dir", str(docs_dir),
+                "--workers", "2",
+                "--pdf-engine", "ocr",
+                "--ocr-engine", "plugin",
+                "--yes",
+            ],
+            env={"DOCTRAIL_OCR_PLUGIN": str(plugin_path)},
+        )
+
+        assert result.exit_code == 0, result.output
+        with sqlite3.connect("doctrail.db") as conn:
+            row = conn.execute("SELECT raw_content FROM documents LIMIT 1").fetchone()
+        assert row is not None
+        assert "PLUGIN OCR TEXT" in row[0]
 
 
 def test_ingest_with_workers_uses_env_mac_ocr_client(tmp_path):

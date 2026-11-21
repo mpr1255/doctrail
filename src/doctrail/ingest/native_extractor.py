@@ -1,40 +1,14 @@
-"""Native (Rust) extraction path.
+"""Native Rust extraction bridge (`doctrail._ingest_native`).
 
-Thin Python glue around the vendored `doctrail._ingest_native` PyO3 extension
-(the vendored extraction crate). Rust does all multicore document extraction
-under the hood; this module validates and adapts its output to doctrail's ingest
-result-dict contract. The legacy Python extractor is reached only through the
-explicit backup switch or the ``DOCTRAIL_DISABLE_NATIVE`` kill-switch.
-
-Interface contract with the Rust binding
-----------------------------------------
-`_ingest_native.extract_batch(paths: list[str], threads: int | None,
-html_config: str | None)` returns a list (order-preserving, one per input path)
-of dicts with these keys:
-
-    path: str                     # echoed input path
-    status: str                   # "extracted" | "fallback_required" | "failed" | "skipped_unsupported"
-    source_format: str | None     # "pdf" | "html" | "docx" | ...
-    title: str | None
-    content: str                  # extracted text ("" on failure)
-    content_chars: int
-    language: str | None          # detected language (e.g. "zh", "en")
-    language_confidence: float | None
-    mime_type: str | None         # detected MIME (e.g. "application/pdf")
-    extraction_method: str | None # e.g. "mupdf_smart_paragraphs"
-    extraction_metadata: dict | None
-    ocr_needed: bool              # Rust flagged this as needing OCR (scanned / mojibake)
-    ocr_reason: str | None
-    error: str | None
-
-`extract_path(path, html_config)` returns a single such dict (used for tests /
-single files). The binding never raises per-file: a bad file comes back
-status="failed". An invalid `html_config` raises ValueError before any file is
-read.
+Rust handles all multicore document extraction, PDF text cleaning, HTML/MHTML
+parsing and profile filtering, ZIP expansion, and parallel SHA-1 hashing. This
+module validates the FFI contract and maps results to Doctrail's ingest record
+format.
 """
 
 from __future__ import annotations
 
+import importlib
 import json
 import os
 from pathlib import Path
@@ -43,6 +17,7 @@ from typing import Any, Dict, List, Optional
 _native_module = None
 _native_loaded = False
 _VALID_STATUSES = {"extracted", "fallback_required", "failed", "skipped_unsupported"}
+
 ZIP_MAX_ENTRIES = 50_000
 ZIP_MAX_TOTAL_ENTRIES = 100_000
 ZIP_MAX_MEMBER_BYTES = 512 * 1024 * 1024
@@ -50,71 +25,59 @@ ZIP_MAX_TOTAL_BYTES = 2 * 1024 * 1024 * 1024
 ZIP_MAX_COMPRESSION_RATIO = 200
 ZIP_MAX_NESTING_DEPTH = 3
 
+HTML_FILTER_KEYS = ("keep_selectors", "drop_selectors", "drop_line_patterns")
+HTML_DIAGNOSTIC_KEYS = ("keep_selectors_matched", "nodes_dropped", "lines_dropped", "low_value_reason")
+
 
 def _native():
-    """Import the PyO3 extension, whether installed as the doctrail submodule
-    (final layout) or as a standalone top-level module (M1 build). Cached."""
+    """Import the compiled PyO3 extension (`doctrail._ingest_native`). Cached."""
     global _native_module, _native_loaded
     if not _native_loaded:
         _native_loaded = True
         for name in ("doctrail._ingest_native", "_ingest_native"):
             try:
-                import importlib
                 _native_module = importlib.import_module(name)
                 break
-            except Exception:
+            except ImportError:
                 _native_module = None
     return _native_module
 
 
-def available() -> bool:
-    """True if the native extension is importable and not disabled.
+def _require_native():
+    native = _native()
+    if native is None:
+        raise RuntimeError(
+            "doctrail's native extraction module (`doctrail._ingest_native`) is not available. "
+            "Reinstall doctrail, or build the extension in a source checkout with `make native`."
+        )
+    return native
 
-    Setting ``DOCTRAIL_DISABLE_NATIVE=1`` forces the Python extraction path even
-    when the compiled extension is present. This is both a user kill-switch and
-    how the test suite stays deterministic and matches CI (which has no built
-    ``.so``) regardless of whether a local dev build dropped one into the
-    package.
-    """
-    if os.environ.get("DOCTRAIL_DISABLE_NATIVE"):
-        return False
+
+def available() -> bool:
+    """True when the compiled native extraction extension is importable."""
     return _native() is not None
 
 
-HTML_FILTER_KEYS = ("keep_selectors", "drop_selectors", "drop_line_patterns")
-HTML_DIAGNOSTIC_KEYS = ("keep_selectors_matched", "nodes_dropped", "lines_dropped", "low_value_reason")
-
-
-def html_settings(
-    html_config: Optional[Dict[str, Any]], use_native: bool
-) -> Optional[Dict[str, Any]]:
-    """Validate HTML settings and return them with defaults filled in.
-
-    The native extractor applies every setting. The Python extractors know only
-    the two modes, so selector and line settings need the native build.
-    """
+def html_settings(html_config: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """Validate HTML settings through the Rust parser and fill in defaults."""
     if html_config is None:
         return None
-    if use_native:
-        native = _native()
-        if native is None or not hasattr(native, "normalize_html_config"):
-            raise RuntimeError(
-                "installed doctrail._ingest_native does not support HTML modes; "
-                "rebuild it with `make native`"
-            )
-        return json.loads(native.normalize_html_config(json.dumps(html_config)))
-    mode = html_config.get("mode", "article")
-    if mode not in ("article", "full"):
-        raise ValueError(f"unknown HTML mode {mode!r}; use 'article' or 'full'")
-    unknown = sorted(set(html_config) - {"mode", "reject_low_value", *HTML_FILTER_KEYS})
-    if unknown:
-        raise ValueError(f"unknown HTML setting {', '.join(unknown)}")
-    unsupported = [key for key in html_config if key != "mode" and html_config[key]]
-    if unsupported:
-        raise ValueError(
-            f"{', '.join(unsupported)} need the native extractor; build it with `make native`"
+    native = _require_native()
+    if not hasattr(native, "normalize_html_config"):
+        raise RuntimeError(
+            "installed doctrail._ingest_native is stale; rebuild it with `make native`"
         )
-    return {"mode": mode}
+    return json.loads(native.normalize_html_config(json.dumps(html_config)))
+
+
+def extract_one(
+    path: str | os.PathLike[str],
+    html: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Extract a single file through the native engine."""
+    native = _require_native()
+    html_json = json.dumps(html) if html else None
+    return json.loads(native.extract_path(os.fspath(path), html_json))
 
 
 def extract_batch(
@@ -122,9 +85,7 @@ def extract_batch(
     threads: Optional[int] = None,
     html: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
-    native = _native()
-    if native is None:
-        raise RuntimeError("native extension doctrail._ingest_native is not available")
+    native = _require_native()
     normalized_paths = [str(path) for path in paths]
     html_json = json.dumps(html) if html else None
     raw = native.extract_batch(normalized_paths, threads, html_json)
@@ -135,11 +96,7 @@ def extract_batch(
 
 def hash_batch(paths: List[str], threads: Optional[int] = None) -> List[Dict[str, Any]]:
     """Stream SHA-1 for many paths in Rust's bounded Rayon pool."""
-    native = _native()
-    if native is None or not hasattr(native, "hash_batch"):
-        raise RuntimeError(
-            "native extension does not provide hash_batch; rebuild it with `make native`"
-        )
+    native = _require_native()
     normalized_paths = [str(path) for path in paths]
     results = [json.loads(item) for item in native.hash_batch(normalized_paths, threads)]
     if len(results) != len(normalized_paths):
@@ -162,13 +119,7 @@ def hash_batch(paths: List[str], threads: Optional[int] = None) -> List[Dict[str
 
 def expand_zip(archive_path: str, destination: str) -> List[Dict[str, Any]]:
     """Safely materialize a ZIP archive through the native extension."""
-    native = _native()
-    if native is None:
-        raise RuntimeError("ZIP ingestion requires doctrail._ingest_native")
-    if not hasattr(native, "expand_zip"):
-        raise RuntimeError(
-            "installed doctrail._ingest_native is stale; rebuild it with `make native`"
-        )
+    native = _require_native()
     raw = native.expand_zip(
         str(archive_path),
         str(destination),
@@ -191,12 +142,7 @@ def expand_zip(archive_path: str, destination: str) -> List[Dict[str, Any]]:
 
 
 def _validate_batch_contract(paths: List[str], docs: List[Dict[str, Any]]) -> None:
-    """Reject a malformed native batch before any rows are written.
-
-    The ingest loop relies on one order-preserving result per input path. A
-    truncated or reordered FFI response must fail the whole chunk instead of
-    silently dropping or misattributing documents.
-    """
+    """Reject a malformed native batch before any rows are written."""
     if len(docs) != len(paths):
         raise RuntimeError(
             f"native extractor returned {len(docs)} result(s) for {len(paths)} path(s)"
@@ -240,14 +186,7 @@ def to_result(
     doc: Dict[str, Any],
     html: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    """Map a Rust extraction dict to doctrail's ingest result dict.
-
-    Matches the shape produced by ``core._build_success_result`` so it can be
-    handed straight to ``core.handle_result`` (metadata cleaning, sidecar merge,
-    ``insert_document``). Only non-null metadata keys are emitted; the important
-    fields (title, language, extraction_method) are promoted to top-level
-    columns by ``insert_document``.
-    """
+    """Map a Rust extraction dict to doctrail's ingest result dict."""
     source_format = doc.get("source_format")
     metadata: Dict[str, Any] = {
         "extraction_method": doc.get("extraction_method") or (f"rust:{source_format}" if source_format else "rust"),
@@ -265,6 +204,7 @@ def to_result(
         structured_sheets = content_extraction.get("structured_sheets")
         if isinstance(structured_sheets, list):
             metadata["_spreadsheet_sheets"] = structured_sheets
+            metadata["spreadsheet_sheet_count"] = len(structured_sheets)
     if source_format in ("html", "mhtml"):
         metadata["html_mode"] = content_extraction.get("html_mode") or "article"
         if html and metadata["html_mode"] == "full":

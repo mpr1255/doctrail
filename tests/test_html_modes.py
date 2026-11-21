@@ -1,9 +1,6 @@
-"""HTML mode settings on the CLI and on the Python extraction engine.
+"""HTML mode settings on the CLI and extraction engine."""
 
-The suite runs with DOCTRAIL_DISABLE_NATIVE=1 (see conftest.py), so ingests
-here use the Python engine. Native behaviour is in test_native_extractor.py.
-"""
-
+import json
 import sqlite3
 
 import click
@@ -80,56 +77,51 @@ def test_cli_reports_readability_conflict(tmp_path):
     assert "--readability conflicts with full HTML mode" in result.output
 
 
-async def _ingest_python(tmp_path, html_config):
+async def _ingest_html(tmp_path, html_config):
     source = tmp_path / "source"
     source.mkdir(exist_ok=True)
     (source / "notice.html").write_text(PAGE, encoding="utf-8")
-    db_path = tmp_path / "python.db"
+    db_path = tmp_path / "html.db"
     result = await process_ingest(
         db_path=str(db_path),
         input_dir=str(source),
         table="documents",
-        extractor="python",
         html_config=html_config,
         yes=True,
     )
     return result, db_path
 
 
-async def test_python_engine_full_mode_keeps_the_whole_page(tmp_path):
-    result, db_path = await _ingest_python(tmp_path, {"mode": "full"})
+async def test_full_mode_keeps_the_whole_page(tmp_path):
+    result, db_path = await _ingest_html(tmp_path, {"mode": "full"})
+
+    assert result["successful"] == 1
+    with sqlite3.connect(db_path) as conn:
+        content, metadata = conn.execute("SELECT raw_content, metadata FROM documents").fetchone()
+    assert "Open government" in content
+    assert "report visitor numbers" in content
+    assert "Copyright city health commission" in content
+    assert json.loads(metadata)["html_mode"] == "full"
+
+
+async def test_full_mode_profile_drops_selectors(tmp_path):
+    result, db_path = await _ingest_html(
+        tmp_path, {"mode": "full", "drop_selectors": ["nav", "footer"]}
+    )
 
     assert result["successful"] == 1
     with sqlite3.connect(db_path) as conn:
         content = conn.execute("SELECT raw_content FROM documents").fetchone()[0]
-    assert "Open government" in content
+    assert "Open government" not in content
+    assert "Copyright city health commission" not in content
     assert "report visitor numbers" in content
-    assert "Copyright city health commission" in content
 
 
-async def test_python_engine_rejects_selector_rules(tmp_path):
-    with pytest.raises(RuntimeError, match="drop_selectors need the native extractor"):
-        await _ingest_python(tmp_path, {"mode": "full", "drop_selectors": ["nav"]})
+async def test_rejects_unknown_mode(tmp_path):
+    with pytest.raises(RuntimeError, match="unknown variant"):
+        await _ingest_html(tmp_path, {"mode": "everything"})
 
 
-async def test_python_engine_rejects_unknown_mode(tmp_path):
-    with pytest.raises(RuntimeError, match="unknown HTML mode"):
-        await _ingest_python(tmp_path, {"mode": "everything"})
-
-
-async def test_python_engine_records_the_mode_it_used(tmp_path):
-    result, db_path = await _ingest_python(tmp_path, {"mode": "full"})
-
-    with sqlite3.connect(db_path) as conn:
-        metadata = conn.execute("SELECT metadata FROM documents").fetchone()[0]
-    assert '"html_mode": "full"' in metadata
-
-
-async def test_python_engine_rejects_low_value_rejection(tmp_path):
-    with pytest.raises(RuntimeError, match="reject_low_value need the native extractor"):
-        await _ingest_python(tmp_path, {"mode": "full", "reject_low_value": True})
-
-
-async def test_python_engine_rejects_unknown_settings(tmp_path):
-    with pytest.raises(RuntimeError, match="unknown HTML setting drop"):
-        await _ingest_python(tmp_path, {"mode": "full", "drop": ["nav"]})
+async def test_rejects_unknown_settings(tmp_path):
+    with pytest.raises(RuntimeError, match="unknown field"):
+        await _ingest_html(tmp_path, {"mode": "full", "drop": ["nav"]})

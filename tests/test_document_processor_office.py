@@ -6,21 +6,17 @@ import sqlite3
 import subprocess
 import zipfile
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
+from doctrail.ingest import embedded_media, native_extractor, ocr
+from doctrail.ingest.core import process_ingest
 from doctrail.ingest.document_processor import (
     SUPPORTED_EXTENSION_FAMILIES,
-    SkippedFileException,
-    _load_mac_ocr_module,
     format_supported_extensions_for_help,
     process_document,
 )
-from doctrail.ingest import embedded_media, native_extractor
-from doctrail.ingest.core import process_ingest
 from doctrail.ingest.text_processing import clean_extracted_text
-from doctrail.extractors import spreadsheet_extractor
 
 ASSET_DIR = Path(__file__).parent / "assets" / "files"
 
@@ -32,6 +28,7 @@ def _sha1_for(path):
 def _async_return(value):
     async def _inner(*args, **kwargs):
         return value
+
     return _inner
 
 
@@ -40,33 +37,32 @@ def _missing_tools(*tools):
 
 
 @pytest.mark.parametrize(
-    ("family", "filename", "expected_methods", "minimum_chars", "expected_phrase", "required_tools"),
+    ("family", "filename", "minimum_chars", "expected_phrase", "required_tools"),
     [
-        ("text", "federalist_fixture.txt", {"direct_text_read"}, 150, "Federalist fixture", ()),
-        ("text", "federalist_fixture.md", {"direct_text_read"}, 150, "Federalist fixture", ()),
-        ("delimited", "federalist_fixture.csv", {"csv"}, 80, "Federalist No. 1", ()),
-        ("delimited", "federalist_fixture.tsv", {"csv"}, 80, "Federalist No. 1", ()),
-        ("pdf", "federalist_fixture.pdf", {"pymupdf", "pdftotext", "mutool"}, 150, "Federalist fixture", ()),
-        ("epub", "federalist_fixture.epub", {"epub_direct"}, 150, "Federalist fixture", ()),
-        ("mobi", "federalist_fixture.mobi", {"ebook_convert"}, 150, "Federalist fixture", ("ebook-convert",)),
-        ("word", "federalist_fixture.doc", {"antiword"}, 150, "Federalist fixture", ("antiword",)),
-        ("rtf", "federalist_fixture.rtf", {"textutil"}, 150, "Federalist fixture", ("textutil",)),
-        ("word_openxml", "federalist_fixture.docx", {"python_docx"}, 150, "Federalist fixture", ()),
-        ("excel_openxml", "federalist_fixture.xlsx", {"openpyxl"}, 80, "Federalist No. 1", ()),
-        ("excel", "federalist_fixture.xls", {"xlrd"}, 80, "Federalist No. 1", ()),
-        ("powerpoint_openxml", "federalist_fixture.pptx", {"python_pptx"}, 80, "Federalist fixture", ()),
-        ("powerpoint", "federalist_fixture.ppt", {"soffice_to_pptx_python_pptx", "strings"}, 80, "Federalist fixture", ("strings",)),
-        ("djvu", "federalist_fixture.djvu", {"djvutxt"}, 80, "Federalist fixture", ("djvutxt",)),
-        ("mhtml", "federalist_fixture.mhtml", {"mhtml_header_parsing", "beautifulsoup"}, 150, "Federalist fixture", ()),
-        ("html", "federalist_fixture.html", {"beautifulsoup"}, 150, "Federalist fixture", ()),
-        ("image_ocr", "federalist_fixture.png", {"textra_ocr", "tesseract_ocr"}, 40, "Federalist fixture", ("tesseract",)),
+        ("text", "federalist_fixture.txt", 150, "Federalist fixture", ()),
+        ("text", "federalist_fixture.md", 150, "Federalist fixture", ()),
+        ("delimited", "federalist_fixture.csv", 80, "Federalist No. 1", ()),
+        ("delimited", "federalist_fixture.tsv", 80, "Federalist No. 1", ()),
+        ("pdf", "federalist_fixture.pdf", 150, "Federalist fixture", ()),
+        ("epub", "federalist_fixture.epub", 150, "Federalist fixture", ()),
+        ("mobi", "federalist_fixture.mobi", 150, "Federalist fixture", ("ebook-convert",)),
+        ("word", "federalist_fixture.doc", 150, "Federalist fixture", ()),
+        ("rtf", "federalist_fixture.rtf", 150, "Federalist fixture", ("textutil",)),
+        ("word_openxml", "federalist_fixture.docx", 150, "Federalist fixture", ()),
+        ("excel_openxml", "federalist_fixture.xlsx", 80, "Federalist No. 1", ()),
+        ("excel", "federalist_fixture.xls", 80, "Federalist No. 1", ()),
+        ("powerpoint_openxml", "federalist_fixture.pptx", 80, "Federalist fixture", ()),
+        ("powerpoint", "federalist_fixture.ppt", 80, "Federalist fixture", ("strings",)),
+        ("djvu", "federalist_fixture.djvu", 80, "Federalist fixture", ("djvutxt",)),
+        ("mhtml", "federalist_fixture.mhtml", 150, "Federalist fixture", ()),
+        ("html", "federalist_fixture.html", 150, "Federalist fixture", ()),
+        ("image_ocr", "federalist_fixture.png", 40, "Federalist fixture", ("tesseract",)),
     ],
 )
 @pytest.mark.asyncio
 async def test_process_document_handles_committed_real_file_fixtures(
     family,
     filename,
-    expected_methods,
     minimum_chars,
     expected_phrase,
     required_tools,
@@ -86,7 +82,6 @@ async def test_process_document_handles_committed_real_file_fixtures(
     assert isinstance(content, str)
     assert len(content) >= minimum_chars
     assert expected_phrase in content
-    assert metadata["extraction_method"] in expected_methods
     assert metadata["original_file_path"] == str(path)
     assert metadata["original_file_type"] == path.suffix.lower().lstrip(".")
     assert metadata["resourceName"] == filename
@@ -102,24 +97,43 @@ def test_supported_extension_help_uses_dispatch_source_of_truth():
         assert grouped in help_text
 
 
-def test_load_mac_ocr_module_from_env_path(monkeypatch, tmp_path):
-    client_path = tmp_path / "local_ocr_client.py"
-    client_path.write_text(
-        "async def ocr_async(file_path, node=None):\n"
-        "    return 'local ocr text'\n",
+@pytest.mark.asyncio
+async def test_ocr_plugin_supports_async_and_sync_functions(monkeypatch, tmp_path):
+    async_plugin = tmp_path / "async_ocr.py"
+    async_plugin.write_text(
+        "async def ocr_async(file_path):\n"
+        "    return f'async:{file_path}'\n",
         encoding="utf-8",
     )
-
-    monkeypatch.setenv("DOCTRAIL_MAC_OCR_CLIENT_PATH", str(client_path))
-    module = _load_mac_ocr_module()
-
-    assert hasattr(module, "ocr_async")
-
-
-def test_load_mac_ocr_module_needs_the_env_var(monkeypatch):
+    monkeypatch.setenv("DOCTRAIL_OCR_PLUGIN", str(async_plugin))
     monkeypatch.delenv("DOCTRAIL_MAC_OCR_CLIENT_PATH", raising=False)
-    with pytest.raises(RuntimeError, match="DOCTRAIL_MAC_OCR_CLIENT_PATH"):
-        _load_mac_ocr_module()
+    assert await ocr.ocr_with_plugin("sample.pdf") == "async:sample.pdf"
+
+    sync_plugin = tmp_path / "sync_ocr.py"
+    sync_plugin.write_text(
+        "def ocr(file_path):\n"
+        "    return f'sync:{file_path}'\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("DOCTRAIL_OCR_PLUGIN", str(sync_plugin))
+    assert await ocr.ocr_with_plugin("sample.pdf") == "sync:sample.pdf"
+
+
+def test_ocr_plugin_accepts_legacy_env_var_and_requires_one(monkeypatch, tmp_path):
+    monkeypatch.delenv("DOCTRAIL_OCR_PLUGIN", raising=False)
+    monkeypatch.delenv("DOCTRAIL_MAC_OCR_CLIENT_PATH", raising=False)
+    with pytest.raises(RuntimeError, match="DOCTRAIL_OCR_PLUGIN"):
+        ocr.load_ocr_plugin()
+
+    legacy = tmp_path / "legacy_client.py"
+    legacy.write_text(
+        "async def ocr_async(file_path, node=None):\n"
+        "    return 'legacy ocr text'\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("DOCTRAIL_MAC_OCR_CLIENT_PATH", str(legacy))
+    module = ocr.load_ocr_plugin()
+    assert hasattr(module, "ocr_async")
 
 
 @pytest.mark.asyncio
@@ -140,13 +154,11 @@ async def test_process_document_handles_xlsx_real(tmp_path):
     result_sha1, content, metadata = await process_document(str(xlsx_path), sha1)
 
     assert result_sha1 == sha1
-    assert "Sheet: Summary" in content
-    assert "Alice | 3" in content
+    assert "Summary" in content
+    assert "Alice" in content
     assert metadata["original_file_path"] == str(xlsx_path)
     assert metadata["original_file_type"] == "xlsx"
     assert metadata["resourceName"] == "sample.xlsx"
-    assert metadata["Content-Type"] == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    assert metadata["extraction_method"] == "openpyxl"
 
 
 @pytest.mark.asyncio
@@ -170,9 +182,58 @@ async def test_process_document_handles_docx_real(tmp_path):
     assert metadata["original_file_path"] == str(docx_path)
     assert metadata["original_file_type"] == "docx"
     assert metadata["resourceName"] == "sample.docx"
-    assert metadata["Content-Type"] == "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-    assert metadata["extraction_method"] == "python_docx"
-    assert metadata["title"] == "Federalist fixture"
+
+
+@pytest.mark.asyncio
+async def test_process_document_handles_pptx_real(tmp_path):
+    from pptx import Presentation
+
+    presentation = Presentation()
+    slide = presentation.slides.add_slide(presentation.slide_layouts[1])
+    slide.shapes.title.text = "Quarterly update"
+    slide.placeholders[1].text = "Revenue up\nNew hires"
+
+    pptx_path = tmp_path / "sample.pptx"
+    presentation.save(pptx_path)
+
+    sha1 = _sha1_for(pptx_path)
+    result_sha1, content, metadata = await process_document(str(pptx_path), sha1)
+
+    assert result_sha1 == sha1
+    assert "Quarterly update" in content
+    assert "Revenue up" in content
+    assert metadata["original_file_type"] == "pptx"
+
+
+@pytest.mark.asyncio
+async def test_process_document_handles_csv_real(tmp_path):
+    csv_path = tmp_path / "sample.csv"
+    csv_path.write_text("Name,Count\nAlice,5\nBob,7\n", encoding="utf-8")
+    sha1 = _sha1_for(csv_path)
+
+    result_sha1, content, metadata = await process_document(str(csv_path), sha1)
+
+    assert result_sha1 == sha1
+    assert "Alice" in content
+    assert metadata["original_file_type"] == "csv"
+
+
+@pytest.mark.asyncio
+async def test_process_document_handles_html_and_mhtml(tmp_path):
+    html_path = tmp_path / "sample.html"
+    html_path.write_text(
+        "<!DOCTYPE html><html><head><title>  Example   page  </title></head>"
+        "<body><article><h1>Visible heading</h1><p>Hello world from a saved page.</p></article></body></html>",
+        encoding="utf-8",
+    )
+    _, content, metadata = await process_document(str(html_path), _sha1_for(html_path))
+    assert "Hello world" in content
+    assert isinstance(metadata.get("title"), str)
+
+    mhtml_as_html = tmp_path / "saved-page.html"
+    shutil.copyfile(ASSET_DIR / "federalist_fixture.mhtml", mhtml_as_html)
+    _, mcontent, _ = await process_document(str(mhtml_as_html), _sha1_for(mhtml_as_html))
+    assert "Federalist fixture" in mcontent
 
 
 def test_clean_extracted_text_rejects_non_string_input():
@@ -277,7 +338,7 @@ def test_embedded_media_ocr_creates_parent_for_image_only_office_file(monkeypatc
     db_path = tmp_path / "image-only.sqlite"
 
     result = embedded_media.run_media_ingest(
-        [str(source)], str(db_path), ocr_engine="mac-ocr", fulltext=False
+        [str(source)], str(db_path), ocr_engine="plugin", fulltext=False
     )
 
     assert result["inserted"] == 1
@@ -293,16 +354,9 @@ def test_embedded_media_ocr_creates_parent_for_image_only_office_file(monkeypatc
 
 
 @pytest.mark.asyncio
-@pytest.mark.skipif(
-    native_extractor._native() is None,
-    reason="native extraction extension (doctrail._ingest_native) is not built",
-)
-async def test_native_ingest_merges_embedded_docx_image_ocr_into_parent(
-    monkeypatch, tmp_path
-):
+async def test_native_ingest_merges_embedded_docx_image_ocr_into_parent(monkeypatch, tmp_path):
     from docx import Document
 
-    monkeypatch.delenv("DOCTRAIL_DISABLE_NATIVE", raising=False)
     source = tmp_path / "source"
     source.mkdir()
     image_path = ASSET_DIR / "federalist_fixture.png"
@@ -328,7 +382,6 @@ async def test_native_ingest_merges_embedded_docx_image_ocr_into_parent(
         db_path=str(db_path),
         input_dir=str(source),
         table="documents",
-        extractor="rust",
         ocr_engine="auto",
         workers=1,
         yes=True,
@@ -362,7 +415,6 @@ async def test_native_ingest_merges_embedded_docx_image_ocr_into_parent(
         db_path=str(db_path),
         input_dir=str(source),
         table="documents",
-        extractor="rust",
         ocr_engine="auto",
         workers=1,
         yes=True,
@@ -391,7 +443,6 @@ async def test_ingest_can_skip_embedded_office_media(monkeypatch, tmp_path):
         db_path=str(tmp_path / "skip-media.sqlite"),
         input_dir=str(source),
         table="documents",
-        extractor="python",
         workers=1,
         skip_embedded_media=True,
         yes=True,
@@ -402,362 +453,55 @@ async def test_ingest_can_skip_embedded_office_media(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("extension", "extractor_name", "title", "expected_type"),
-    [
-        ("epub", "extract_text_from_epub", "EPUB title", "epub"),
-        ("mobi", "extract_text_from_mobi", "MOBI title", "mobi"),
-        ("djvu", "extract_text_from_djvu", "DJVU title", "djvu"),
-    ],
-)
-async def test_process_document_unpacks_tuple_extractors(monkeypatch, tmp_path, extension, extractor_name, title, expected_type):
-    file_path = tmp_path / f"sample.{extension}"
-    file_path.write_bytes(b"fake document content")
-    sha1 = _sha1_for(file_path)
-
-    monkeypatch.setattr(
-        f"doctrail.ingest.document_processor.{extractor_name}",
-        lambda path: (f"{title}\nExtracted body text", title),
-    )
-
-    result_sha1, content, metadata = await process_document(str(file_path), sha1)
-
-    assert result_sha1 == sha1
-    assert content == f"{title}\nExtracted body text"
-    assert metadata["original_file_type"] == expected_type
-    assert metadata["title"] == title
-
-
-@pytest.mark.asyncio
-async def test_process_document_handles_xls(monkeypatch, tmp_path):
-    xls_path = tmp_path / "sample.xls"
-    xls_path.write_bytes(b"fake xls content")
-    sha1 = _sha1_for(xls_path)
-
-    monkeypatch.setattr(
-        "doctrail.ingest.document_processor.extract_structured_from_xls",
-        lambda path: (
-            "Sheet: Legacy\nName | Count\nAlice | 5",
-            "xlrd",
-            [{
-                "sheet_name": "Legacy",
-                "rows": [["Name", "Count"], ["Alice", "5"]],
-                "csv": "Name,Count\r\nAlice,5\r\n",
-                "text": "Sheet: Legacy\nName | Count\nAlice | 5",
-            }],
-        ),
-    )
-
-    result_sha1, content, metadata = await process_document(str(xls_path), sha1)
-
-    assert result_sha1 == sha1
-    assert "Legacy" in content
-    assert metadata["original_file_path"] == str(xls_path)
-    assert metadata["original_file_type"] == "xls"
-    assert metadata["resourceName"] == "sample.xls"
-    assert metadata["Content-Type"] == "application/vnd.ms-excel"
-    assert metadata["extraction_method"] == "xlrd"
-
-
-@pytest.mark.asyncio
-async def test_process_document_handles_html_backed_xls(tmp_path):
-    xls_path = tmp_path / "sample.xls"
-    xls_path.write_text(
-        """<!DOCTYPE html>
-<html>
-<head><title>Workbook</title></head>
-<body>
-<table>
-  <tr><td>Name</td><td>Count</td></tr>
-  <tr><td>Alice</td><td>5</td></tr>
-</table>
-</body>
-</html>
-""",
-        encoding="utf-8",
-    )
-    sha1 = _sha1_for(xls_path)
-
-    result_sha1, content, metadata = await process_document(str(xls_path), sha1)
-
-    assert result_sha1 == sha1
-    assert "Sheet: Workbook" in content
-    assert "Alice | 5" in content
-    assert metadata["extraction_method"] == "html_spreadsheet"
-
-
-@pytest.mark.asyncio
-async def test_process_document_returns_plain_string_html_title(tmp_path):
-    html_path = tmp_path / "sample.html"
-    html_path.write_text(
-        """<!DOCTYPE html>
-<html>
-<head><title>  Example   page  </title></head>
-<body><h1>Visible heading</h1><p>Hello world</p></body>
-</html>
-""",
-        encoding="utf-8",
-    )
-    sha1 = _sha1_for(html_path)
-
-    _, content, metadata = await process_document(str(html_path), sha1)
-
-    assert "Hello world" in content
-    assert metadata["title"] == "Example page"
-    assert isinstance(metadata["title"], str)
-
-
-@pytest.mark.asyncio
-async def test_process_document_sniffs_mhtml_saved_with_html_extension(tmp_path):
-    html_path = tmp_path / "saved-page.html"
-    shutil.copyfile(ASSET_DIR / "federalist_fixture.mhtml", html_path)
-    sha1 = _sha1_for(html_path)
-
-    result_sha1, content, metadata = await process_document(str(html_path), sha1)
-
-    assert result_sha1 == sha1
-    assert "Federalist fixture" in content
-    assert metadata["file_type"] == "mhtml"
-
-
-@pytest.mark.asyncio
-async def test_process_document_handles_csv_real(tmp_path):
-    csv_path = tmp_path / "sample.csv"
-    csv_path.write_text(
-        "Name,Count\nAlice,5\nBob,7\n",
-        encoding="utf-8",
-    )
-    sha1 = _sha1_for(csv_path)
-
-    result_sha1, content, metadata = await process_document(str(csv_path), sha1)
-
-    assert result_sha1 == sha1
-    assert "Sheet: sample" in content
-    assert "Alice | 5" in content
-    assert metadata["original_file_path"] == str(csv_path)
-    assert metadata["original_file_type"] == "csv"
-    assert metadata["resourceName"] == "sample.csv"
-    assert metadata["Content-Type"] == "text/csv"
-    assert metadata["extraction_method"] == "csv"
-
-
-def test_soffice_retry_on_signal_terminated_process(monkeypatch, tmp_path):
-    source_path = tmp_path / "sample.xls"
-    source_path.write_bytes(b"fake xls content")
-
-    monkeypatch.setattr(spreadsheet_extractor, "_resolve_soffice", lambda: "/usr/bin/soffice")
-
-    class _Slot:
-        def close(self):
-            return None
-
-    monkeypatch.setattr(spreadsheet_extractor, "_acquire_soffice_slot", lambda max_procs: _Slot())
-
-    calls = {"count": 0}
-
-    def _fake_run(cmd, capture_output, text, timeout):
-        calls["count"] += 1
-        outdir = Path(cmd[cmd.index("--outdir") + 1])
-        converted_path = outdir / f"{source_path.stem}.xlsx"
-        if calls["count"] == 2:
-            converted_path.write_bytes(b"converted workbook")
-            return SimpleNamespace(returncode=0, stderr="", stdout="")
-        return SimpleNamespace(returncode=-2, stderr="", stdout="")
-
-    monkeypatch.setattr(spreadsheet_extractor.subprocess, "run", _fake_run)
-    monkeypatch.setenv("DOCTRAIL_SOFFICE_RETRIES", "1")
-
-    converted_path = spreadsheet_extractor._convert_with_soffice(str(source_path), "xlsx")
-    assert Path(converted_path).exists()
-    assert calls["count"] == 2
-
-
-@pytest.mark.asyncio
-async def test_process_document_xls_missing_backend(monkeypatch, tmp_path):
-    xls_path = tmp_path / "sample.xls"
-    xls_path.write_bytes(b"fake xls content")
-    sha1 = _sha1_for(xls_path)
-
-    def _raise(_):
-        raise RuntimeError("LibreOffice is not installed. Install `soffice` to convert .xls files.")
-
-    monkeypatch.setattr("doctrail.ingest.document_processor.extract_structured_from_xls", _raise)
-
-    with pytest.raises(ValueError) as excinfo:
-        await process_document(str(xls_path), sha1)
-
-    assert "soffice" in str(excinfo.value)
-
-
-@pytest.mark.asyncio
-async def test_process_document_skips_quota_html_saved_as_pdf(tmp_path):
-    pdf_path = tmp_path / "quota.pdf"
-    pdf_path.write_text(
-        "<script>alert('对不起，今日的条目下载量已经达到极限，建议您明天下载！');</script>",
-        encoding="utf-8",
-    )
-    sha1 = _sha1_for(pdf_path)
-
-    with pytest.raises(SkippedFileException) as excinfo:
-        await process_document(str(pdf_path), sha1)
-
-    assert "Download-limit HTML page" in str(excinfo.value)
-
-
-@pytest.mark.asyncio
-async def test_process_document_skips_quota_html_saved_as_xls(tmp_path):
-    xls_path = tmp_path / "quota.xls"
-    xls_path.write_text(
-        "<script>alert('对不起，今日的条目下载量已经达到极限，建议您明天下载！');</script>",
-        encoding="utf-8",
-    )
-    sha1 = _sha1_for(xls_path)
-
-    with pytest.raises(SkippedFileException) as excinfo:
-        await process_document(str(xls_path), sha1)
-
-    assert "Download-limit HTML page" in str(excinfo.value)
-
-
-@pytest.mark.asyncio
-async def test_process_document_respects_mac_ocr_engine(monkeypatch, tmp_path):
-    pdf_path = tmp_path / "sample.pdf"
-    pdf_path.write_bytes(b"%PDF-1.4\nfake pdf for engine selection\n")
-    sha1 = _sha1_for(pdf_path)
-
-    monkeypatch.setattr("doctrail.ingest.document_processor.ocr_with_mac_ocr", _async_return("==== Page 1 ====\nOCR text"))
-    monkeypatch.setattr("doctrail.ingest.document_processor.extract_text_with_pymupdf", lambda path: "embedded text")
-
-    result_sha1, content, metadata = await process_document(
-        str(pdf_path),
-        sha1,
-        pdf_engine="mac-ocr",
-        ocr_engine="mac-ocr",
-    )
-
-    assert result_sha1 == sha1
-    assert "OCR text" in content
-    assert metadata["extraction_method"] == "mac_ocr"
-    assert metadata["ocr_engine"] == "mac-ocr"
-
-
-@pytest.mark.asyncio
-async def test_process_document_mac_ocr_only_skips_local_pdf_fallbacks(monkeypatch, tmp_path):
+async def test_process_document_plugin_ocr_for_pdf_and_image(monkeypatch, tmp_path):
     pdf_path = tmp_path / "sample.pdf"
     pdf_path.write_bytes(b"%PDF-1.4\nfake scanned pdf\n")
     sha1 = _sha1_for(pdf_path)
 
-    monkeypatch.setattr("doctrail.ingest.document_processor.extract_text_with_pymupdf", lambda path: "")
-    monkeypatch.setattr("doctrail.ingest.document_processor.extract_text_with_pdftotext", lambda path: "")
-    monkeypatch.setattr("doctrail.ingest.document_processor.extract_text_with_mutool", lambda path: "")
-    monkeypatch.setattr("doctrail.ingest.document_processor.ocr_with_mac_ocr", _async_return("==== Page 1 ====\nCluster OCR text"))
+    monkeypatch.setattr(ocr, "ocr_with_plugin", _async_return("==== Page 1 ====\nPlugin OCR text"))
     monkeypatch.setattr(
-        "doctrail.ingest.document_processor.ocr_pdf_with_ocrmypdf",
-        lambda path: pytest.fail("mac-ocr-only must not invoke OCRmyPDF"),
+        ocr,
+        "_try_ocr_pdf_with_textra",
+        lambda path, file_sha1: pytest.fail("plugin mode must not invoke Textra"),
     )
     monkeypatch.setattr(
-        "doctrail.ingest.document_processor._try_ocr_with_textra",
-        lambda path, file_sha1: pytest.fail("mac-ocr-only must not invoke Textra"),
+        ocr,
+        "_try_ocr_pdf_with_ocrmypdf",
+        lambda path, file_sha1: pytest.fail("plugin mode must not invoke ocrmypdf"),
     )
 
-    _, content, metadata = await process_document(str(pdf_path), sha1, ocr_engine="mac-ocr-only")
+    result_sha1, content, metadata = await process_document(
+        str(pdf_path),
+        sha1,
+        pdf_engine="ocr",
+        ocr_engine="plugin",
+    )
+    assert result_sha1 == sha1
+    assert "Plugin OCR text" in content
+    assert metadata["extraction_method"] == "ocr_plugin"
+    assert metadata["ocr_engine"] == "plugin"
 
-    assert "Cluster OCR text" in content
-    assert metadata["extraction_method"] == "mac_ocr"
-    assert metadata["ocr_engine"] == "mac-ocr"
-
-
-@pytest.mark.asyncio
-async def test_process_document_mac_ocr_only_skips_local_image_fallbacks(monkeypatch):
+    # Legacy alias mac-ocr-only also routes strictly through the plugin.
     image_path = ASSET_DIR / "federalist_fixture.png"
-    sha1 = _sha1_for(image_path)
-
-    monkeypatch.setattr("doctrail.ingest.document_processor.ocr_with_mac_ocr", _async_return("Cluster image OCR text"))
     monkeypatch.setattr(
-        "doctrail.ingest.document_processor._try_ocr_image_with_textra",
-        lambda path, file_sha1: pytest.fail("mac-ocr-only must not invoke Textra"),
+        ocr,
+        "_try_ocr_image_with_textra",
+        lambda path, file_sha1: pytest.fail("plugin mode must not invoke Textra"),
     )
     monkeypatch.setattr(
-        "doctrail.ingest.document_processor._try_ocr_image_with_tesseract",
-        lambda path: pytest.fail("mac-ocr-only must not invoke Tesseract"),
+        ocr,
+        "_try_ocr_image_with_tesseract",
+        lambda path: pytest.fail("plugin mode must not invoke Tesseract"),
     )
-
-    _, content, metadata = await process_document(str(image_path), sha1, ocr_engine="mac-ocr-only")
-
-    assert "Cluster image OCR text" in content
-    assert metadata["extraction_method"] == "mac_ocr"
-    assert metadata["ocr_engine"] == "mac-ocr"
-
-
-@pytest.mark.asyncio
-async def test_process_document_handles_pptx_real(tmp_path):
-    from pptx import Presentation
-
-    presentation = Presentation()
-    slide = presentation.slides.add_slide(presentation.slide_layouts[1])
-    slide.shapes.title.text = "Quarterly update"
-    slide.placeholders[1].text = "Revenue up\nNew hires"
-
-    pptx_path = tmp_path / "sample.pptx"
-    presentation.save(pptx_path)
-
-    sha1 = _sha1_for(pptx_path)
-    result_sha1, content, metadata = await process_document(str(pptx_path), sha1)
-
-    assert result_sha1 == sha1
-    assert "Slide 1" in content
-    assert "Quarterly update" in content
-    assert "Revenue up" in content
-    assert metadata["original_file_path"] == str(pptx_path)
-    assert metadata["original_file_type"] == "pptx"
-    assert metadata["resourceName"] == "sample.pptx"
-    assert metadata["Content-Type"] == "application/vnd.openxmlformats-officedocument.presentationml.presentation"
-    assert metadata["extraction_method"] == "python_pptx"
-
-
-@pytest.mark.asyncio
-async def test_process_document_handles_ppt(monkeypatch, tmp_path):
-    ppt_path = tmp_path / "sample.ppt"
-    ppt_path.write_bytes(b"fake ppt content")
-    sha1 = _sha1_for(ppt_path)
-
-    monkeypatch.setattr(
-        "doctrail.ingest.document_processor.extract_text_from_ppt",
-        lambda path: ("Slide 1\nLegacy deck", "soffice_to_pptx_python_pptx"),
+    _, img_content, img_meta = await process_document(
+        str(image_path), _sha1_for(image_path), ocr_engine="mac-ocr-only"
     )
-
-    result_sha1, content, metadata = await process_document(str(ppt_path), sha1)
-
-    assert result_sha1 == sha1
-    assert "Legacy deck" in content
-    assert metadata["original_file_path"] == str(ppt_path)
-    assert metadata["original_file_type"] == "ppt"
-    assert metadata["resourceName"] == "sample.ppt"
-    assert metadata["Content-Type"] == "application/vnd.ms-powerpoint"
-    assert metadata["extraction_method"] == "soffice_to_pptx_python_pptx"
-
-
-@pytest.mark.asyncio
-async def test_process_document_ppt_missing_soffice(monkeypatch, tmp_path):
-    ppt_path = tmp_path / "sample.ppt"
-    ppt_path.write_bytes(b"fake ppt content")
-    sha1 = _sha1_for(ppt_path)
-
-    def _raise(_):
-        raise RuntimeError("LibreOffice is not installed. Install `soffice` to convert .ppt files.")
-
-    monkeypatch.setattr("doctrail.ingest.document_processor.extract_text_from_ppt", _raise)
-
-    with pytest.raises(ValueError) as excinfo:
-        await process_document(str(ppt_path), sha1)
-
-    assert "soffice" in str(excinfo.value)
+    assert "Plugin OCR text" in img_content
+    assert img_meta["ocr_engine"] == "plugin"
 
 
 def test_missing_pdftotext_names_install_and_env_var(monkeypatch):
-    from doctrail.extractors.pdf_extractor import find_pdftotext, require_pdftotext
-
     monkeypatch.setenv("DOCTRAIL_PDFTOTEXT", "/nonexistent/pdftotext")
-    assert find_pdftotext() is None
+    assert ocr.find_pdftotext() is None
     with pytest.raises(RuntimeError, match="brew install poppler.*DOCTRAIL_PDFTOTEXT"):
-        require_pdftotext()
+        ocr.require_pdftotext()

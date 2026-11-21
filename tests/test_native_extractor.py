@@ -1,10 +1,4 @@
-"""Tests for the optional Rust extraction accelerator (``doctrail._ingest_native``).
-
-Skipped entirely when the compiled extension is not built (e.g. CI without a
-native build). The rest of the suite runs the Python path via the
-``DOCTRAIL_DISABLE_NATIVE`` guard in ``conftest.py``; here we clear it so the
-Rust path is active.
-"""
+"""Tests for the Rust extraction engine (``doctrail._ingest_native``)."""
 
 import hashlib
 import json
@@ -29,9 +23,8 @@ pytestmark = pytest.mark.skipif(
 
 
 @pytest.fixture
-def native_enabled(monkeypatch):
-    """Clear the suite-wide kill-switch so the Rust extraction path is active."""
-    monkeypatch.delenv("DOCTRAIL_DISABLE_NATIVE", raising=False)
+def native_enabled():
+    """Confirm the compiled native extraction extension is active."""
     assert native_extractor.available()
 
 
@@ -277,12 +270,21 @@ def test_to_result_maps_to_ingest_contract(tmp_path, native_enabled):
     assert result["metadata"]["processing_method"] == "rust-ingestor"
 
 
-def test_disable_native_env_forces_python_path(tmp_path, monkeypatch):
-    """The kill-switch makes available() report False even when the .so is built."""
-    monkeypatch.setenv("DOCTRAIL_DISABLE_NATIVE", "1")
-    assert native_extractor.available() is False
-    monkeypatch.delenv("DOCTRAIL_DISABLE_NATIVE", raising=False)
-    assert native_extractor.available() is True
+@pytest.mark.asyncio
+async def test_python_extractor_flag_reports_removal(tmp_path, native_enabled):
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "document.txt").write_text("native only", encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="legacy Python extractor was removed"):
+        await process_ingest(
+            db_path=str(tmp_path / "removed.sqlite"),
+            input_dir=str(source),
+            table="documents",
+            extractor="python",
+            workers=1,
+            yes=True,
+        )
 
 
 @pytest.mark.asyncio
@@ -353,45 +355,19 @@ async def test_process_ingest_records_whole_chunk_failure_without_python_fallbac
 
 
 @pytest.mark.asyncio
-async def test_auto_mode_falls_back_to_python_when_native_extension_is_unavailable(
+async def test_ingest_fails_closed_when_native_extension_is_unavailable(
     tmp_path, native_enabled, monkeypatch
 ):
     source = tmp_path / "source"
     source.mkdir()
-    (source / "document.txt").write_text("pure-Python installs must still ingest", encoding="utf-8")
+    (source / "document.txt").write_text("needs native extension", encoding="utf-8")
     monkeypatch.setattr(native_extractor, "available", lambda: False)
 
-    db_path = tmp_path / "fallback.sqlite"
-    result = await process_ingest(
-        db_path=str(db_path),
-        input_dir=str(source),
-        table="documents",
-        extractor="auto",
-        workers=1,
-        yes=True,
-    )
-
-    assert result["successful"] == 1
-    with sqlite3.connect(db_path) as conn:
-        row_count = conn.execute("SELECT COUNT(*) FROM documents").fetchone()[0]
-    assert row_count == 1
-
-
-@pytest.mark.asyncio
-async def test_rust_mode_fails_closed_when_native_extension_is_unavailable(
-    tmp_path, native_enabled, monkeypatch
-):
-    source = tmp_path / "source"
-    source.mkdir()
-    (source / "document.txt").write_text("must not use Python implicitly", encoding="utf-8")
-    monkeypatch.setattr(native_extractor, "available", lambda: False)
-
-    with pytest.raises(RuntimeError, match="Native extraction is required"):
+    with pytest.raises(RuntimeError, match="doctrail._ingest_native"):
         await process_ingest(
             db_path=str(tmp_path / "closed.sqlite"),
             input_dir=str(source),
             table="documents",
-            extractor="rust",
             workers=1,
             yes=True,
         )
@@ -562,7 +538,7 @@ async def test_native_zero_page_pdf_still_tries_mac_ocr_and_preserves_failure(
     assert result["failed"] == 1
     assert attempted == [str(broken_pdf)]
     output = capsys.readouterr().out
-    assert "Mac OCR failed after zero_pages" in output
+    assert "OCR failed after zero_pages" in output
     assert "renderer returned HTTP 500" in output
 
 
@@ -733,13 +709,13 @@ def test_extract_batch_full_mode_keeps_low_value_pages(tmp_path, native_enabled)
 
 def test_html_settings_rejects_bad_rules_before_any_file(native_enabled):
     with pytest.raises(ValueError, match="invalid CSS selector"):
-        native_extractor.html_settings({"mode": "full", "drop_selectors": ["div["]}, True)
+        native_extractor.html_settings({"mode": "full", "drop_selectors": ["div["]})
     with pytest.raises(ValueError, match="need mode"):
-        native_extractor.html_settings({"drop_selectors": ["nav"]}, True)
+        native_extractor.html_settings({"drop_selectors": ["nav"]})
 
 
 def test_html_settings_fills_defaults(native_enabled):
-    assert native_extractor.html_settings({"mode": "full"}, True) == {
+    assert native_extractor.html_settings({"mode": "full"}) == {
         "mode": "full",
         "keep_selectors": [],
         "drop_selectors": [],
@@ -754,7 +730,7 @@ def test_html_settings_names_a_stale_native_build(monkeypatch, native_enabled):
 
     monkeypatch.setattr(native_extractor, "_native", lambda: OldBuild())
     with pytest.raises(RuntimeError, match="make native"):
-        native_extractor.html_settings({"mode": "full"}, True)
+        native_extractor.html_settings({"mode": "full"})
 
 
 @pytest.mark.asyncio
@@ -896,3 +872,90 @@ def test_extract_file_has_no_pages_for_plain_text(tmp_path, native_enabled):
 
     assert doc["pages"] == []
     assert "park opens" in doc["content"]
+
+
+@pytest.mark.asyncio
+async def test_ocr_plugin_supports_sync_and_async_contracts(tmp_path, native_enabled, monkeypatch):
+    source = tmp_path / "source"
+    source.mkdir()
+    image_src = Path(__file__).parent / "assets" / "files" / "federalist_fixture.png"
+    target = source / "scan.png"
+    shutil.copy2(image_src, target)
+
+    sync_plugin = tmp_path / "sync_ocr.py"
+    sync_plugin.write_text(
+        "def ocr(file_path: str) -> str:\n    return f'sync OCR: {file_path}'\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("DOCTRAIL_OCR_PLUGIN", str(sync_plugin))
+    monkeypatch.delenv("DOCTRAIL_MAC_OCR_CLIENT_PATH", raising=False)
+
+    db_sync = tmp_path / "sync.db"
+    res = await process_ingest(
+        db_path=str(db_sync),
+        input_dir=str(source),
+        table="documents",
+        ocr_engine="plugin",
+        workers=1,
+        yes=True,
+    )
+    assert res["successful"] == 1
+    with sqlite3.connect(db_sync) as conn:
+        content, method = conn.execute("SELECT raw_content, extraction_method FROM documents").fetchone()
+    assert "sync OCR:" in content
+    assert method == "ocr_plugin"
+
+    async_plugin = tmp_path / "async_ocr.py"
+    async_plugin.write_text(
+        "async def ocr_async(file_path: str) -> str:\n    return f'async OCR: {file_path}'\n",
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("DOCTRAIL_OCR_PLUGIN", raising=False)
+    monkeypatch.setenv("DOCTRAIL_MAC_OCR_CLIENT_PATH", str(async_plugin))
+
+    db_async = tmp_path / "async.db"
+    res_async = await process_ingest(
+        db_path=str(db_async),
+        input_dir=str(source),
+        table="documents",
+        ocr_engine="mac-ocr",
+        workers=1,
+        yes=True,
+    )
+    assert res_async["successful"] == 1
+    with sqlite3.connect(db_async) as conn:
+        content, method = conn.execute("SELECT raw_content, extraction_method FROM documents").fetchone()
+    assert "async OCR:" in content
+    assert method == "ocr_plugin"
+
+
+def test_cli_pdf_engine_mac_ocr_alias_routes_to_plugin(tmp_path, monkeypatch):
+    from click.testing import CliRunner
+    from doctrail.cli.main import cli
+
+    captured = {}
+
+    async def fake_run_ingest(**kwargs):
+        captured.update(kwargs)
+        return {"status": "success", "mode": "directory"}
+
+    monkeypatch.setattr("doctrail.core.run_ingest", fake_run_ingest)
+    source = tmp_path / "docs"
+    source.mkdir()
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        [
+            "ingest",
+            "--db-path",
+            str(tmp_path / "test.db"),
+            "--input-dir",
+            str(source),
+            "--pdf-engine",
+            "mac-ocr",
+            "--yes",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert captured["pdf_engine"] == "ocr"
+    assert captured["ocr_engine"] == "plugin"

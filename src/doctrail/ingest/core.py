@@ -15,7 +15,6 @@ import shutil
 import subprocess
 import tempfile
 from collections import deque
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from datetime import datetime
 from typing import Optional, List, Dict, Any
@@ -38,16 +37,22 @@ from .database import (
     setup_fts,
 )
 from .document_processor import (
-    process_document,
     SkippedFileException,
     SUPPORTED_EXTENSIONS,
-    ocr_with_mac_ocr,
+)
+from .ocr import (
+    normalize_ocr_engine,
+    ocr_with_plugin,
+    require_pdftotext,
+    run_ocr,
 )
 from .text_processing import clean_ocr_text
-from ..extractors.pdf_extractor import require_pdftotext
 from ..db_operations import _quote_identifier
 from ..file_filters import should_skip_file, apply_file_patterns, check_for_manual_override
 from .manifest import load_manifest, get_file_metadata, find_manifest_in_directory
+
+# Keep alias for tests that monkeypatch the plugin OCR entry point on core.
+ocr_with_mac_ocr = ocr_with_plugin
 
 # Initialize Rich console for pretty output
 console = Console()
@@ -294,120 +299,6 @@ def _merge_ingest_json_metadata(
     }
 
 
-def _normalize_worker_value(value: Any, seen: Optional[set[int]] = None) -> Any:
-    """Convert worker results to plain Python values that are safe to persist."""
-    if value is None or isinstance(value, (str, int, float, bool)):
-        return value
-    if isinstance(value, bytes):
-        return value.decode('utf-8', errors='replace')
-    if isinstance(value, Path):
-        return str(value)
-
-    if seen is None:
-        seen = set()
-
-    if isinstance(value, dict):
-        obj_id = id(value)
-        if obj_id in seen:
-            return "[recursive]"
-        seen.add(obj_id)
-        try:
-            return {
-                str(key): _normalize_worker_value(item, seen)
-                for key, item in value.items()
-            }
-        finally:
-            seen.discard(obj_id)
-
-    if isinstance(value, (list, tuple)):
-        obj_id = id(value)
-        if obj_id in seen:
-            return ["[recursive]"]
-        seen.add(obj_id)
-        try:
-            return [_normalize_worker_value(item, seen) for item in value]
-        finally:
-            seen.discard(obj_id)
-
-    if isinstance(value, set):
-        obj_id = id(value)
-        if obj_id in seen:
-            return ["[recursive]"]
-        seen.add(obj_id)
-        try:
-            return [
-                _normalize_worker_value(item, seen)
-                for item in sorted(value, key=lambda item: str(item))
-            ]
-        finally:
-            seen.discard(obj_id)
-
-    return str(value)
-
-
-def _build_success_result(
-    file_path: str,
-    sha1: str,
-    content: Any,
-    metadata: Any,
-    elapsed: float,
-) -> Dict[str, Any]:
-    normalized_metadata = _normalize_worker_value(metadata)
-    if not isinstance(normalized_metadata, dict):
-        normalized_metadata = {"raw_metadata": str(normalized_metadata)}
-
-    normalized_content = content if isinstance(content, str) else str(content or "")
-
-    return {
-        'success': True,
-        'file_path': file_path,
-        'sha1': sha1,
-        'content': normalized_content,
-        'metadata': normalized_metadata,
-        'elapsed': elapsed,
-    }
-
-
-def _extract_document_worker(payload: Dict[str, Any]) -> Dict[str, Any]:
-    import time
-
-    start_time = time.time()
-    file_path = payload['file_path']
-    file_sha1 = payload['file_sha1']
-
-    try:
-        sha1, content, metadata = asyncio.run(process_document(
-            file_path,
-            file_sha1,
-            use_readability=payload['readability'],
-            html_extractor=payload['html_extractor'],
-            skip_garbage_check=payload['skip_garbage_check'],
-            pdf_engine=payload['pdf_engine'],
-            ocr_engine=payload['ocr_engine'],
-        ))
-        return _build_success_result(
-            file_path=file_path,
-            sha1=sha1,
-            content=content,
-            metadata=metadata,
-            elapsed=time.time() - start_time,
-        )
-    except SkippedFileException as exc:
-        return {
-            'success': None,
-            'file_path': file_path,
-            'error': f"Skipped: {exc}",
-            'elapsed': time.time() - start_time,
-        }
-    except Exception as exc:
-        return {
-            'success': False,
-            'file_path': file_path,
-            'error': f"Error: {exc}",
-            'elapsed': time.time() - start_time,
-        }
-
-
 async def process_ingest(
     db_path: str,
     input_dir: str,
@@ -483,15 +374,17 @@ async def process_ingest(
         raise RuntimeError("workers must be >= 1")
 
     from . import native_extractor
-    try:
-        html = native_extractor.html_settings(
-            html_config, extractor != 'python' and native_extractor.available()
+    if extractor == "python":
+        raise RuntimeError(
+            "The legacy Python extractor was removed in doctrail 0.4.0; "
+            "the native Rust extractor is now bundled in every install."
         )
+    if html_config is None and readability:
+        html_config = {"mode": "article"}
+    try:
+        html = native_extractor.html_settings(html_config)
     except ValueError as exc:
         raise RuntimeError(f"Invalid HTML settings: {exc}") from exc
-    if html:
-        # The Python extractors, including the MHTML fallback, know the mode only.
-        readability = html["mode"] == "article"
     # Rules exclude content, so no fallback may store a page without them.
     html_rules = bool(html) and any(html.get(key) for key in native_extractor.HTML_FILTER_KEYS)
 
@@ -686,19 +579,15 @@ async def process_ingest(
                 total=len(hash_candidates),
             )
             hash_results = None
-            if (
-                extractor in {"auto", "rust"}
-                and not os.environ.get("DOCTRAIL_DISABLE_NATIVE")
-            ):
-                try:
-                    from . import native_extractor
+            try:
+                from . import native_extractor
 
-                    if native_extractor.available():
-                        hash_results = native_extractor.hash_batch(
-                            [str(path) for path in hash_candidates], hash_workers
-                        )
-                except Exception as exc:
-                    logger.warning(f"Native multicore hashing failed; using Python: {exc}")
+                if native_extractor.available():
+                    hash_results = native_extractor.hash_batch(
+                        [str(path) for path in hash_candidates], hash_workers
+                    )
+            except Exception as exc:
+                logger.warning(f"Native multicore hashing failed; using Python: {exc}")
             if hash_results is None:
                 hash_results = []
                 for path in hash_candidates:
@@ -754,12 +643,16 @@ async def process_ingest(
     # pdftotext is the default PDF engine. Fail before extraction rather than
     # silently falling back to MuPDF, and tell the native extractor which
     # backend and binary to use.
-    pdf_backend = 'pdftotext' if pdf_engine in ('auto', 'pdftotext') else 'mupdf'
-    if pdf_backend == 'pdftotext' and any(
-        Path(fp).suffix.lower() == '.pdf' for fp, _ in files_to_process
+    force_pdf_ocr = pdf_engine in ("ocr", "mac-ocr")
+    effective_ocr_engine = normalize_ocr_engine(
+        "plugin" if (pdf_engine == "mac-ocr" and ocr_engine == "auto") else ocr_engine
+    )
+    pdf_backend = "pdftotext" if pdf_engine in ("auto", "pdftotext") else "mupdf"
+    if not force_pdf_ocr and pdf_backend == "pdftotext" and any(
+        Path(fp).suffix.lower() == ".pdf" for fp, _ in files_to_process
     ):
-        os.environ['DOCTRAIL_PDFTOTEXT'] = require_pdftotext()
-    os.environ['DOCTRAIL_PDF_BACKEND'] = pdf_backend
+        os.environ["DOCTRAIL_PDFTOTEXT"] = require_pdftotext()
+    os.environ["DOCTRAIL_PDF_BACKEND"] = pdf_backend
 
     # Show summary and confirm
     worker_count = min(_default_worker_count() if workers is None else workers, max(1, len(files_to_process)))
@@ -901,78 +794,71 @@ async def process_ingest(
             if line_delay > 0 and result['success'] is not None:
                 time.sleep(line_delay)
 
-        # Native (Rust) is authoritative when built. The published wheel is pure
-        # Python, so auto mode falls back to the Python extractors (loudly) when
-        # the compiled extension is absent; --extractor rust fails closed.
         from . import native_extractor
-        if extractor == 'auto' and os.environ.get('DOCTRAIL_DISABLE_NATIVE'):
-            extractor = 'python'
-        if extractor == 'auto' and not native_extractor.available():
-            console.print(
-                "[yellow]Native extension not built; using the Python extractors. "
-                "For the multicore fast path, build it with `make native` from a "
-                "source checkout.[/yellow]"
-            )
-            extractor = 'python'
-        native_active = extractor in ('auto', 'rust')
-        if native_active and not native_extractor.available():
+        if not native_extractor.available():
             raise RuntimeError(
-                "Native extraction is required for --extractor rust, but "
-                "doctrail._ingest_native is not installed. Build it with "
-                "`make native` from a source checkout, or use `--extractor python`."
+                "doctrail's native extractor (`doctrail._ingest_native`) is not installed. "
+                "Reinstall doctrail, or build it from a source checkout with `make native`."
             )
-        if native_active:
-            console.print("[cyan]Using native Rust extractor[/cyan] (multicore in-process)")
-            path_to_sha = {str(fp): sha for fp, sha in files_to_process}
-            native_paths: List[str] = []
-            native_ocr_semaphore = asyncio.Semaphore(worker_count)
-            deferred_mac_ocr: List[tuple[str, Dict[str, Any]]] = []
-            deferred_mhtml_fallback: List[str] = []
+        console.print("[cyan]Using native Rust extractor[/cyan] (multicore in-process)")
+        path_to_sha = {str(fp): sha for fp, sha in files_to_process}
+        native_paths: List[str] = []
+        native_ocr_semaphore = asyncio.Semaphore(worker_count)
+        deferred_ocr: List[tuple[str, Dict[str, Any]]] = []
 
-            async def run_native_mac_ocr(path: str, doc: Dict[str, Any]) -> Dict[str, Any]:
-                try:
-                    async with native_ocr_semaphore:
-                        ocr_text = await ocr_with_mac_ocr(path)
-                except Exception as exc:
-                    ocr_reason = doc.get("ocr_reason") or "unspecified OCR signal"
-                    if (
-                        ocr_reason == "zero_pages"
-                        and "No PNG files generated from PDF" in str(exc)
-                    ):
-                        error = (
-                            "Damaged/unrenderable PDF: PDF text extraction found zero pages and the "
-                            "Mac OCR renderer could not generate any page images"
-                        )
+        async def run_deferred_ocr(path: str, doc: Dict[str, Any]) -> Dict[str, Any]:
+            is_pdf = (doc.get("source_format") == "pdf") or Path(path).suffix.lower() == ".pdf"
+            try:
+                async with native_ocr_semaphore:
+                    if effective_ocr_engine == "plugin":
+                        ocr_text = clean_ocr_text(await ocr_with_mac_ocr(path))
+                        method, engine_used = "ocr_plugin", "plugin"
                     else:
-                        error = f"Mac OCR failed after {ocr_reason}: {exc}"
-                    return {
-                        "success": False,
-                        "file_path": path,
-                        "error": error,
-                        "elapsed": (doc.get("extraction_ms") or 0) / 1000.0,
-                    }
-                source_format = doc.get("source_format") or Path(path).suffix.lower().lstrip(".")
+                        ocr_text, method, engine_used = await run_ocr(
+                            path,
+                            path_to_sha[path],
+                            ocr_engine=effective_ocr_engine,
+                            is_pdf=is_pdf,
+                        )
+            except Exception as exc:
+                ocr_reason = doc.get("ocr_reason") or "unspecified OCR signal"
+                if (
+                    ocr_reason == "zero_pages"
+                    and "No PNG files generated from PDF" in str(exc)
+                ):
+                    error = (
+                        "Damaged/unrenderable PDF: PDF text extraction found zero pages and the "
+                        "OCR renderer could not generate any page images"
+                    )
+                else:
+                    error = f"OCR failed after {ocr_reason}: {exc}"
                 return {
-                    "success": True,
+                    "success": False,
                     "file_path": path,
-                    "sha1": path_to_sha[path],
-                    "content": clean_ocr_text(ocr_text),
-                    "metadata": {
-                        "extraction_method": "mac_ocr",
-                        "processing_method": "rust-ingestor",
-                        "ocr_engine": "mac-ocr",
-                        "ocr_applied": True,
-                        "source_format": source_format,
-                        "title": doc.get("title") or None,
-                    },
+                    "error": error,
                     "elapsed": (doc.get("extraction_ms") or 0) / 1000.0,
                 }
-            for fp, sha in files_to_process:
-                p = str(fp)
-                override_path = check_for_manual_override(p)
-                if not override_path:
-                    native_paths.append(p)
-                    continue
+            source_format = doc.get("source_format") or Path(path).suffix.lower().lstrip(".")
+            return {
+                "success": True,
+                "file_path": path,
+                "sha1": path_to_sha[path],
+                "content": ocr_text,
+                "metadata": {
+                    "extraction_method": method,
+                    "processing_method": "rust-ingestor",
+                    "ocr_engine": engine_used,
+                    "ocr_applied": True,
+                    "source_format": source_format,
+                    "title": doc.get("title") or None,
+                },
+                "elapsed": (doc.get("extraction_ms") or 0) / 1000.0,
+            }
+
+        for fp, sha in files_to_process:
+            p = str(fp)
+            override_path = check_for_manual_override(p)
+            if override_path:
                 try:
                     override_content = Path(override_path).read_text(encoding="utf-8").strip()
                     if not override_content:
@@ -997,248 +883,125 @@ async def process_ingest(
                         "error": f"Manual override failed: {exc}",
                         "elapsed": 0,
                     })
-            # Keep extraction batches small enough that OCR-heavy corpora make
-            # regular durable progress instead of holding hundreds of completed
-            # documents behind one slow scanned file.
-            native_chunk = max(worker_count * 4, 32)
-            for start in range(0, len(native_paths), native_chunk):
-                if shutdown_requested:
-                    break
-                batch_paths = native_paths[start:start + native_chunk]
-                progress.update(
-                    task,
-                    description=(
-                        f"[cyan]Rust batch: {len(batch_paths)} queued, "
-                        f"{_short_display_name(Path(batch_paths[0]), input_path)} "
-                        f"({worker_count} workers)[/cyan]"
-                    ),
-                )
-                # Per-file Rust panics come back as status=failed. A recoverable
-                # batch-level failure is recorded against every input in the chunk;
-                # native process aborts and segfaults cannot be caught in-process.
-                try:
-                    docs = native_extractor.extract_batch(batch_paths, workers, html)
-                except Exception as exc:
-                    logger.error(f"Native extract_batch failed for {len(batch_paths)} file(s): {exc}")
-                    for p in batch_paths:
-                        handle_result({
-                            "success": False,
-                            "file_path": p,
-                            "error": f"Native batch failed: {exc}",
-                            "elapsed": 0,
-                        })
-                    continue
-                for p, doc in zip(batch_paths, docs):
-                    if native_extractor.is_complete_extraction(doc, p):
-                        handle_result(native_extractor.to_result(p, path_to_sha[p], doc, html))
-                        continue
-                    if doc.get("ocr_needed") and ocr_engine == "mac-ocr":
-                        deferred_mac_ocr.append((p, doc))
-                        continue
-                    suffix = Path(p).suffix.lower()
-                    is_mhtml = (
-                        doc.get("source_format") == "mhtml"
-                        or str(doc.get("mime_type") or "").startswith("multipart/related")
-                        or suffix in {".mht", ".mhtml"}
-                    )
-                    error = doc.get("error") or ""
-                    if is_mhtml and (not error or "timed out" in error) and not html_rules:
-                        deferred_mhtml_fallback.append(p)
-                        continue
-                    if doc.get("status") == "extracted" and (
-                        suffix in {".htm", ".html"} or is_mhtml
-                    ):
-                        empty = "HTML contained no usable document text"
-                        if html_rules:
-                            empty += " after the HTML profile rules"
-                        handle_result({
-                            "success": None,
-                            "file_path": p,
-                            "error": f"Skipped: {error or empty}",
-                            "elapsed": (doc.get("extraction_ms") or 0) / 1000.0,
-                        })
-                        continue
-                    reason = (
-                        doc.get("error")
-                        or doc.get("ocr_reason")
-                        or f"native status={doc.get('status')!r}"
-                    )
+                continue
+            if force_pdf_ocr and fp.suffix.lower() == ".pdf":
+                deferred_ocr.append((
+                    p,
+                    {
+                        "source_format": "pdf",
+                        "ocr_needed": True,
+                        "ocr_reason": "forced_pdf_ocr",
+                        "extraction_ms": 0,
+                    },
+                ))
+                continue
+            native_paths.append(p)
+
+        # Keep extraction batches small enough that OCR-heavy corpora make
+        # regular durable progress instead of holding hundreds of completed
+        # documents behind one slow scanned file.
+        native_chunk = max(worker_count * 4, 32)
+        for start in range(0, len(native_paths), native_chunk):
+            if shutdown_requested:
+                break
+            batch_paths = native_paths[start:start + native_chunk]
+            progress.update(
+                task,
+                description=(
+                    f"[cyan]Extracting {len(batch_paths)} file(s): "
+                    f"{_short_display_name(Path(batch_paths[0]), input_path)} "
+                    f"({worker_count} workers)[/cyan]"
+                ),
+            )
+            try:
+                docs = native_extractor.extract_batch(batch_paths, workers, html)
+            except Exception as exc:
+                logger.error(f"Native extract_batch failed for {len(batch_paths)} file(s): {exc}")
+                for p in batch_paths:
                     handle_result({
                         "success": False,
                         "file_path": p,
-                        "error": f"Native extraction incomplete: {reason}",
+                        "error": f"Native batch failed: {exc}",
+                        "elapsed": 0,
+                    })
+                continue
+            for p, doc in zip(batch_paths, docs):
+                if native_extractor.is_complete_extraction(doc, p):
+                    handle_result(native_extractor.to_result(p, path_to_sha[p], doc, html))
+                    continue
+                if doc.get("ocr_needed"):
+                    deferred_ocr.append((p, doc))
+                    continue
+                suffix = Path(p).suffix.lower()
+                is_mhtml = (
+                    doc.get("source_format") == "mhtml"
+                    or str(doc.get("mime_type") or "").startswith("multipart/related")
+                    or suffix in {".mht", ".mhtml"}
+                )
+                error = doc.get("error") or ""
+                if doc.get("status") == "extracted" and (
+                    suffix in {".htm", ".html"} or is_mhtml
+                ):
+                    empty = "HTML contained no usable document text"
+                    if html_rules:
+                        empty += " after the HTML profile rules"
+                    handle_result({
+                        "success": None,
+                        "file_path": p,
+                        "error": f"Skipped: {error or empty}",
                         "elapsed": (doc.get("extraction_ms") or 0) / 1000.0,
                     })
-            if deferred_mhtml_fallback:
-                progress.update(
-                    task,
-                    description=(
-                        f"[yellow]Recovering {len(deferred_mhtml_fallback)} timed-out "
-                        "MHTML file(s)[/yellow]"
-                    ),
+                    continue
+                reason = (
+                    doc.get("error")
+                    or doc.get("ocr_reason")
+                    or f"native status={doc.get('status')!r}"
                 )
+                handle_result({
+                    "success": False,
+                    "file_path": p,
+                    "error": f"Extraction incomplete: {reason}",
+                    "elapsed": (doc.get("extraction_ms") or 0) / 1000.0,
+                })
 
-                async def run_mhtml_fallback(path: str) -> Dict[str, Any]:
-                    result = await asyncio.to_thread(
-                        _extract_document_worker,
-                        {
-                            "file_path": path,
-                            "file_sha1": path_to_sha[path],
-                            "readability": readability,
-                            "html_extractor": html_extractor,
-                            "skip_garbage_check": skip_garbage_check,
-                            "pdf_engine": pdf_engine,
-                            "ocr_engine": ocr_engine,
-                        },
-                    )
-                    if result.get("success") is True:
-                        result["metadata"]["processing_method"] = "rust-mhtml-bounded-fallback"
-                    return result
+        if deferred_ocr:
+            ocr_queue: asyncio.Queue[tuple[str, Dict[str, Any]]] = asyncio.Queue()
+            ocr_in_flight = 0
+            for item in deferred_ocr:
+                ocr_queue.put_nowait(item)
 
-                fallback_queue: asyncio.Queue[str] = asyncio.Queue()
-                for path in deferred_mhtml_fallback:
-                    fallback_queue.put_nowait(path)
-
-                async def drain_mhtml_fallback() -> None:
-                    while True:
-                        try:
-                            path = fallback_queue.get_nowait()
-                        except asyncio.QueueEmpty:
-                            return
-                        try:
-                            handle_result(await run_mhtml_fallback(path))
-                        finally:
-                            fallback_queue.task_done()
-
-                await asyncio.gather(
-                    *(drain_mhtml_fallback() for _ in range(min(2, len(deferred_mhtml_fallback))))
-                )
-
-            if deferred_mac_ocr:
-                ocr_queue: asyncio.Queue[tuple[str, Dict[str, Any]]] = asyncio.Queue()
-                ocr_in_flight = 0
-                for item in deferred_mac_ocr:
-                    ocr_queue.put_nowait(item)
-
-                async def drain_mac_ocr_queue() -> None:
-                    nonlocal ocr_in_flight
-                    while True:
-                        try:
-                            path, doc = ocr_queue.get_nowait()
-                        except asyncio.QueueEmpty:
-                            return
-                        ocr_in_flight += 1
-                        progress.update(
-                            task,
-                            description=(
-                                f"[magenta]Mac OCR queue ({ocr_queue.qsize()} remaining): "
-                                f"{ocr_in_flight} in flight; "
-                                f"{_short_display_name(Path(path), input_path)}[/magenta]"
-                            ),
-                        )
-                        try:
-                            handle_result(await run_native_mac_ocr(path, doc))
-                        finally:
-                            ocr_in_flight -= 1
-                            ocr_queue.task_done()
-
-                progress.update(
-                    task,
-                    description=f"[magenta]Draining {len(deferred_mac_ocr)} queued OCR file(s)[/magenta]",
-                )
-                await asyncio.gather(
-                    *(
-                        drain_mac_ocr_queue()
-                        for _ in range(min(worker_count, len(deferred_mac_ocr)))
-                    )
-                )
-            files_to_process = []
-
-        submission_batch_size = max(worker_count * 4, 1)
-        loop = asyncio.get_running_loop()
-
-        if worker_count == 1:
-            for file_path, file_sha1 in files_to_process:
-                if shutdown_requested:
-                    break
-                progress.update(task, description=f"[cyan]{file_path.name}[/cyan]")
-                start_time = datetime.now()
-                try:
-                    sha1, content, metadata = await process_document(
-                        str(file_path),
-                        file_sha1,
-                        use_readability=readability,
-                        html_extractor=html_extractor,
-                        skip_garbage_check=skip_garbage_check,
-                        pdf_engine=pdf_engine,
-                        ocr_engine=ocr_engine,
-                    )
-                    result = _build_success_result(
-                        file_path=str(file_path),
-                        sha1=sha1,
-                        content=content,
-                        metadata=metadata,
-                        elapsed=(datetime.now() - start_time).total_seconds(),
-                    )
-                except SkippedFileException as exc:
-                    result = {
-                        'success': None,
-                        'file_path': str(file_path),
-                        'error': f"Skipped: {exc}",
-                        'elapsed': (datetime.now() - start_time).total_seconds(),
-                    }
-                except Exception as exc:
-                    result = {
-                        'success': False,
-                        'file_path': str(file_path),
-                        'error': f"Error: {exc}",
-                        'elapsed': (datetime.now() - start_time).total_seconds(),
-                    }
-                handle_result(result)
-        else:
-            # Extraction metadata can contain parser objects that are safe to stringify
-            # but unsafe to pickle, so keep concurrent extraction in-process.
-            with ThreadPoolExecutor(max_workers=worker_count) as executor:
-                file_iter = iter(files_to_process)
-                pending_futures: set[asyncio.Future] = set()
-
-                def submit_next() -> bool:
+            async def drain_ocr_queue() -> None:
+                nonlocal ocr_in_flight
+                while True:
                     try:
-                        file_path, file_sha1 = next(file_iter)
-                    except StopIteration:
-                        return False
-
-                    display_name = _short_display_name(file_path, input_path)
-                    progress.update(task, description=f"[cyan]{display_name}[/cyan]")
-                    future = loop.run_in_executor(
-                        executor,
-                        _extract_document_worker,
-                        {
-                            'file_path': str(file_path),
-                            'file_sha1': file_sha1,
-                            'readability': readability,
-                            'html_extractor': html_extractor,
-                            'skip_garbage_check': skip_garbage_check,
-                            'pdf_engine': pdf_engine,
-                            'ocr_engine': ocr_engine,
-                        }
+                        path, doc = ocr_queue.get_nowait()
+                    except asyncio.QueueEmpty:
+                        return
+                    ocr_in_flight += 1
+                    progress.update(
+                        task,
+                        description=(
+                            f"[magenta]OCR queue ({ocr_queue.qsize()} remaining): "
+                            f"{ocr_in_flight} in flight; "
+                            f"{_short_display_name(Path(path), input_path)}[/magenta]"
+                        ),
                     )
-                    pending_futures.add(future)
-                    return True
+                    try:
+                        handle_result(await run_deferred_ocr(path, doc))
+                    finally:
+                        ocr_in_flight -= 1
+                        ocr_queue.task_done()
 
-                for _ in range(min(submission_batch_size, len(files_to_process))):
-                    if not submit_next():
-                        break
-
-                while pending_futures and not shutdown_requested:
-                    done, pending_futures = await asyncio.wait(
-                        pending_futures,
-                        return_when=asyncio.FIRST_COMPLETED,
-                    )
-                    for future in done:
-                        handle_result(await future)
-                        if not shutdown_requested:
-                            submit_next()
+            progress.update(
+                task,
+                description=f"[magenta]Draining {len(deferred_ocr)} queued OCR file(s)[/magenta]",
+            )
+            await asyncio.gather(
+                *(
+                    drain_ocr_queue()
+                    for _ in range(min(worker_count, len(deferred_ocr)))
+                )
+            )
     
     # Extract Office images locally, send only normalized PNGs to OCR, and merge
     # the resulting text into the parent row. Include failed and fast-skipped
@@ -1260,7 +1023,7 @@ async def process_ingest(
             office_paths,
             db_path,
             table,
-            ocr_engine=ocr_engine,
+            ocr_engine=effective_ocr_engine,
             workers=worker_count,
             overwrite=overwrite,
             fulltext=fulltext,

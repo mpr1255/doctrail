@@ -107,13 +107,26 @@ def get_zotero_config(config_data: Optional[dict]) -> dict:
     }
 
 
+class _AliasChoice(click.Choice):
+    """Click Choice that displays canonical public options while accepting legacy aliases."""
+
+    def __init__(self, choices: list[str], aliases: dict[str, str]) -> None:
+        super().__init__(choices)
+        self._aliases = aliases
+
+    def convert(self, value, param, ctx):
+        if isinstance(value, str) and value in self._aliases:
+            return self._aliases[value]
+        return super().convert(value, param, ctx)
+
+
 @cli.command(
     help=(
         "Ingest documents from local directories, Zotero, or plugins.\n\n"
         f"Supported local file types: {SUPPORTED_FORMATS_HELP}.\n\n"
-        "Saved web pages: the native engine keeps the main article and the Python "
-        "engine keeps the whole page. --html-mode chooses, and --html-profile tunes "
-        "full mode for one collection: https://doctrail.org/html/\n\n"
+        "Saved web pages keep the main article by default. Pass --html-mode full "
+        "for the whole page, and --html-profile to tune full mode for one "
+        "collection: https://doctrail.org/html/\n\n"
         "\b\nExamples:\n"
         "    doctrail ingest --input-dir ./docs --db-path ./data.db\n"
         "    doctrail ingest --zotero --collection \"Papers\" --db-path ./lit.db\n"
@@ -136,29 +149,40 @@ def get_zotero_config(config_data: Optional[dict]) -> dict:
 @click.option('--include-pattern', help='Only process matching files')
 @click.option('--exclude-pattern', help='Skip matching files')
 @click.option('--workers', type=click.IntRange(1, None), help='Number of extraction worker threads')
-@click.option('--pdf-engine', type=click.Choice(['auto', 'pymupdf', 'pdftotext', 'mutool', 'mac-ocr']), help='PDF extraction strategy; auto uses pdftotext (set DOCTRAIL_PDFTOTEXT if it is not on PATH), pymupdf uses the bundled MuPDF')
-@click.option('--ocr-engine', type=click.Choice(['auto', 'textra', 'ocrmypdf', 'mac-ocr']), help='OCR backend when OCR is needed')
-@click.option('--extractor', type=click.Choice(['auto', 'rust', 'python']), default='auto', help='Extraction engine: auto uses the native build when present, else python; rust requires the native build')
+@click.option(
+    '--pdf-engine',
+    type=_AliasChoice(['auto', 'pdftotext', 'pymupdf', 'ocr'], {'mac-ocr': 'mac-ocr', 'mutool': 'pymupdf'}),
+    help='PDF extraction strategy; auto uses pdftotext (set DOCTRAIL_PDFTOTEXT if not on PATH), pymupdf uses the bundled MuPDF, ocr sends every PDF straight to OCR',
+)
+@click.option(
+    '--ocr-engine',
+    type=_AliasChoice(['auto', 'plugin', 'textra', 'ocrmypdf'], {'mac-ocr': 'plugin', 'mac-ocr-only': 'plugin'}),
+    help='OCR backend for scanned PDFs and images; plugin runs the Python file named in DOCTRAIL_OCR_PLUGIN',
+)
+@click.option(
+    '--extractor',
+    type=click.Choice(['auto', 'rust', 'python']),
+    default='auto',
+    hidden=True,
+)
 @click.option('--readability', is_flag=True, help='Article text for HTML; the same as --html-mode article')
 @click.option(
     '--html-mode',
     type=click.Choice(['article', 'full']),
-    help='HTML and MHTML text: article (the main article; the native default) or full '
-    '(the whole page). See https://doctrail.org/html/',
+    help='HTML and MHTML text: article (default, main article) or full (whole page). See https://doctrail.org/html/',
 )
 @click.option(
     '--html-profile',
     type=click.Path(exists=True, dir_okay=False, path_type=Path),
-    help='YAML rules that tune full-mode HTML text for one collection; needs the native '
-    'engine. See https://doctrail.org/html/',
+    help='YAML rules that tune full-mode HTML text for one collection. See https://doctrail.org/html/',
 )
 @click.option(
     '--html-extractor',
     type=click.Choice(['default', 'smart']),
     default='default',
-    help='Python engine HTML text: default, or smart to keep paragraphs together in both modes',
+    hidden=True,
 )
-@click.option('--skip-garbage-check', is_flag=True, help='Skip garbage detection')
+@click.option('--skip-garbage-check', is_flag=True, hidden=True)
 @click.option(
     '--skip-embedded-media',
     is_flag=True,
@@ -284,8 +308,12 @@ def ingest(
 
     pdf_engine = pdf_engine or os.environ.get('DOCTRAIL_PDF_ENGINE') or 'auto'
     ocr_engine = ocr_engine or os.environ.get('DOCTRAIL_OCR_ENGINE') or 'auto'
-    if pdf_engine == 'mac-ocr' and ocr_engine == 'auto':
-        ocr_engine = 'mac-ocr'
+    if pdf_engine == 'mac-ocr':
+        pdf_engine = 'ocr'
+        if ocr_engine == 'auto':
+            ocr_engine = 'plugin'
+    if ocr_engine in {'mac-ocr', 'mac-ocr-only'}:
+        ocr_engine = 'plugin'
     if extractor == 'auto':
         extractor = os.environ.get('DOCTRAIL_EXTRACTOR') or 'auto'
 

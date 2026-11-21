@@ -362,27 +362,31 @@ def ocr_fn_for_bytes(data: bytes, media_name: str, ocr_fn: Callable[[Path], str]
 
 def _ocr_callable(ocr_engine: str):
     """Return a bounded OCR cascade for an extracted image file."""
-    from .document_processor import (
-        _try_ocr_with_mac_ocr,
+    from .ocr import (
+        PLUGIN_OCR_ENGINES,
         _try_ocr_image_with_tesseract,
         _try_ocr_image_with_textra,
+        normalize_ocr_engine,
+        try_ocr_with_plugin,
     )
     import asyncio
 
+    canonical = normalize_ocr_engine(ocr_engine)
+
     def _ocr(path: Path) -> str:
-        if ocr_engine == "mac-ocr":
+        if canonical == "plugin":
             try:
-                return asyncio.run(_try_ocr_with_mac_ocr(str(path))) or ""
+                return asyncio.run(try_ocr_with_plugin(str(path))) or ""
             except Exception as exc:
-                logger.warning(f"mac-ocr failed for {path.name}: {exc}")
+                logger.warning(f"OCR plugin failed for {path.name}: {exc}")
                 return ""
-        if ocr_engine in {"auto", "textra"}:
+        if canonical in {"auto", "textra"}:
             text = _try_ocr_image_with_textra(str(path), sha1_bytes(path.read_bytes()))
             if text and text.strip():
                 return text
         return _try_ocr_image_with_tesseract(str(path)) or ""
 
-    return _ocr, ocr_engine
+    return _ocr, canonical
 
 
 def run_media_ingest(
@@ -390,7 +394,7 @@ def run_media_ingest(
     db_path: str,
     table_name: str = "documents",
     *,
-    ocr_engine: str = "mac-ocr",
+    ocr_engine: str = "auto",
     workers: int = 6,
     overwrite: bool = False,
     limit: Optional[int] = None,
@@ -410,11 +414,12 @@ def run_media_ingest(
         insert_document,
         setup_fts,
     )
+    from .ocr import VALID_OCR_ENGINES
     from .text_processing import sanitize_text_for_storage
 
     if ocr_engine == "none":
         ocr_fn, ocr_label = (lambda p: ""), "none"
-    elif ocr_engine in {"auto", "mac-ocr", "textra", "ocrmypdf"}:
+    elif ocr_engine in VALID_OCR_ENGINES:
         ocr_fn, ocr_label = _ocr_callable(ocr_engine)
     else:
         raise ValueError(f"Unsupported ocr_engine for media ingest: {ocr_engine}")
@@ -521,7 +526,7 @@ def run_media_ingest(
                 "embedded_media_count": len(rows),
                 "embedded_media_ocr_count": len(ocr_sections),
                 "embedded_media_ocr_chars": sum(len(row["content"]) for row in rows),
-                "embedded_media_processing": "local-extract-png-mac-ocr-merge",
+                "embedded_media_processing": "local-extract-png-ocr-merge",
             })
             try:
                 json_metadata = json.loads((existing or {}).get("json_metadata") or "{}")
