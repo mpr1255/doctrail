@@ -41,6 +41,7 @@ from .document_processor import (
     SUPPORTED_EXTENSIONS,
 )
 from .ocr import (
+    load_ocr_plugin,
     normalize_ocr_engine,
     ocr_with_plugin,
     require_pdftotext,
@@ -652,6 +653,8 @@ async def process_ingest(
     effective_ocr_engine = normalize_ocr_engine(
         "plugin" if (pdf_engine == "mac-ocr" and ocr_engine == "auto") else ocr_engine
     )
+    if effective_ocr_engine == "plugin" and ocr_with_mac_ocr is ocr_with_plugin:
+        load_ocr_plugin()
     pdf_backend = "pdftotext" if pdf_engine in ("auto", "pdftotext") else "mupdf"
     pdftotext_bin: Optional[str] = None
     if not force_pdf_ocr and pdf_backend == "pdftotext" and any(

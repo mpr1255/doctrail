@@ -370,7 +370,7 @@ def clean_metadata(metadata: dict) -> dict:
         'url', 'source', 'Source', 'Message:Raw-Header:Snapshot-Content-Location', 'X-Parsed-By',
         # Custom metadata
         'original_file_path', 'original_file_type',
-        'spreadsheet_sheet_count',
+        'spreadsheet_sheet_count', 'page_count', 'pages_without_text', 'pdf_text_fallback_from',
         # MHTML-specific metadata
         'original_url', 'source_url', 'save_date', 'mhtml_date', 'mhtml_subject', 'mhtml_subject_decoded',
         'mhtml_from', 'mime_version', 'content_type', 'mhtml_boundary', 'file_type', 'extraction_method',

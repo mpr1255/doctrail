@@ -28,6 +28,13 @@ static TITLE_RE: Lazy<Regex> = Lazy::new(|| {
 });
 static ENTITY_RE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"&(#x[0-9A-Fa-f]+|#\d+|amp|lt|gt|quot|apos);").expect("entity regex"));
+// HTML5 treats `<title>`, `<style>`, `<script>`, and `<textarea>` as rawtext
+// elements and ignores XHTML self-closing `/>`, swallowing the rest of the file
+// into the element. Expand self-closing forms before HTML5 parsing.
+static SELF_CLOSING_RAWTEXT_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"(?is)<(title|script|style|textarea)\b([^>]*?)/\s*>")
+        .expect("self-closing rawtext regex")
+});
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum EbookFormat {
@@ -103,7 +110,7 @@ fn extract_epub_bytes(
     let order_started_at = Instant::now();
     let all_html_paths = sorted_html_paths(&names);
     let (ordered_paths, order_source, fallback_reason) =
-        ordered_epub_html_paths(&package, &all_html_paths);
+        ordered_epub_html_paths(&package, &names, &all_html_paths);
     let order_duration = order_started_at.elapsed();
 
     let html_started_at = Instant::now();
@@ -334,9 +341,10 @@ fn opf_spine(opf: &str) -> Vec<String> {
 
 fn ordered_epub_html_paths(
     package: &EpubPackage,
+    all_zip_names: &[String],
     all_html_paths: &[String],
 ) -> (Vec<String>, &'static str, Option<String>) {
-    let all_html_set: BTreeSet<&str> = all_html_paths.iter().map(String::as_str).collect();
+    let all_zip_set: BTreeSet<&str> = all_zip_names.iter().map(String::as_str).collect();
     let mut seen = BTreeSet::new();
     let mut ordered = Vec::new();
 
@@ -344,7 +352,7 @@ fn ordered_epub_html_paths(
         let Some(item) = package.manifest.get(idref) else {
             continue;
         };
-        if !is_epub_html_item(item) || !all_html_set.contains(item.href.as_str()) {
+        if !is_epub_html_item(item) || !all_zip_set.contains(item.href.as_str()) {
             continue;
         }
         if seen.insert(item.href.clone()) {
@@ -382,7 +390,10 @@ fn is_epub_html_item(item: &EpubManifestItem) -> bool {
         .as_deref()
         .map(|media_type| {
             let media_type = media_type.to_ascii_lowercase();
-            media_type == "application/xhtml+xml" || media_type == "text/html"
+            media_type == "application/xhtml+xml"
+                || media_type == "text/html"
+                || media_type == "application/xml"
+                || media_type == "text/xml"
         })
         .unwrap_or_else(|| is_html_path(&item.href))
         || is_html_path(&item.href)
@@ -426,7 +437,8 @@ fn read_zip_member_lossy(archive: &mut ZipArchive<Cursor<&[u8]>>, name: &str) ->
 }
 
 fn html_to_text(html: &str) -> String {
-    let document = Html::parse_document(html);
+    let normalized = SELF_CLOSING_RAWTEXT_RE.replace_all(html, "<$1$2></$1>");
+    let document = Html::parse_document(&normalized);
     let raw_text = Selector::parse("body")
         .ok()
         .and_then(|selector| document.select(&selector).next())
@@ -822,6 +834,35 @@ mod tests {
         assert!(message.contains("rtf extraction is not supported"));
         assert!(message.contains("unrtf"));
         assert!(message.contains("external_command_fallback_not_enabled"));
+    }
+
+    #[test]
+    fn epub_with_self_closing_xhtml_title_and_xml_spine_extracts_body() {
+        let opf = r#"<package xmlns="http://www.idpf.org/2007/opf" version="2.0">
+            <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+              <dc:title>XHTML Spine Book</dc:title>
+            </metadata>
+            <manifest>
+              <item id="c1" href="c01.xml" media-type="application/xhtml+xml"/>
+              <item id="c2" href="c02.xhtml" media-type="application/xhtml+xml"/>
+            </manifest>
+            <spine>
+              <itemref idref="c1"/>
+              <itemref idref="c2"/>
+            </spine>
+          </package>"#;
+        let ch1 = r#"<html xmlns="http://www.w3.org/1999/xhtml"><head><title/></head><body><h1>Chapter One</h1><p>First XML spine chapter text.</p></body></html>"#;
+        let ch2 = r#"<html xmlns="http://www.w3.org/1999/xhtml"><head><title /><style/></head><body><p>Second XHTML chapter text.</p></body></html>"#;
+        let epub = synthetic_epub(opf, &[("OPS/c01.xml", ch1), ("OPS/c02.xhtml", ch2)]);
+
+        let doc = extract_ebook_bytes(&epub, Some("book.epub"), Some("application/epub+zip"))
+            .expect("should extract XML spine + self-closing title EPUB");
+        assert!(doc.content.contains("First XML spine chapter text."), "{}", doc.content);
+        assert!(doc.content.contains("Second XHTML chapter text."), "{}", doc.content);
+        assert!(
+            doc.content.find("First XML").unwrap() < doc.content.find("Second XHTML").unwrap(),
+            "spine order should be preserved"
+        );
     }
 
     fn synthetic_epub(opf: &str, html_items: &[(&str, &str)]) -> Vec<u8> {

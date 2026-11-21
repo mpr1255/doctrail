@@ -42,6 +42,9 @@ const REPEATED_LINE_COUNT: usize = 3;
 const MIN_PAGES_FOR_PAGE_SHARE: usize = 4;
 /// A Latin word this long is almost always several words with the spaces lost.
 const LONG_WORD_LETTERS: usize = 20;
+/// Compound-forming languages (German, Dutch, Finnish, Nordic, Hungarian, Turkish)
+/// routinely form legitimate single words of 20–27 letters.
+const LONG_WORD_LETTERS_COMPOUND: usize = 28;
 const MIN_WORDS_FOR_LONG_WORD_SHARE: usize = 200;
 /// Above this share of long words, try the other backend.
 const RETRY_LONG_WORD_SHARE: f64 = 0.01;
@@ -51,6 +54,7 @@ const OCR_LONG_WORD_SHARE: f64 = 0.03;
 const PAGE_TAG_OPEN: char = '\u{fdd0}';
 const PAGE_TAG_CLOSE: char = '\u{fdd1}';
 const PDFTOTEXT_TIMEOUT: Duration = Duration::from_secs(120);
+const PDFTOTEXT_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 const PDFTOTEXT_INSTALL_HINT: &str = "pdftotext not found: install Poppler \
 (macOS: brew install poppler; Debian/Ubuntu: apt install poppler-utils), set \
 DOCTRAIL_PDFTOTEXT to the binary, or pass --pdf-engine pymupdf";
@@ -76,6 +80,8 @@ struct PdfExtractionAttempt {
     content: String,
     /// (page number, character offset in `content`) for each page with text.
     page_offsets: Vec<(usize, usize)>,
+    /// 1-based page numbers whose text layer has fewer than `MIN_TEXT_CHARS_PER_PAGE` non-whitespace chars.
+    pages_without_text: Vec<usize>,
     long_word_share: f64,
     page_count: Option<usize>,
     page_count_method: Option<&'static str>,
@@ -192,6 +198,10 @@ pub(crate) fn extract_pdf_bytes_with_config(
             .collect::<Vec<_>>()),
     );
     content_extraction.insert(
+        "pages_without_text".to_string(),
+        json!(attempt.pages_without_text),
+    );
+    content_extraction.insert(
         "long_word_share".to_string(),
         json!(attempt.long_word_share),
     );
@@ -282,21 +292,46 @@ fn extract_pdf_text_attempt(
     let started_at = Instant::now();
     if backend == PdfBackend::Mupdf {
         let result = extract_with_mupdf_guarded(bytes)?;
+        if let Err(ref error) = result {
+            if is_encrypted_pdf_error(error) {
+                anyhow::bail!("encrypted PDF (password required)");
+            }
+        }
         return Ok(process_pdf_extraction_result(result, started_at.elapsed()));
     }
-    // A missing binary is a setup error, not a damaged PDF: never mask it.
+    // A missing binary is a setup error and a password-locked PDF cannot be
+    // OCR'd: surface both directly rather than masking them behind fallbacks.
+    let mut pdftotext_timed_out = false;
     let result = match extract_with_pdftotext(bytes, pdftotext_override) {
         Err(error) if is_not_found(&error) => anyhow::bail!(PDFTOTEXT_INSTALL_HINT),
-        Err(error) => extract_with_mupdf_guarded(bytes)?.map(|mut extraction| {
-            extraction.fallback_from = Some("pdftotext");
-            extraction.fallback_error = Some(error.to_string());
-            extraction
-        }),
+        Err(error) if is_encrypted_pdf_error(&error) => {
+            anyhow::bail!("encrypted PDF (password required)")
+        }
+        Err(error) if is_timeout_error(&error) => {
+            pdftotext_timed_out = true;
+            Err(error)
+        }
+        Err(error) => {
+            let fallback = extract_with_mupdf_guarded(bytes)?;
+            if let Err(ref mupdf_error) = fallback {
+                if is_encrypted_pdf_error(mupdf_error) {
+                    anyhow::bail!("encrypted PDF (password required)");
+                }
+            }
+            fallback.map(|mut extraction| {
+                extraction.fallback_from = Some("pdftotext");
+                extraction.fallback_error = Some(error.to_string());
+                extraction
+            })
+        }
         ok => ok,
     };
     let fell_back = matches!(&result, Ok(extraction) if extraction.backend == "mupdf");
     let attempt = process_pdf_extraction_result(result, started_at.elapsed());
-    if fell_back || !(attempt.ocr_needed || attempt.long_word_share >= RETRY_LONG_WORD_SHARE) {
+    if fell_back
+        || pdftotext_timed_out
+        || !(attempt.ocr_needed || attempt.long_word_share >= RETRY_LONG_WORD_SHARE)
+    {
         return Ok(attempt);
     }
     // pdftotext loses the spaces in some files and finds little text in others
@@ -306,8 +341,15 @@ fn extract_pdf_text_attempt(
     } else {
         "words_run_together"
     };
-    let Ok(Ok(mut extraction)) = extract_with_mupdf_guarded(bytes) else {
+    let Ok(mupdf_result) = extract_with_mupdf_guarded(bytes) else {
         return Ok(attempt);
+    };
+    let mut extraction = match mupdf_result {
+        Ok(extraction) => extraction,
+        Err(error) if is_encrypted_pdf_error(&error) => {
+            anyhow::bail!("encrypted PDF (password required)")
+        }
+        Err(_) => return Ok(attempt),
     };
     extraction.fallback_from = Some("pdftotext");
     extraction.fallback_error = Some(reason.to_string());
@@ -321,6 +363,15 @@ fn is_not_found(error: &anyhow::Error) -> bool {
     error
         .downcast_ref::<std::io::Error>()
         .is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound)
+}
+
+fn is_encrypted_pdf_error(error: &anyhow::Error) -> bool {
+    let message = error.to_string().to_ascii_lowercase();
+    message.contains("encrypted pdf (password required)") || message.contains("incorrect password")
+}
+
+fn is_timeout_error(error: &anyhow::Error) -> bool {
+    error.to_string().contains("pdftotext timed out after")
 }
 
 /// Poppler 26+ strips end-of-line hyphens by default (`-remove-hyphens all`),
@@ -337,21 +388,37 @@ fn pdftotext_supports_remove_hyphens(program: &str) -> bool {
             return supported;
         }
     }
-    let supported = Command::new(program)
-        .arg("-h")
-        .stdin(Stdio::null())
-        .output()
-        .map(|output| {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            stdout.contains("-remove-hyphens") || stderr.contains("-remove-hyphens")
-        })
-        .unwrap_or(false);
-    let mut cache = PDFTOTEXT_HYPHEN_FLAG_CACHE
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    cache.insert(program.to_string(), supported);
-    supported
+    let probed = (|| -> Option<bool> {
+        let stdout = tempfile::NamedTempFile::new().ok()?;
+        let stderr = tempfile::NamedTempFile::new().ok()?;
+        let mut child = Command::new(program)
+            .arg("-h")
+            .stdin(Stdio::null())
+            .stdout(Stdio::from(stdout.reopen().ok()?))
+            .stderr(Stdio::from(stderr.reopen().ok()?))
+            .spawn()
+            .ok()?;
+        match child.wait_timeout(PDFTOTEXT_PROBE_TIMEOUT).ok()? {
+            Some(_) => {
+                let out = std::fs::read_to_string(stdout.path()).unwrap_or_default();
+                let err = std::fs::read_to_string(stderr.path()).unwrap_or_default();
+                Some(out.contains("-remove-hyphens") || err.contains("-remove-hyphens"))
+            }
+            None => {
+                let _ = child.kill();
+                let _ = child.wait();
+                None
+            }
+        }
+    })();
+    if let Some(supported) = probed {
+        let mut cache = PDFTOTEXT_HYPHEN_FLAG_CACHE
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        cache.insert(program.to_string(), supported);
+        return supported;
+    }
+    false
 }
 
 fn extract_with_pdftotext(
@@ -450,15 +517,17 @@ fn process_pdf_extraction_result(
     let tagged = smart_paragraph_cleanup(&marked_raw_content);
     let smart_content = PAGE_TAG_RE.replace_all(&tagged, "").into_owned();
     let (content, page_offsets) = take_page_offsets(&clean_text(&tagged));
-    let long_word_share = long_word_share(&content);
     let cleanup_duration = cleanup_started_at.elapsed();
 
     let language_started_at = Instant::now();
     let language_detection = detect_language(&content);
     let language_duration = language_started_at.elapsed();
+    let long_word_share =
+        long_word_share_for_language(&content, language_detection.language.as_deref());
 
     let extraction_failed = extraction.is_none();
     let page_count = extraction.as_ref().and_then(|value| value.page_count);
+    let pages_without_text = find_pages_without_text(&raw_text, page_count);
     let (mut ocr_needed, mut ocr_reason) =
         needs_ocr(&content, &raw_text, page_count, extraction_failed);
     if !ocr_needed && long_word_share >= OCR_LONG_WORD_SHARE {
@@ -470,6 +539,7 @@ fn process_pdf_extraction_result(
         smart_content,
         content,
         page_offsets,
+        pages_without_text,
         long_word_share,
         page_count,
         page_count_method: extraction
@@ -490,9 +560,30 @@ fn process_pdf_extraction_result(
     }
 }
 
+fn find_pages_without_text(raw_text: &str, page_count: Option<usize>) -> Vec<usize> {
+    let Some(total_pages) = page_count.filter(|&count| count > 0) else {
+        return Vec::new();
+    };
+    let mut pages = raw_text.split('\x0c');
+    let mut empty_pages = Vec::new();
+    for page_num in 1..=total_pages {
+        let non_ws = pages
+            .next()
+            .map(|page| page.chars().filter(|ch| !ch.is_whitespace()).count())
+            .unwrap_or(0);
+        if non_ws < MIN_TEXT_CHARS_PER_PAGE {
+            empty_pages.push(page_num);
+        }
+    }
+    empty_pages
+}
+
 fn extract_with_mupdf(bytes: &[u8]) -> anyhow::Result<PdfTextExtraction> {
     let document =
         mupdf::Document::from_bytes(bytes, "pdf").context("open PDF with MuPDF from bytes")?;
+    if document.needs_password().unwrap_or(false) {
+        anyhow::bail!("encrypted PDF (password required)");
+    }
     let page_count = document.page_count().context("read MuPDF page count")?;
     let page_count_usize =
         usize::try_from(page_count).context("MuPDF returned negative page count")?;
@@ -618,20 +709,20 @@ fn smart_paragraph_cleanup(text: &str) -> String {
             continue;
         }
 
-        let paragraph_so_far = current_paragraph.join("");
-        let previous = current_paragraph.last_mut().expect("paragraph has a line");
-        let mut tail = previous.chars().rev();
-        let last_char = tail.next();
-        let before_last = tail.next();
+        let (last_char, before_last) = {
+            let previous = current_paragraph.last().expect("paragraph has a line");
+            let mut tail = previous.chars().rev();
+            (tail.next(), tail.next())
+        };
         let first_char = line.chars().next();
         if last_char == Some('\u{ad}') {
-            previous.pop();
+            current_paragraph.last_mut().expect("paragraph has a line").pop();
             current_paragraph.push(format!("{tag}{line}"));
         } else if matches!(last_char, Some('-' | '\u{2010}'))
             && before_last.is_some_and(char::is_alphanumeric)
             && first_char.is_some_and(char::is_alphanumeric)
         {
-            let context = PAGE_TAG_RE.replace_all(&paragraph_so_far, "");
+            let context = trailing_hyphen_context(&current_paragraph);
             if keep_line_break_hyphen(
                 &context,
                 &line,
@@ -641,7 +732,7 @@ fn smart_paragraph_cleanup(text: &str) -> String {
             ) {
                 current_paragraph.push(format!("{tag}{line}"));
             } else {
-                previous.pop();
+                current_paragraph.last_mut().expect("paragraph has a line").pop();
                 current_paragraph.push(format!("{tag}{line}"));
             }
         } else if matches!(last_char, Some('\u{2011}'))
@@ -667,6 +758,26 @@ fn smart_paragraph_cleanup(text: &str) -> String {
 
 fn finalize_paragraph(parts: &[String]) -> String {
     parts.join("").replace('\u{ad}', "")
+}
+
+/// Return the trailing slice of `current_paragraph` needed to inspect the
+/// hyphenated token (including any preceding hyphen across a page tag), in
+/// bounded time instead of joining the entire paragraph on every line.
+fn trailing_hyphen_context(parts: &[String]) -> String {
+    let mut chunks: Vec<&str> = Vec::new();
+    let mut collected_bytes = 0usize;
+    for part in parts.iter().rev() {
+        chunks.push(part.as_str());
+        collected_bytes += part.len();
+        if (collected_bytes >= 256 && part.chars().any(char::is_whitespace))
+            || collected_bytes >= 1024
+        {
+            break;
+        }
+    }
+    chunks.reverse();
+    let tail = chunks.concat();
+    PAGE_TAG_RE.replace_all(&tail, "").into_owned()
 }
 
 /// English word list (derived from the MIT-licensed pyspellchecker dictionary)
@@ -721,6 +832,24 @@ const HYPHEN_PREFIXES: &[&str] = &[
 
 fn is_hyphen_prefix(word: &str) -> bool {
     HYPHEN_PREFIXES.binary_search(&word).is_ok()
+}
+
+/// Productive English compound tails that pair with capitalized proper nouns
+/// (`Oslo-based`, `Covid-related`, `Kenya-grown`, `Beijing-backed`, `NATO-led`)
+/// without matching German capitalized noun endings (`Ausland`, `Vorname`).
+const COMPOUND_SUFFIXES: &[&str] = &[
+    "aligned", "approved", "backed", "based", "born", "bound", "bred", "brokered", "built",
+    "centric", "certified", "compliant", "controlled", "dependent", "designed", "dominated",
+    "driven", "educated", "era", "facing", "financed", "focused", "free", "friendly", "funded",
+    "grown", "headquartered", "hosted", "imposed", "inspired", "intensive", "led", "level",
+    "licensed", "like", "linked", "made", "managed", "mandated", "manufactured", "mediated",
+    "only", "operated", "oriented", "owned", "pegged", "produced", "proof", "ready", "regulated",
+    "related", "resistant", "run", "sanctioned", "scale", "sensitive", "serving", "specific",
+    "sponsored", "style", "subsidized", "supported", "themed", "trained", "wide",
+];
+
+fn is_compound_suffix(word: &str) -> bool {
+    COMPOUND_SUFFIXES.binary_search(&word).is_ok()
 }
 
 /// Counts intra-line words and hyphenated pairs across the same PDF so that a
@@ -783,9 +912,10 @@ impl DocWordCounts {
 }
 
 /// Extract the trailing alphabetic segment immediately before the line-end
-/// hyphen, plus whether that segment is itself preceded by an earlier hyphen
-/// (as in `day-to-` or `like-with-`).
-fn trailing_hyphen_left(previous: &str) -> (String, bool) {
+/// hyphen, whether that segment is itself preceded by an earlier hyphen
+/// (as in `day-to-` or `like-with-`), and whether it began with an uppercase
+/// letter (as in `Oslo-based` or `Covid-related`).
+fn trailing_hyphen_left(previous: &str) -> (String, bool, bool) {
     let without_hyphen = &previous[..previous.len() - previous.chars().next_back().unwrap().len_utf8()];
     let mut start = without_hyphen.len();
     for (idx, ch) in without_hyphen.char_indices().rev() {
@@ -795,12 +925,14 @@ fn trailing_hyphen_left(previous: &str) -> (String, bool) {
             break;
         }
     }
-    let left = without_hyphen[start..].to_lowercase();
+    let raw_left = &without_hyphen[start..];
+    let starts_uppercase = raw_left.chars().next().is_some_and(char::is_uppercase);
+    let left = raw_left.to_lowercase();
     let had_prior_hyphen = without_hyphen[..start]
         .chars()
         .next_back()
         .is_some_and(|ch| matches!(ch, '-' | '\u{2010}' | '\u{2011}'));
-    (left, had_prior_hyphen)
+    (left, had_prior_hyphen, starts_uppercase)
 }
 
 fn leading_alpha_word(line: &str) -> String {
@@ -822,7 +954,7 @@ fn keep_line_break_hyphen(
     if !before_last.is_alphabetic() || !first_char.is_lowercase() {
         return true;
     }
-    let (left, had_prior_hyphen) = trailing_hyphen_left(previous);
+    let (left, had_prior_hyphen, starts_uppercase) = trailing_hyphen_left(previous);
     let right = leading_alpha_word(line);
     if left.is_empty() || right.is_empty() {
         return true;
@@ -866,8 +998,12 @@ fn keep_line_break_hyphen(
         return false;
     }
 
-    // 4. Two standalone English words or productive hyphen prefix + word
-    // (`state-owned`, `well-known`, `anti-corruption`, `like-with-like`).
+    // 4. Two standalone English words, a productive hyphen prefix + word, or a
+    // capitalized proper noun + productive compound suffix (`Oslo-based`,
+    // `Covid-related`, `Kenya-grown`).
+    if starts_uppercase && left.chars().count() >= 2 && is_compound_suffix(&right) {
+        return true;
+    }
     (lexicon.is_common(&left) || is_hyphen_prefix(&left)) && lexicon.is_common(&right)
 }
 
@@ -917,11 +1053,30 @@ fn take_page_offsets(tagged: &str) -> (String, Vec<(usize, usize)>) {
     (content, offsets)
 }
 
+fn is_compound_language(language: Option<&str>) -> bool {
+    matches!(
+        language,
+        Some("de" | "nl" | "fi" | "sv" | "da" | "no" | "is" | "hu" | "tr" | "et")
+    )
+}
+
+#[cfg(test)]
+fn long_word_share(text: &str) -> f64 {
+    long_word_share_for_language(text, None)
+}
+
 /// Share of Latin-script words too long to be one word; 0 for short texts.
 /// Uppercase-heavy tokens (part codes, acronyms) and nucleotide sequences
 /// (DNA/RNA primers in any case) are ignored so technical PDFs are not
-/// mistaken for missing word spaces.
-fn long_word_share(text: &str) -> f64 {
+/// mistaken for missing word spaces. Compound-forming languages use a higher
+/// letter threshold so normal German/Dutch/Nordic nouns are not misread as
+/// glued prose.
+fn long_word_share_for_language(text: &str, language: Option<&str>) -> f64 {
+    let min_letters = if is_compound_language(language) {
+        LONG_WORD_LETTERS_COMPOUND
+    } else {
+        LONG_WORD_LETTERS
+    };
     let mut words = 0usize;
     let mut long = 0usize;
     let mut total_latin_chars = 0usize;
@@ -931,7 +1086,7 @@ fn long_word_share(text: &str) -> f64 {
         words += 1;
         let len = token.chars().count();
         total_latin_chars += len;
-        if len >= LONG_WORD_LETTERS {
+        if len >= min_letters {
             let lower = token.chars().filter(|ch| ch.is_lowercase()).count();
             let is_nucleotide = token
                 .bytes()
@@ -1366,6 +1521,17 @@ mod tests {
     }
 
     #[test]
+    fn german_compound_nouns_do_not_trigger_words_run_together() {
+        let sample = "Die Stabsabteilung Beschaffung informiert alle Einrichtungen der Universität \
+                      Beispielstadt über Neuigkeiten im Beschaffungsnewsletter und die ordentliche \
+                      Mitgliederversammlung sowie das Forschungsdatenzentrum für Bevölkerungsforschung \
+                      und Wissenschaftlerinnen. "
+            .repeat(12);
+        let share = long_word_share_for_language(&sample, Some("de"));
+        assert!(share < OCR_LONG_WORD_SHARE, "share={share}");
+    }
+
+    #[test]
     fn literal_page_heading_text_is_preserved_and_not_parsed_as_page_break() {
         let raw = "--- Page layout ---\nFirst page body.\n--- Page 98 ---\nStill page one.\x0cSecond page body.";
         let attempt = process_pdf_extraction_result(
@@ -1483,5 +1649,55 @@ mod tests {
                 assert!(attempt.content.contains("day-to-day"), "{backend:?}: {}", attempt.content);
             }
         }
+    }
+
+    #[test]
+    fn proper_noun_compounds_keep_hyphen_without_splitting_german_nouns() {
+        assert_eq!(
+            smart_paragraph_cleanup("An Oslo-\nbased and Beijing-\nbacked report on Covid-\nrelated Kenya-\ngrown exports"),
+            "An Oslo-based and Beijing-backed report on Covid-related Kenya-grown exports"
+        );
+        assert_eq!(smart_paragraph_cleanup("NATO-\nled talks"), "NATO-led talks");
+        // Sentence-initial wrapped English words and German capitalized nouns still rejoin.
+        assert_eq!(smart_paragraph_cleanup("Independ-\nently verified"), "Independently verified");
+        assert_eq!(smart_paragraph_cleanup("Im Aus-\nland und Vor-\nname"), "Im Ausland und Vorname");
+        assert!(COMPOUND_SUFFIXES.windows(2).all(|w| w[0] < w[1]), "COMPOUND_SUFFIXES must stay sorted");
+    }
+
+    #[test]
+    fn unpunctuated_long_paragraph_cleanup_stays_linear() {
+        let lines = (0..10_000).map(|i| format!("row {i} value")).collect::<Vec<_>>().join("\n");
+        let started = Instant::now();
+        let cleaned = smart_paragraph_cleanup(&lines);
+        assert!(cleaned.contains("row 9999 value"));
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "smart_paragraph_cleanup took {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn pages_without_text_identifies_blank_and_scanned_pages() {
+        let rich = "A full page of readable text with plenty of words for the threshold. ".repeat(4);
+        // pdftotext terminates every page with \x0c; page 2 is blank, page 4 is sparse.
+        let pdftotext_raw = format!("{rich}\x0c\x0c{rich}\x0cpage 4\x0c");
+        assert_eq!(find_pages_without_text(&pdftotext_raw, Some(4)), vec![2, 4]);
+        // MuPDF joins pages with \x0c (no trailing \x0c).
+        let mupdf_raw = format!("{rich}\x0c\x0c{rich}");
+        assert_eq!(find_pages_without_text(&mupdf_raw, Some(3)), vec![2]);
+    }
+
+    #[test]
+    fn encrypted_pdf_error_classifier_catches_poppler_and_mupdf_messages() {
+        assert!(is_encrypted_pdf_error(&anyhow::anyhow!(
+            "pdftotext exited with exit status: 2: Command Line Error: Incorrect password"
+        )));
+        assert!(is_encrypted_pdf_error(&anyhow::anyhow!(
+            "encrypted PDF (password required)"
+        )));
+        assert!(!is_encrypted_pdf_error(&anyhow::anyhow!(
+            "pdftotext exited with exit status: 1: Syntax Error: Couldn't read xref table"
+        )));
     }
 }

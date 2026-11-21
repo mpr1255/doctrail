@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.4.1 - EPUB, German PDF, performance, and reliability fixes
+
+Hardening release following a 1,200-file mixed-format extraction stress test and audit.
+
+### Extraction fixes
+
+- Fixed EPUB extraction on XHTML chapters with self-closing `<title/>`, `<style/>`, `<script/>`, or `<textarea/>` tags (which caused `html5ever` to swallow the chapter body) and on EPUB-2 archives whose spine references `.xml` chapter files.
+- Raised the long-word threshold for compound-forming languages (German, Dutch, Finnish, Nordic languages, Hungarian, Turkish, Estonian) from 20 to 28 letters so normal compound nouns no longer trigger false `words_run_together` OCR routing.
+- Eliminated quadratic string joining in PDF paragraph cleanup on long unpunctuated tables (cutting a 1,600-page table from ~36 s to ~0.2 s).
+- Password-protected PDFs now fail cleanly as encrypted (`encrypted PDF (password required)`) on both `pdftotext` and MuPDF backends instead of being silently routed to OCR.
+- Preserved hyphens in capitalized proper-noun compounds (`Oslo-based`, `Covid-related`, `Kenya-grown`, `Beijing-backed`, `NATO-led`) without splitting German capitalized nouns or sentence-initial wrapped words.
+- PDF extraction now records `pages_without_text` (1-based page numbers with sparse or blank text layers) alongside `page_count` and `pdf_text_fallback_from` in row metadata.
+- Added a 5-second timeout to the `pdftotext -h` capability probe and skipped MuPDF retries when `pdftotext` itself times out.
+
+### Python API and OCR
+
+- `doctrail.extract.extract_file(path, pdf_engine="auto")` now resolves `pdftotext` via `DOCTRAIL_PDFTOTEXT`, `PATH`, and `/opt/homebrew/bin` / `/usr/local/bin` / `/usr/bin`, matching `doctrail ingest` under minimal cron/launchd `PATH`s, and accepts `pdf_engine="pymupdf"`.
+- `doctrail ingest --ocr-engine plugin` now validates `DOCTRAIL_OCR_PLUGIN` up front before extraction begins instead of failing once per scanned file.
+- Local `ocrmypdf` now probes `tesseract --list-langs` once and falls back from `chi_sim+eng` to `eng` when `chi_sim` is not installed; local OCR failures now surface the underlying tool error.
+
 ## 0.4.0 - native engine in the wheel, PDF fixes, and OCR plugin contract
 
 Every `uv tool install doctrail` now ships the Rust extraction engine in prebuilt wheels (macOS arm64/x86_64 and Linux x86_64/aarch64), removing the old split between a PyPI Python extractor and a source-only Rust build. Because the bundled MuPDF fallback is licensed under AGPL-3.0, the package license is now GNU AGPL-3.0-or-later.

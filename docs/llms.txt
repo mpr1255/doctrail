@@ -202,7 +202,7 @@ def ocr(file_path: str) -> str:
 DOCTRAIL_OCR_PLUGIN=./my_ocr.py doctrail ingest --input-dir ./scans --ocr-engine plugin --yes
 ```
 
-Doctrail passes each scanned file's path to your function and stores the text it returns. Plugin mode never falls back to local OCR: when the plugin raises or returns empty text, the file is recorded as failed so a later run retries it.
+Doctrail passes each scanned file's path to your function and stores the text it returns. Your plugin can be called concurrently up to `--workers`, receives both PDFs and image files (including PNGs extracted from Office documents), and is responsible for its own timeouts. Plugin mode never falls back to local OCR: when the plugin raises or returns empty text, the file is recorded as failed so a later run retries it.
 
 Office files also have embedded images extracted and OCR'd by default. For a routine text-only refresh, use `--skip-embedded-media`; this keeps document text extraction enabled while avoiding LibreOffice conversion processes.
 

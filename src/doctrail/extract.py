@@ -18,18 +18,42 @@ list.
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from typing import Any, Dict, Optional, Union
 
 from .ingest import native_extractor
+from .ingest.ocr import find_pdftotext, require_pdftotext
 
 
 def extract_file(
     path: Union[str, "os.PathLike[str]"],
     *,
     html_config: Optional[Dict[str, Any]] = None,
+    pdf_engine: str = "auto",
 ) -> Dict[str, Any]:
     """Extract text, metadata, OCR signals, and PDF page slices from one file."""
-    doc = native_extractor.extract_one(path, html=html_config)
+    engine = (pdf_engine or "auto").strip().lower()
+    if engine in {"auto", "pdftotext"}:
+        pdf_backend = "pdftotext"
+        pdftotext_bin = (
+            require_pdftotext()
+            if Path(path).suffix.lower() == ".pdf"
+            else find_pdftotext()
+        )
+    elif engine in {"mupdf", "pymupdf"}:
+        pdf_backend = "mupdf"
+        pdftotext_bin = None
+    else:
+        raise ValueError(
+            f"Unknown pdf_engine {pdf_engine!r}; choose auto, pdftotext, or pymupdf."
+        )
+
+    doc = native_extractor.extract_one(
+        path,
+        html=html_config,
+        pdf_backend=pdf_backend,
+        pdftotext=pdftotext_bin,
+    )
     content = doc.get("content") or ""
     metadata = (doc.get("extraction_metadata") or {}).get("content_extraction") or {}
     offsets = metadata.get("page_offsets") or []

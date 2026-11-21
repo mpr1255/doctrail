@@ -241,6 +241,9 @@ def to_result(
         for key in ("page_count", "pdf_text_fallback_from"):
             if content_extraction.get(key) is not None:
                 metadata[key] = content_extraction[key]
+        pages_without_text = content_extraction.get("pages_without_text")
+        if isinstance(pages_without_text, list) and pages_without_text:
+            metadata["pages_without_text"] = pages_without_text
     metadata = {k: v for k, v in metadata.items() if v is not None}
 
     return {

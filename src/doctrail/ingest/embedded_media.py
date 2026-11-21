@@ -46,7 +46,7 @@ _IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".tif", ".tiff", ".e
 _LEGACY_CONVERT_TARGET = {".doc": "docx", ".xls": "xlsx", ".ppt": "pptx"}
 _OOXML_SUFFIXES = {".docx", ".xlsx", ".pptx"}
 
-# OCR-able raster formats (the farm / textra path). EMF/WMF are vector and skipped.
+# OCR-able raster formats. EMF/WMF are vector and skipped.
 _OCRABLE_SUFFIXES = {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".tif", ".tiff"}
 MAX_MEDIA_ENTRIES = 5_000
 MAX_MEDIA_MEMBER_BYTES = 100 * 1024 * 1024

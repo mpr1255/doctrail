@@ -1124,3 +1124,94 @@ def test_concurrent_extract_one_respects_per_call_pdf_backend(native_enabled):
     with ThreadPoolExecutor(max_workers=6) as pool:
         results = list(pool.map(run_one, backends))
     assert all(requested == actual for requested, actual in results), results
+
+
+def test_extract_file_finds_pdftotext_on_minimal_path_and_supports_pymupdf(native_enabled, monkeypatch):
+    from doctrail.extract import extract_file
+
+    fixture = Path(__file__).parent / "assets" / "files" / "federalist_fixture.pdf"
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+    monkeypatch.delenv("DOCTRAIL_PDFTOTEXT", raising=False)
+
+    doc_auto = extract_file(fixture)
+    assert doc_auto["status"] == "extracted"
+    assert "Federalist fixture" in doc_auto["content"]
+    assert doc_auto["extraction_metadata"]["content_extraction"]["pdf_text_backend"] == "pdftotext"
+    assert doc_auto["pages"]
+
+    doc_mupdf = extract_file(fixture, pdf_engine="pymupdf")
+    assert doc_mupdf["status"] == "extracted"
+    assert doc_mupdf["extraction_metadata"]["content_extraction"]["pdf_text_backend"] == "mupdf"
+
+
+@pytest.mark.asyncio
+async def test_ingest_plugin_mode_fails_fast_when_plugin_missing(tmp_path, native_enabled, monkeypatch):
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "doc.txt").write_text("plain text document", encoding="utf-8")
+    monkeypatch.delenv("DOCTRAIL_OCR_PLUGIN", raising=False)
+    monkeypatch.delenv("DOCTRAIL_MAC_OCR_CLIENT_PATH", raising=False)
+
+    with pytest.raises(RuntimeError, match="DOCTRAIL_OCR_PLUGIN"):
+        await process_ingest(
+            db_path=str(tmp_path / "fail_fast.db"),
+            input_dir=str(source),
+            table="documents",
+            ocr_engine="plugin",
+            workers=1,
+            yes=True,
+        )
+
+
+def test_to_result_and_clean_metadata_preserve_pdf_page_diagnostics():
+    from doctrail.ingest.database import clean_metadata
+
+    doc = {
+        "source_format": "pdf",
+        "extraction_method": "pdftotext_smart_paragraphs",
+        "content": "Page one body text.",
+        "extraction_metadata": {
+            "content_extraction": {
+                "page_count": 3,
+                "pages_without_text": [2],
+                "pdf_text_fallback_from": "pdftotext",
+            }
+        },
+        "extraction_ms": 12,
+    }
+    res = native_extractor.to_result("/tmp/sample.pdf", "0" * 40, doc)
+    cleaned = clean_metadata(res["metadata"])
+    assert cleaned["page_count"] == 3
+    assert cleaned["pages_without_text"] == [2]
+    assert cleaned["pdf_text_fallback_from"] == "pdftotext"
+
+
+@pytest.mark.asyncio
+async def test_ocrmypdf_language_probe_falls_back_to_eng_and_surfaces_error(tmp_path, monkeypatch):
+    from doctrail.ingest import ocr as ocr_mod
+
+    monkeypatch.setattr(ocr_mod, "_TESSERACT_LANGS_CACHE", None)
+    monkeypatch.setattr(ocr_mod.shutil, "which", lambda name: f"/usr/bin/{name}")
+
+    class FakeRun:
+        def __init__(self, returncode, stdout="", stderr=""):
+            self.returncode = returncode
+            self.stdout = stdout
+            self.stderr = stderr
+
+    def fake_run(cmd, **kwargs):
+        if "--list-langs" in cmd:
+            return FakeRun(0, stdout="List of available languages in '/usr/share/tessdata/':\neng\nosd\n")
+        return FakeRun(1, stderr="ocrmypdf: synthetic failure detail")
+
+    monkeypatch.setattr(ocr_mod.subprocess, "run", fake_run)
+    assert ocr_mod._ocrmypdf_language_arg() == "eng"
+
+    with pytest.raises(RuntimeError, match="synthetic failure detail"):
+        await ocr_mod.run_ocr(
+            str(tmp_path / "scan.pdf"),
+            "0" * 40,
+            ocr_engine="ocrmypdf",
+            is_pdf=True,
+        )
+    monkeypatch.setattr(ocr_mod, "_TESSERACT_LANGS_CACHE", None)

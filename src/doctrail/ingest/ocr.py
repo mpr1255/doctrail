@@ -32,6 +32,9 @@ from loguru import logger
 from .text_processing import clean_ocr_text
 
 _PLUGIN_LOCK = threading.Lock()
+_TESSERACT_LANGS_LOCK = threading.Lock()
+_TESSERACT_LANGS_CACHE: Optional[frozenset[str]] = None
+_LOCAL_OCR_STATE = threading.local()
 
 OCR_PLUGIN_ENV = "DOCTRAIL_OCR_PLUGIN"
 # Legacy env var name kept as a silent fallback for existing scripts and crons.
@@ -206,10 +209,13 @@ def _try_ocr_pdf_with_textra(file_path: str, file_sha1: str) -> Optional[str]:
                 timeout=300,
             )
             if res.returncode != 0:
+                detail = res.stderr.strip()[-300:] or f"exit status {res.returncode}"
+                _record_local_ocr_error(f"mutool convert failed: {detail}")
                 logger.warning(f"mutool convert failed: {res.stderr}")
                 return None
             png_files = sorted(temp_dir.glob("page-*.png"), key=lambda p: int(p.stem.split("-")[1]))
             if not png_files:
+                _record_local_ocr_error("mutool generated no page PNGs")
                 logger.warning("Textra OCR: no PNGs generated from PDF")
                 return None
 
@@ -233,6 +239,7 @@ def _try_ocr_pdf_with_textra(file_path: str, file_sha1: str) -> Optional[str]:
                     non_empty_pages += 1
                     ocr_parts.append(f"\n\n==== Page {i} ====\n\n{text}")
             if failed_pages:
+                _record_local_ocr_error(f"textra failed on page(s) {failed_pages}")
                 logger.warning(
                     f"Textra OCR incomplete for {file_path}: failed page(s) {failed_pages}"
                 )
@@ -241,8 +248,61 @@ def _try_ocr_pdf_with_textra(file_path: str, file_sha1: str) -> Optional[str]:
                 return None
             return "".join(ocr_parts).strip() or None
     except Exception as exc:
+        _record_local_ocr_error(f"textra error: {exc}")
         logger.error(f"Textra OCR error: {exc}")
         return None
+
+
+def _record_local_ocr_error(message: str) -> None:
+    _LOCAL_OCR_STATE.last_error = message
+
+
+def _pop_local_ocr_error() -> Optional[str]:
+    message = getattr(_LOCAL_OCR_STATE, "last_error", None)
+    _LOCAL_OCR_STATE.last_error = None
+    return message
+
+
+def _tesseract_languages() -> frozenset[str]:
+    """Return installed Tesseract language codes, cached for the process."""
+    global _TESSERACT_LANGS_CACHE
+    if _TESSERACT_LANGS_CACHE is not None:
+        return _TESSERACT_LANGS_CACHE
+    with _TESSERACT_LANGS_LOCK:
+        if _TESSERACT_LANGS_CACHE is not None:
+            return _TESSERACT_LANGS_CACHE
+        tesseract = shutil.which("tesseract")
+        if not tesseract:
+            _TESSERACT_LANGS_CACHE = frozenset()
+            return _TESSERACT_LANGS_CACHE
+        try:
+            res = subprocess.run(
+                [tesseract, "--list-langs"],
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+            if res.returncode == 0:
+                lines = [line.strip() for line in res.stdout.splitlines() if line.strip()]
+                langs = frozenset(
+                    line for line in lines if " " not in line and not line.endswith(":")
+                )
+                _TESSERACT_LANGS_CACHE = langs
+                return langs
+        except Exception as exc:
+            logger.debug(f"Could not inspect tesseract languages: {exc}")
+        _TESSERACT_LANGS_CACHE = frozenset()
+        return _TESSERACT_LANGS_CACHE
+
+
+def _ocrmypdf_language_arg() -> str:
+    """Use chi_sim+eng when chi_sim is installed, otherwise eng."""
+    langs = _tesseract_languages()
+    if "chi_sim" in langs and "eng" in langs:
+        return "chi_sim+eng"
+    if "chi_sim" in langs:
+        return "chi_sim"
+    return "eng"
 
 
 def _try_ocr_pdf_with_ocrmypdf(file_path: str, file_sha1: str) -> Optional[str]:
@@ -250,13 +310,14 @@ def _try_ocr_pdf_with_ocrmypdf(file_path: str, file_sha1: str) -> Optional[str]:
     if shutil.which("ocrmypdf") is None:
         return None
 
+    lang_arg = _ocrmypdf_language_arg()
     try:
         with tempfile.TemporaryDirectory(prefix=f"doctrail-ocrmypdf-{file_sha1[:8]}-") as tmp:
             out_pdf = Path(tmp) / "ocr.pdf"
             res = subprocess.run(
                 [
                     "ocrmypdf",
-                    "-l", "chi_sim+eng",
+                    "-l", lang_arg,
                     "--force-ocr",
                     "--output-type", "pdf",
                     str(file_path),
@@ -267,7 +328,9 @@ def _try_ocr_pdf_with_ocrmypdf(file_path: str, file_sha1: str) -> Optional[str]:
                 timeout=1800,
             )
             if res.returncode != 0 or not out_pdf.exists():
-                logger.warning(f"ocrmypdf failed for {file_path}: {res.stderr.strip()[-300:]}")
+                detail = res.stderr.strip()[-300:] or f"exit status {res.returncode}"
+                _record_local_ocr_error(f"ocrmypdf failed: {detail}")
+                logger.warning(f"ocrmypdf failed for {file_path}: {detail}")
                 return None
             from . import native_extractor
 
@@ -275,6 +338,7 @@ def _try_ocr_pdf_with_ocrmypdf(file_path: str, file_sha1: str) -> Optional[str]:
             text = (doc.get("content") or "").strip()
             return text or None
     except Exception as exc:
+        _record_local_ocr_error(f"ocrmypdf error: {exc}")
         logger.warning(f"ocrmypdf error for {file_path}: {exc}")
         return None
 
@@ -293,10 +357,13 @@ def _try_ocr_image_with_textra(file_path: str, file_sha1: str) -> Optional[str]:
                 timeout=180,
             )
             if res.returncode != 0 or not out_txt.exists():
+                detail = res.stderr.strip()[-300:] or f"exit status {res.returncode}"
+                _record_local_ocr_error(f"textra failed: {detail}")
                 return None
             text = out_txt.read_text(encoding="utf-8", errors="ignore").strip()
             return text or None
     except Exception as exc:
+        _record_local_ocr_error(f"textra error: {exc}")
         logger.error(f"Textra image OCR error: {exc}")
         return None
 
@@ -314,9 +381,12 @@ def _try_ocr_image_with_tesseract(file_path: str) -> Optional[str]:
             timeout=120,
         )
     except Exception as exc:
+        _record_local_ocr_error(f"tesseract error: {exc}")
         logger.warning(f"Tesseract image OCR failed for {file_path}: {exc}")
         return None
     if result.returncode != 0:
+        detail = result.stderr.strip()[-300:] or f"exit status {result.returncode}"
+        _record_local_ocr_error(f"tesseract failed: {detail}")
         return None
     return result.stdout.strip() or None
 
@@ -338,35 +408,54 @@ async def run_ocr(
         cleaned = await ocr_with_plugin(file_path)
         return cleaned, "ocr_plugin", "plugin"
 
+    last_error: Optional[str] = None
+
+    def _call_local(fn, *args):
+        _pop_local_ocr_error()
+        text = fn(*args)
+        return text, _pop_local_ocr_error()
+
     if is_pdf:
         if engine in {"auto", "textra"}:
-            text = await asyncio.to_thread(_try_ocr_pdf_with_textra, file_path, file_sha1)
+            text, err = await asyncio.to_thread(_call_local, _try_ocr_pdf_with_textra, file_path, file_sha1)
+            if err:
+                last_error = err
             cleaned = clean_ocr_text(text).strip() if text else ""
             if cleaned:
                 return cleaned, "textra_ocr", "textra"
             if engine == "textra":
-                raise RuntimeError(f"Textra OCR produced no text for {file_path}")
+                suffix = f" ({last_error})" if last_error else ""
+                raise RuntimeError(f"Textra OCR produced no text for {file_path}{suffix}")
         if engine in {"auto", "ocrmypdf"}:
-            text = await asyncio.to_thread(_try_ocr_pdf_with_ocrmypdf, file_path, file_sha1)
+            text, err = await asyncio.to_thread(_call_local, _try_ocr_pdf_with_ocrmypdf, file_path, file_sha1)
+            if err:
+                last_error = err
             cleaned = clean_ocr_text(text).strip() if text else ""
             if cleaned:
                 return cleaned, "ocrmypdf", "ocrmypdf"
             if engine == "ocrmypdf":
-                raise RuntimeError(f"ocrmypdf produced no text for {file_path}")
+                suffix = f" ({last_error})" if last_error else ""
+                raise RuntimeError(f"ocrmypdf produced no text for {file_path}{suffix}")
     else:
         if engine in {"auto", "textra"}:
-            text = await asyncio.to_thread(_try_ocr_image_with_textra, file_path, file_sha1)
+            text, err = await asyncio.to_thread(_call_local, _try_ocr_image_with_textra, file_path, file_sha1)
+            if err:
+                last_error = err
             cleaned = clean_ocr_text(text).strip() if text else ""
             if cleaned:
                 return cleaned, "textra_ocr", "textra"
             if engine == "textra":
-                raise RuntimeError(f"Textra image OCR produced no text for {file_path}")
-        text = await asyncio.to_thread(_try_ocr_image_with_tesseract, file_path)
+                suffix = f" ({last_error})" if last_error else ""
+                raise RuntimeError(f"Textra image OCR produced no text for {file_path}{suffix}")
+        text, err = await asyncio.to_thread(_call_local, _try_ocr_image_with_tesseract, file_path)
+        if err:
+            last_error = err
         cleaned = clean_ocr_text(text).strip() if text else ""
         if cleaned:
             return cleaned, "tesseract_ocr", "tesseract"
 
+    detail = f" Last error: {last_error}." if last_error else ""
     raise RuntimeError(
-        "No local OCR tool could read this file. Install textra/ocrmypdf/tesseract, "
+        f"No local OCR tool could read this file.{detail} Install textra/ocrmypdf/tesseract, "
         f"or pass --ocr-engine plugin with {OCR_PLUGIN_ENV} set."
     )
